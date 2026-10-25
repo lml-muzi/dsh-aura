@@ -23,6 +23,7 @@ export const STAGE_LABELS = {
   intimate: '很亲近',
 }
 export const DEFAULT_THRESHOLDS = { familiar: 10, close: 40, intimate: 80 }
+/** @deprecated 旧版身份段硬上限；身份段预算已统一走 config.soulPromptBudget，此常量仅为导出兼容保留。 */
 export const IDENTITY_BUDGET = 620
 export const PRESENCE_BUDGET = 80
 export const EXPLAIN_LIMIT = 200
@@ -550,10 +551,12 @@ export function renderIdentitySection(soul, config = {}, now = Date.now()) {
     '[END AURA]',
   ].filter(Boolean)
 
-  const budget = clamp(asNumber(config?.soulPromptBudget, 1020), 200, 4000)
-  const identityBudget = Math.min(IDENTITY_BUDGET, Math.max(200, budget - 400))
+  const identityBudget = clamp(asNumber(config?.soulPromptBudget, 1020), 200, 4000)
   return codepointSlice(lines.join('\n'), identityBudget)
 }
+
+/** 身份段构建器的历史别名（等价于 renderIdentitySection）。 */
+export const buildIdentityText = renderIdentitySection
 
 // ---------- 会话判定 ----------
 
@@ -699,19 +702,74 @@ export function installSoul(ctx, { state, log } = {}) {
   logger(`[soul] restored: ${soul.relation.stage} score=${soul.relation.score.toFixed(1)} turns=${soul.relation.turns} events=${soul.memory.events.length}`)
 
   // ③ 落盘（防抖 + 卸载时 flush）
+  // 写 soul.json 之前先尽力做一次版本快照：失败只 warn，绝不阻塞保存。
+  // 自动保存节流到 5 分钟一次，避免每个回合都复制一份；reset 等用户级操作走 force。
   let saveTimer = null
   let closed = false
-  const saveNow = () => {
+  let backupModule = null
+  let backupLoading = false
+  let lastBackupAt = 0
+  const AUTO_BACKUP_INTERVAL_MS = 5 * 60 * 1000
+  const loadBackupModule = () => {
+    if (backupModule || backupLoading) return
+    backupLoading = true
+    import('./backup.js')
+      .then((mod) => {
+        backupModule = mod
+      })
+      .catch((error) => {
+        logger('[soul] 备份模块加载失败（保存继续）:', error instanceof Error ? error.message : error)
+      })
+      .finally(() => {
+        backupLoading = false
+      })
+  }
+  const snapshotBeforeWrite = (reason, { force = false } = {}) => {
+    loadBackupModule()
+    if (!backupModule || typeof backupModule.snapshotSync !== 'function') return
+    const now = Date.now()
+    if (!force && now - lastBackupAt < AUTO_BACKUP_INTERVAL_MS) return
+    lastBackupAt = now
+    try {
+      const result = backupModule.snapshotSync('soul', { reason })
+      if (result && result.ok === false) {
+        logger('[soul] 写盘前备份失败（保存继续）:', result.error || 'unknown')
+      }
+    } catch (error) {
+      logger('[soul] 写盘前备份失败（保存继续）:', error instanceof Error ? error.message : error)
+    }
+  }
+
+  const saveNow = (options = {}) => {
     if (closed) return
     if (saveTimer) {
       clearTimeout(saveTimer)
       saveTimer = null
     }
+    const meta = options && typeof options === 'object' ? options : {}
+    if (!meta.skipBackup) snapshotBeforeWrite(meta.reason || 'autosave', { force: !!meta.force })
     try {
       state?.writeJson?.(FILE, trimForDisk(soul))
     } catch (error) {
       logger('[soul] 写盘失败:', error instanceof Error ? error.message : error)
     }
+  }
+
+  /** 统一保存助手：先 await 一次快照，再落盘。以后 soul_evolve / HTTP 保存都走它。 */
+  const saveWithBackup = async (reason = 'save') => {
+    try {
+      const mod = backupModule || (await import('./backup.js'))
+      backupModule = mod
+      const result = await mod.snapshot('soul', { reason: String(reason || 'save') })
+      if (result && result.ok === false) {
+        logger('[soul] 保存前备份失败（保存继续）:', result.error || 'unknown')
+      }
+      lastBackupAt = Date.now()
+    } catch (error) {
+      logger('[soul] 保存前备份失败（保存继续）:', error instanceof Error ? error.message : error)
+    }
+    saveNow({ reason, skipBackup: true, force: true })
+    return { ok: true }
   }
   const saveSoon = () => {
     if (closed || saveTimer) return
@@ -911,7 +969,48 @@ export function installSoul(ctx, { state, log } = {}) {
     logger('[soul] presence context 注册失败:', error instanceof Error ? error.message : error)
   }
 
-  // ⑦ 对面板/其他模块的 API
+  // ⑦ 备份 API：懒加载避免循环依赖；注册/dispose 都挂在宿主 effect 上。
+  // 这里只给 initBackup 一个最小的 ctx 视图（它只需要 ctx.get('webServer')），
+  // 避免在异步 import 回调里再调用 ctx.effect。
+  let backupApi = null
+  let backupClosed = false
+  const disposeBackup = () => {
+    backupClosed = true
+    try {
+      backupApi?.dispose?.()
+    } catch (error) {
+      logger('[soul] 备份 API 卸载失败:', error instanceof Error ? error.message : error)
+    }
+    backupApi = null
+  }
+  try {
+    if (typeof ctx.effect === 'function') {
+      ctx.effect(() => disposeBackup, 'aura-soul: backup api')
+    }
+    import('./backup.js')
+      .then((mod) => {
+        if (backupClosed) return
+        const backupCtx = {
+          get(name) {
+            try {
+              const found = typeof ctx.get === 'function' ? ctx.get(name) : undefined
+              if (found) return found
+              return name === 'webServer' ? ctx.webServer : undefined
+            } catch {
+              return undefined
+            }
+          },
+        }
+        backupApi = mod.initBackup({ ctx: backupCtx, state, log: logger })
+      })
+      .catch((error) => {
+        logger('[soul] 备份模块加载失败:', error instanceof Error ? error.message : error)
+      })
+  } catch (error) {
+    logger('[soul] 备份 API 注册失败:', error instanceof Error ? error.message : error)
+  }
+
+  // ⑧ 对面板/其他模块的 API
   function snapshot() {
     try {
       const config = readConfig()
@@ -965,7 +1064,7 @@ export function installSoul(ctx, { state, log } = {}) {
       if (scope === 'emotion') {
         const d = defaultsSoul()
         soul.emotion = d.emotion
-        saveNow()
+        saveNow({ reason: 'reset', force: true })
         return { ok: true, scope }
       }
       const d = defaultsSoul()
@@ -978,7 +1077,7 @@ export function installSoul(ctx, { state, log } = {}) {
         meta: { ...d.meta, lastSettleDay: soul.meta?.lastSettleDay || '' },
       }
       Object.assign(soul, d, keep)
-      saveNow()
+      saveNow({ reason: 'reset', force: true })
       logger('[soul] 已重置情绪与主动状态（保留关系与记忆）')
       return { ok: true, scope }
     } catch (error) {
@@ -994,6 +1093,7 @@ export function installSoul(ctx, { state, log } = {}) {
     snapshot,
     saveNow,
     saveSoon,
+    saveWithBackup,
     explain,
     on,
     onUserMessage,

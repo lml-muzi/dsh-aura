@@ -500,9 +500,9 @@ export function findActivePreset(config, userPersonas) {
 const PROMPT_TEXT = {
   zh: {
     roleHeader: '[角色设定]',
+    priorityNote: '以下只描述你说话的方式与你的用户背景，不改变你的身份、边界和事实；与身份段冲突时以身份段为准。',
     profileHeader: '[用户背景]',
     profileDisclaimer: '以下信息描述的是与你对话的用户本人，不是你的身份；不要把用户的职业、技术背景或自述当成你自己的设定。',
-    profileNickname: (n) => `- 昵称：${n}（回复时使用这个称呼）`,
     profileOccupation: (o) => `- 职业：${o}`,
     profileBio: (b) => `- 用户自述：${b}`,
     styleHeader: '[回复风格]',
@@ -547,9 +547,9 @@ const PROMPT_TEXT = {
   },
   en: {
     roleHeader: '[Role]',
+    priorityNote: 'The following only describes how you speak and your user\'s background; it does not change your identity, boundaries, or facts; if it conflicts with the identity section, the identity section wins.',
     profileHeader: '[User profile]',
     profileDisclaimer: 'The information below describes the user you are talking to — it is NOT your own identity; do not treat the user\'s occupation, background or self-description as your persona.',
-    profileNickname: (n) => `- Nickname: ${n} (address the user by this name in replies)`,
     profileOccupation: (o) => `- Occupation: ${o}`,
     profileBio: (b) => `- Self-description: ${b}`,
     styleHeader: '[Reply style]',
@@ -600,7 +600,7 @@ function promptTextOf(config) {
 
 function buildUserProfile(config, T) {
   const lines = []
-  if (config.nickname) lines.push(T.profileNickname(config.nickname))
+  // 昵称不再由人设注入：统一由灵魂的 soulUserNickname 负责，这里只保留用户背景。
   if (config.occupation) lines.push(T.profileOccupation(config.occupation))
   if (config.bio) lines.push(T.profileBio(config.bio))
   return lines.join('\n')
@@ -632,7 +632,7 @@ export function compilePersonaPrompt(config) {
   const behavior = buildBehavior(cfg, T)
   if (!identity && !behavior && !profile) return ''
 
-  const parts = []
+  const parts = [T.priorityNote]
   if (identity) parts.push(`${T.roleHeader} ${identity}`)
   if (profile) parts.push(`${T.profileHeader} ${T.profileDisclaimer}\n${profile}`)
   if (behavior) parts.push(`${T.styleHeader} ${behavior}`)
@@ -774,6 +774,32 @@ function enqueue(state, task) {
   const run = state.queue.then(task)
   state.queue = run.then(() => {}, () => {})
   return run
+}
+
+let backupWarn = (...args) => {
+  try {
+    console.warn('[dsh-aura]', ...args)
+  } catch {
+    // 日志失败不影响保存
+  }
+}
+
+/**
+ * 写 persona.json 之前做一次版本快照。
+ * 备份失败只 warn，不阻塞人设保存；动态 import 避免和 host/backup.js 形成循环依赖。
+ */
+async function snapshotBeforePersonaWrite(reason) {
+  try {
+    const backup = await import('./backup.js')
+    const result = await backup.snapshot('persona', { reason: String(reason || 'persona') })
+    if (result && result.ok === false) {
+      backupWarn('[aura] 人设保存前备份失败（保存继续）:', result.error || 'unknown')
+    }
+    return result
+  } catch (error) {
+    backupWarn('[aura] 人设保存前备份失败（保存继续）:', (error && error.message) || error)
+    return null
+  }
 }
 
 function writeStateFile(state, config, personas) {
@@ -1019,13 +1045,15 @@ function failureResult(state) {
   }
 }
 
-function commitPatch(state, patch, options) {
+async function commitPatch(state, patch, options) {
   if (state.failure) return failureResult(state)
   const next = { ...state.config, ...patch }
   const changes = diffConfig(state.config, next)
   if (Object.keys(changes).length === 0) {
     return { ok: true, config: cloneConfig(state.config), changed: [], unchanged: true }
   }
+
+  await snapshotBeforePersonaWrite((options && options.source) || 'setConfig')
 
   try {
     writeStateFile(state, next, state.personas)
@@ -1085,7 +1113,8 @@ export async function setConfig(rawPatch, options = {}) {
 export async function resetConfig() {
   const state = getState()
   ensureLoaded(state)
-  return enqueue(state, () => {
+  return enqueue(state, async () => {
+    await snapshotBeforePersonaWrite('reset')
     let backupPath = null
     if (state.failure) {
       if (existsSync(state.file)) {
@@ -1133,7 +1162,7 @@ export async function undoTo(index) {
   if (!Number.isInteger(index) || index < 0) {
     return { ok: false, error: 'index 必须是从最新一条起算的非负整数（0 = 最新）' }
   }
-  return enqueue(state, () => {
+  return enqueue(state, async () => {
     if (state.failure) return failureResult(state)
     const list = state.history
     if (list.length === 0) return { ok: false, error: '还没有变更记录' }
@@ -1168,6 +1197,7 @@ export async function undoTo(index) {
       return { ok: true, config: cloneConfig(state.config), changed: [], unchanged: true, reversed: index + 1 }
     }
 
+    await snapshotBeforePersonaWrite('undoTo')
     try {
       writeStateFile(state, next, state.personas)
     } catch (error) {
@@ -1202,7 +1232,7 @@ export async function applyPreset(id) {
   const name = sanitizePersonaName(id)
   if (!name) return { ok: false, error: `预设名称无效（1-${PERSONA_NAME_MAX} 个字符）` }
 
-  return enqueue(state, () => {
+  return enqueue(state, async () => {
     if (state.failure) return failureResult(state)
     const entry = resolvePersona(name, state.personas)
     if (!entry) return { ok: false, error: `预设不存在：${name}` }
@@ -1212,7 +1242,7 @@ export async function applyPreset(id) {
     if (Object.keys(patch).length === 0) {
       return { ok: false, error: `预设「${name}」没有可应用的合法字段`, invalid }
     }
-    const result = commitPatch(state, patch, { source: 'preset', preset: name })
+    const result = await commitPatch(state, patch, { source: 'preset', preset: name })
     return { ...result, preset: name, applied: Object.keys(patch).length, invalid }
   })
 }
@@ -1225,10 +1255,11 @@ export async function savePreset(rawName) {
   if (!name) return { ok: false, error: `预设名称无效（1-${PERSONA_NAME_MAX} 个字符）` }
   if (isBuiltinPersona(name)) return { ok: false, error: `「${name}」是内置预设，请换一个名称` }
 
-  return enqueue(state, () => {
+  return enqueue(state, async () => {
     if (state.failure) return failureResult(state)
     const personas = clonePersonas(state.personas)
     personas[name] = { ...personaSnapshotOf(state.config), updatedAt: new Date().toISOString() }
+    await snapshotBeforePersonaWrite('savePreset')
     try {
       writeStateFile(state, state.config, personas)
     } catch (error) {
@@ -1245,11 +1276,12 @@ export async function deletePreset(id) {
   if (!name) return { ok: false, error: `预设名称无效（1-${PERSONA_NAME_MAX} 个字符）` }
   if (isBuiltinPersona(name)) return { ok: false, error: `「${name}」是内置预设，无法删除` }
 
-  return enqueue(state, () => {
+  return enqueue(state, async () => {
     if (state.failure) return failureResult(state)
     if (!hasOwn(state.personas, name)) return { ok: false, error: `预设不存在：${name}` }
     const personas = clonePersonas(state.personas)
     delete personas[name]
+    await snapshotBeforePersonaWrite('deletePreset')
     try {
       writeStateFile(state, state.config, personas)
     } catch (error) {
@@ -1264,11 +1296,11 @@ export async function deletePreset(id) {
 export async function confirmPendingProposal() {
   const state = getState()
   ensureLoaded(state)
-  return enqueue(state, () => {
+  return enqueue(state, async () => {
     if (state.failure) return failureResult(state)
     const proposal = state.pendingProposal
     if (!proposal) return { ok: false, error: '没有待确认的人设提议' }
-    const result = commitPatch(state, { ...proposal.changes }, { source: 'tool' })
+    const result = await commitPatch(state, { ...proposal.changes }, { source: 'tool' })
     if (result.ok) state.pendingProposal = null
     return result
   })
@@ -1787,7 +1819,7 @@ function createWebRegistration(ctx, warn) {
           }
           json(res, 200, {
             ok: true,
-            prompt: compilePersonaPrompt(draft),
+            prompt: compilePersonaPrompt({ ...draft, enabled: true }),
             enabled: draft.enabled,
             invalid,
           })
@@ -1841,6 +1873,7 @@ export function initPersona({ ctx, state, log } = {}) {
     }
   }
 
+  backupWarn = warn
   const boot = getState()
   ensureLoaded(boot)
   if (boot.failure) warn('[aura] 人设配置损坏：', describeFailure(boot.failure))
@@ -1852,6 +1885,16 @@ export function initPersona({ ctx, state, log } = {}) {
     else if (value && typeof value.dispose === 'function') disposers.push(() => value.dispose())
   }
 
+  // 灵魂总开关每次求值：人设只是灵魂的「表达方式」层，灵魂关掉时不注入。
+  const readSoulDisabled = () => {
+    try {
+      const config = typeof state?.readConfig === 'function' ? state.readConfig() : null
+      return !!config && config.soulEnabled === false
+    } catch {
+      return false
+    }
+  }
+
   // 1) system prompt 注入：section 优先，宿主没有 section 时用 context。order=25。
   try {
     const promptApi = ctx && ctx.systemPrompt
@@ -1861,6 +1904,8 @@ export function initPersona({ ctx, state, log } = {}) {
       interpolate: false,
       text: () => {
         try {
+          if (readSoulDisabled()) return ''
+          // enabled 由面板随灵魂总开关一起镜像保存；首次未保存前保持关闭，避免默认风格劫持。
           return compilePersonaPrompt(getConfig())
         } catch (error) {
           warn('[aura] 人设提示词渲染失败:', (error && error.message) || error)

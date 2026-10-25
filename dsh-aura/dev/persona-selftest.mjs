@@ -3,7 +3,7 @@
  *   node dsh-aura/dev/persona-selftest.mjs
  *
  * 用临时 HOME / DSH_HOME 隔离，不读写真实的人设配置：
- *   默认值 / sanitize 拒绝非法值 / 提示词 zh/en 差异 / 预设应用不动身份 /
+ *   默认值 / sanitize 拒绝非法值 / 提示词 zh/en 差异（昵称不再注入）/ 灵魂关闭不注入 /
  *   历史撤销 / 损坏配置 .corrupt 备份与拒写逃生 / set_persona 审批与待确认提议 /
  *   HTTP 路由 / system prompt 注入段。
  */
@@ -140,9 +140,20 @@ await test('zh/en 文案不同，且自定义指令与用户背景都进入提�
     bio: '喜欢听歌',
   })
   assert.ok(profile.includes('[用户背景]'))
-  assert.ok(profile.includes('昵称：木子'))
+  assert.ok(!profile.includes('木子'))
+  assert.ok(!profile.includes('昵称'))
   assert.ok(profile.includes('职业：测试工程师'))
   assert.ok(profile.includes('用户自述：喜欢听歌'))
+
+  // 表达层优先级说明：中文/英文各一份，且位于提示词开头（身份段由灵魂负责）。
+  assert.ok(zh.startsWith('以下只描述你说话的方式与你的用户背景'))
+  assert.ok(zh.includes('与身份段冲突时以身份段为准'))
+  assert.ok(en.startsWith('The following only describes how you speak'))
+  assert.ok(en.includes('identity section wins'))
+
+  // 只填昵称：不再产生任何昵称文案。
+  const nicknameOnly = persona.compilePersonaPrompt({ ...base, language: 'zh', nickname: '木子', occupation: '', bio: '' })
+  assert.ok(!nicknameOnly.includes('木子'))
 
   assert.equal(persona.compilePersonaPrompt({ ...base, enabled: false }), '')
 })
@@ -150,6 +161,13 @@ await test('zh/en 文案不同，且自定义指令与用户背景都进入提�
 section('4. initPersona / 注入段 / 路由 / 工具注册')
 const captured = { sections: [], routes: null, tools: [], effects: 0 }
 let approvalService = null
+// 模拟 Host 配置：section 文本每次求值都会读一次，便于验证灵魂总开关。
+const soulState = {
+  soulEnabled: true,
+  readConfig() {
+    return { soulEnabled: soulState.soulEnabled }
+  },
+}
 
 const fakeCtx = {
   systemPrompt: {
@@ -179,7 +197,7 @@ const fakeCtx = {
   },
 }
 
-const instance = persona.initPersona({ ctx: fakeCtx, state: null, log: () => {} })
+const instance = persona.initPersona({ ctx: fakeCtx, state: soulState, log: () => {} })
 
 await test('返回 { dispose, getConfig, setConfig, snapshot, compilePrompt }', () => {
   assert.equal(typeof instance.dispose, 'function')
@@ -197,6 +215,19 @@ await test('system prompt 注入段 order=25 且与编译器同源', () => {
   assert.equal(section.order, 25)
   assert.equal(section.interpolate, false)
   assert.equal(section.text(), persona.compilePersonaPrompt(persona.getConfig()))
+})
+
+await test('soulEnabled=false 时 section 文本为空，灵魂恢复后重新注入', async () => {
+  const enabled = await persona.setConfig({ enabled: true })
+  assert.equal(enabled.ok, true)
+  assert.ok(persona.compilePersonaPrompt(persona.getConfig()).length > 0)
+  soulState.soulEnabled = false
+  assert.equal(captured.sections[0].text(), '')
+  // 编译器本身不受灵魂开关影响（/preview 仍可预览）。
+  assert.ok(persona.compilePersonaPrompt(persona.getConfig()).length > 0)
+  soulState.soulEnabled = true
+  assert.ok(captured.sections[0].text().length > 0)
+  await persona.setConfig({ enabled: false })
 })
 
 await test('HTTP 注册为 /dsh-aura/persona-api 前缀；set_persona 工具已注册', () => {

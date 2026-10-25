@@ -235,7 +235,7 @@ window.__ModuleLoader__.load({
       'error.load': '读取状态失败',
       'error.connect': '连接失败',
       'loading': '正在读取状态…',
-      'note.footer': '表情图片由 dsh_im_return_file 在正文之前作为原生图片发送；每条入站消息最多回复 5 条；被动回复窗口过期后，主动消息可能被平台拒绝。',
+      'note.footer': '表情包由 send_meme 选图：QQ 端用 dsh_im_return_file 发原生图片，网页端用 [表情: 描述] 内联渲染；每条入站消息最多回复 5 条；被动回复窗口过期后主动消息可能被拒绝。',
       'section.appearance': '外观',
       'row.displayName': '显示名',
       'row.displayName.hint': '左侧栏入口和面板标题都用这个名字（1–24 字）',
@@ -270,6 +270,10 @@ window.__ModuleLoader__.load({
       'row.soulBudget': '提示词预算',
       'soul.budgetValue': '约 {n} 字（软上限）',
       'soul.budgetUnknown': '未设置',
+      'soul.budgetHint': '身份段上限 = {n} 字',
+      'section.expression': '表达方式',
+      'section.expression.hint': '这是你说话的方式，不改变身份与边界；跟上面的灵魂开关一起生效',
+      'section.trail': '光轨',
       'soul.identityName': '自我认知名字',
       'button.soulSave': '保存灵魂设置',
       'notice.soulSaved': '灵魂设置已保存',
@@ -432,7 +436,7 @@ window.__ModuleLoader__.load({
       'error.load': 'Could not read status',
       'error.connect': 'Connection failed',
       'loading': 'Reading status…',
-      'note.footer': 'Sticker images are sent by dsh_im_return_file as native images before the text; each inbound message gets at most 5 replies; once the passive-reply window closes, proactive messages may be rejected by the platform.',
+      'note.footer': 'Stickers are picked by send_meme: on QQ, dsh_im_return_file sends native images; on the web, [表情: 描述] renders inline; each inbound message gets at most 5 replies; once the passive-reply window closes, proactive messages may be rejected.',
       'section.appearance': 'Appearance',
       'row.displayName': 'Display name',
       'row.displayName.hint': 'Shown on the sidebar entry and as the panel title (1–24 chars)',
@@ -467,6 +471,10 @@ window.__ModuleLoader__.load({
       'row.soulBudget': 'Prompt budget',
       'soul.budgetValue': 'about {n} chars (soft cap)',
       'soul.budgetUnknown': 'not set',
+      'soul.budgetHint': 'Identity section cap = {n} chars',
+      'section.expression': 'Expression',
+      'section.expression.hint': 'How you speak; this does not change identity or boundaries, and it takes effect together with the soul switch above',
+      'section.trail': 'Light trail',
       'soul.identityName': 'Self-name',
       'button.soulSave': 'Save soul settings',
       'notice.soulSaved': 'Soul settings saved',
@@ -1137,6 +1145,7 @@ ${TRAIL_CSS}
         soulUserNickname: typeof cfg.soulUserNickname === 'string' ? cfg.soulUserNickname.trim().slice(0, 20) : '',
         soulEnabled: cfg.soulEnabled !== false,
         soulHonestyLine: cfg.soulHonestyLine !== false,
+        soulPromptBudget: clampInt(cfg.soulPromptBudget, 200, 4000, 1020),
       }
     }
 
@@ -1293,8 +1302,6 @@ ${TRAIL_CSS}
     function buildPersonaForm(config) {
       const cfg = asObject(config)
       return {
-        enabled: cfg.enabled !== false,
-        nickname: personaText(cfg.nickname, 50),
         occupation: personaText(cfg.occupation, 50),
         bio: personaText(cfg.bio, 500),
         style: personaOption(cfg.style, PERSONA_STYLES, 'professional'),
@@ -1695,11 +1702,11 @@ ${TRAIL_CSS}
         return () => clearTimeout(timer)
       }, [tab, memeQuery, memeTag, loadMemes])
 
+      /* 首次挂载就和 /api/state 一起拉取人设，之后只在保存/预设操作后主动刷新，避免切 tab 覆盖草稿。 */
       React.useEffect(() => {
-        if (tab !== 'persona') return undefined
         void loadPersona(true)
         return undefined
-      }, [tab, loadPersona])
+      }, [loadPersona])
 
       const toggleMemePack = async pack => {
         const packId = String((pack && pack.id) || '')
@@ -1907,9 +1914,9 @@ ${TRAIL_CSS}
       }
 
       /* ---------------- 人设操作 ---------------- */
+      /* 昵称只留灵魂层的 soulUserNickname；启用人设跟随灵魂开关。 */
       const personaPayload = () => ({
-        enabled: personaForm.enabled === true,
-        nickname: personaForm.nickname.trim(),
+        enabled: soulForm.soulEnabled === true,
         occupation: personaForm.occupation.trim(),
         bio: personaForm.bio.trim(),
         style: personaForm.style,
@@ -2266,18 +2273,57 @@ ${TRAIL_CSS}
         return (start && minutesOf(start) === null) || (end && minutesOf(end) === null)
       }
 
-      const saveSoul = () => {
+      /**
+       * 灵魂 tab 的统一保存：灵魂字段走 /config，表达方式走 persona-api。
+       * 两边都成功才对草稿基线并提示成功；任一边失败都保持 dirty，等用户重试。
+       */
+      const saveSoul = async () => {
+        if (blockBusy('soul') || personaBusy) return
         const name = soulForm.soulName.trim().slice(0, 20)
         if (!name) {
           setBlock('soul', { busy: false, notice: '', error: t('error.soulName') })
           return
         }
-        void saveBlock('soul', {
+        const soulPayload = {
           soulName: name,
           soulUserNickname: soulForm.soulUserNickname.trim().slice(0, 20),
           soulEnabled: soulForm.soulEnabled === true,
           soulHonestyLine: soulForm.soulHonestyLine === true,
-        }, 'notice.soulSaved')
+          soulPromptBudget: clampInt(soulForm.soulPromptBudget, 200, 4000, 1020),
+        }
+        setBlock('soul', { busy: true, error: '', notice: '' })
+        setPersonaError('')
+        setPersonaNotice('')
+        let nextSoul = null
+        let nextPersona = null
+        try {
+          const soulValue = await api('/config', soulPayload)
+          if (!mounted.current) return
+          nextSoul = (soulValue && soulValue.config) || null
+          if (nextSoul && !payloadApplied(nextSoul, soulPayload)) {
+            throw new Error(t('notice.configNotApplied'))
+          }
+          const personaValue = await fetchJson(PERSONA_API + '/save', {
+            config: { ...personaPayload(), enabled: soulForm.soulEnabled === true },
+          })
+          if (!mounted.current) return
+          nextPersona = (personaValue && personaValue.config) || null
+          notifyPersonaSaved()
+          if (nextSoul) {
+            mergeConfig(nextSoul)
+            setAppearance(nextSoul)
+            syncDrafts(nextSoul, false)
+            syncSoul(nextSoul, true)
+          }
+          if (nextPersona) applyPersonaConfig(nextPersona)
+          flashBlock('soul', t('notice.soulSaved'))
+          await loadPersona(true)
+        } catch (error) {
+          if (mounted.current) failBlock('soul', error)
+        } finally {
+          if (mounted.current) setBlock('soul', { busy: false })
+        }
+        if (nextPersona && personaPreviewOpen) void refreshPersonaPreview(nextPersona, true)
       }
 
       const saveEmotion = () => {
@@ -2433,7 +2479,6 @@ ${TRAIL_CSS}
       const timeline = timelineAll.slice(0, 20)
       const speakLastAt = timeOf(speakState.lastAt) || timeOf(legacyProactive.lastAt) || timeOf(legacyProactive.lastProactiveAt)
       const speakTodayCount = Number(speakState.todayCount) || 0
-      const soulBudget = clampInt(config.soulPromptBudget, 0, 100000, 0)
       const soulDirty = draftKey(soulForm) !== draftKey(soulBaseline)
       const emotionDirty = draftKey(emotionForm) !== draftKey(emotionBaseline)
       const speakDirty = draftKey(speakForm) !== draftKey(speakBaseline)
@@ -2698,6 +2743,28 @@ ${TRAIL_CSS}
             }),
           }),
           h(Row, {
+            label: '职业',
+            hint: '用于贴合你的背景，不代表她的身份',
+            control: h('input', {
+              className: 'qqn-input',
+              value: personaForm.occupation,
+              maxLength: 50,
+              spellCheck: false,
+              onChange: event => setPersonaForm(previous => ({ ...previous, occupation: event.target.value })),
+            }),
+          }),
+          h(Row, {
+            label: '介绍',
+            hint: '关于你的补充说明（≤500 字）',
+            control: h('textarea', {
+              className: 'qqn-input aura-persona-textarea',
+              rows: 3,
+              maxLength: 500,
+              value: personaForm.bio,
+              onChange: event => setPersonaForm(previous => ({ ...previous, bio: event.target.value })),
+            }),
+          }),
+          h(Row, {
             label: t('row.soulEnabled'),
             hint: t('row.soulEnabled.hint'),
             control: h('input', {
@@ -2719,18 +2786,19 @@ ${TRAIL_CSS}
           }),
           h(Row, {
             label: t('row.soulBudget'),
-            control: h('span', { className: 'qqn-unit' }, soulBudget ? t('soul.budgetValue', { n: soulBudget }) : t('soul.budgetUnknown')),
+            hint: t('soul.budgetHint', { n: clampInt(soulForm.soulPromptBudget, 200, 4000, 1020) }),
+            control: h('input', {
+              className: 'qqn-input qqn-input-narrow',
+              type: 'number',
+              min: 200,
+              max: 4000,
+              step: 10,
+              value: soulForm.soulPromptBudget,
+              onChange: event => setSoulForm(prev => ({ ...prev, soulPromptBudget: event.target.value })),
+            }),
           }),
           soulPresent ? null : h('div', { className: 'qqn-mood-empty' }, t('empty.soulPending')),
         ),
-        h('div', { className: 'qqn-actions' },
-          h(Button, {
-            variant: 'primary',
-            disabled: blockInfo('soul').busy || !soulDirty,
-            onClick: saveSoul,
-          }, blockInfo('soul').busy ? t('busy.save') : t('button.soulSave')),
-        ),
-        blockFeedback('soul'),
       )
 
       const emotionSection = h(Section, { title: t('section.emotion') },
@@ -3281,7 +3349,7 @@ ${TRAIL_CSS}
           : null,
       )
 
-      /* ---------------- 人设 tab ---------------- */
+      /* ---------------- 人设片段（已并入灵魂 tab） ---------------- */
       const personaData = asObject(persona)
       const personaConfigError = typeof personaData.configError === 'string' ? personaData.configError : ''
       const personaPresetOptions = buildPresetList(personaData)
@@ -3292,7 +3360,8 @@ ${TRAIL_CSS}
         ? h('div', { className: 'qqn-feedback qqn-feedback-error', role: 'status', 'aria-live': 'polite' }, personaError)
         : (personaNotice ? h('div', { className: 'qqn-feedback', role: 'status', 'aria-live': 'polite' }, personaNotice) : null)
       const personaSection = h(React.Fragment, null,
-        h(Section, { title: '人设' },
+        h(Section, { title: t('section.expression') },
+          h('div', { className: 'qqn-row-hint', style: { marginTop: 0, marginBottom: 8 } }, t('section.expression.hint')),
           personaConfigError
             ? h('div', { className: 'qqn-error' }, '人设配置有问题：' + personaConfigError)
             : null,
@@ -3300,49 +3369,6 @@ ${TRAIL_CSS}
             ? h('div', { className: 'qqn-loading' }, '正在读取人设…')
             : null,
           h('div', { className: 'qqn-rows' },
-            h(Row, {
-              label: '启用人设',
-              hint: '关闭后不注入人设提示词',
-              control: h('input', {
-                className: 'qqn-checkbox',
-                type: 'checkbox',
-                checked: personaForm.enabled === true,
-                onChange: event => setPersonaForm(previous => ({ ...previous, enabled: event.target.checked })),
-              }),
-            }),
-            h(Row, {
-              label: '昵称',
-              hint: '她怎么称呼你；留空则用「你」',
-              control: h('input', {
-                className: 'qqn-input',
-                value: personaForm.nickname,
-                maxLength: 50,
-                spellCheck: false,
-                onChange: event => setPersonaForm(previous => ({ ...previous, nickname: event.target.value })),
-              }),
-            }),
-            h(Row, {
-              label: '职业',
-              hint: '用于贴合你的背景，不代表她的身份',
-              control: h('input', {
-                className: 'qqn-input',
-                value: personaForm.occupation,
-                maxLength: 50,
-                spellCheck: false,
-                onChange: event => setPersonaForm(previous => ({ ...previous, occupation: event.target.value })),
-              }),
-            }),
-            h(Row, {
-              label: '介绍',
-              hint: '关于你的补充说明（≤500 字）',
-              control: h('textarea', {
-                className: 'qqn-input aura-persona-textarea',
-                rows: 3,
-                maxLength: 500,
-                value: personaForm.bio,
-                onChange: event => setPersonaForm(previous => ({ ...previous, bio: event.target.value })),
-              }),
-            }),
             h(Row, {
               label: '回复风格',
               hint: '影响语气和用词',
@@ -3382,50 +3408,7 @@ ${TRAIL_CSS}
                 onChange: event => setPersonaForm(previous => ({ ...previous, customInstructions: event.target.value })),
               }),
             }),
-            h(Row, {
-              label: '光轨动画',
-              hint: '聊天里流动的光轨',
-              control: h('input', {
-                className: 'qqn-checkbox',
-                type: 'checkbox',
-                checked: personaForm.trailEnabled === true,
-                onChange: event => setPersonaForm(previous => ({ ...previous, trailEnabled: event.target.checked })),
-              }),
-            }),
-            h(Row, {
-              label: '光轨颜色',
-              control: h('div', { className: 'aura-persona-inline' },
-                h('input', {
-                  type: 'color',
-                  className: 'aura-persona-color',
-                  value: personaForm.trailColor,
-                  'aria-label': '光轨颜色',
-                  onChange: event => setPersonaForm(previous => ({ ...previous, trailColor: personaColorOf(event.target.value) })),
-                }),
-                h('span', { className: 'qqn-unit' }, personaForm.trailColor),
-              ),
-            }),
-            h(Row, {
-              label: '光轨速度',
-              control: selectField(PERSONA_TRAIL_SPEEDS, personaForm.trailSpeed, value => setPersonaForm(previous => ({ ...previous, trailSpeed: value })), '光轨速度'),
-            }),
-            h(Row, {
-              label: '光轨粗细',
-              control: selectField(PERSONA_TRAIL_WIDTHS, personaForm.trailWidth, value => setPersonaForm(previous => ({ ...previous, trailWidth: value })), '光轨粗细'),
-            }),
           ),
-          h('div', { className: 'qqn-actions' },
-            h(Button, {
-              variant: 'primary',
-              disabled: personaBusy !== '' || !personaDirty,
-              onClick: () => void savePersona(),
-            }, personaBusy === 'save' ? '保存中…' : '保存人设'),
-            h(Button, {
-              disabled: personaBusy !== '',
-              onClick: () => void resetPersona(),
-            }, personaBusy === 'reset' ? '重置中…' : '重置'),
-          ),
-          personaFeedback,
         ),
         h(Section, {
           title: '预设',
@@ -3504,6 +3487,54 @@ ${TRAIL_CSS}
                     : h('div', { className: 'qqn-mood-empty' }, '当前还没有可预览的提示词')))
             : h('div', { className: 'qqn-mood-empty' }, '展开后可查看当前表单编译出的提示词'),
         ),
+        h(Section, { title: t('section.trail') },
+          h('div', { className: 'qqn-rows' },
+            h(Row, {
+              label: '光轨动画',
+              hint: '聊天里流动的光轨；跟上面的灵魂开关一起生效',
+              control: h('input', {
+                className: 'qqn-checkbox',
+                type: 'checkbox',
+                checked: personaForm.trailEnabled === true,
+                onChange: event => setPersonaForm(previous => ({ ...previous, trailEnabled: event.target.checked })),
+              }),
+            }),
+            h(Row, {
+              label: '光轨颜色',
+              control: h('div', { className: 'aura-persona-inline' },
+                h('input', {
+                  type: 'color',
+                  className: 'aura-persona-color',
+                  value: personaForm.trailColor,
+                  'aria-label': '光轨颜色',
+                  onChange: event => setPersonaForm(previous => ({ ...previous, trailColor: personaColorOf(event.target.value) })),
+                }),
+                h('span', { className: 'qqn-unit' }, personaForm.trailColor),
+              ),
+            }),
+            h(Row, {
+              label: '光轨速度',
+              control: selectField(PERSONA_TRAIL_SPEEDS, personaForm.trailSpeed, value => setPersonaForm(previous => ({ ...previous, trailSpeed: value })), '光轨速度'),
+            }),
+            h(Row, {
+              label: '光轨粗细',
+              control: selectField(PERSONA_TRAIL_WIDTHS, personaForm.trailWidth, value => setPersonaForm(previous => ({ ...previous, trailWidth: value })), '光轨粗细'),
+            }),
+          ),
+        ),
+        h('div', { className: 'qqn-actions' },
+          h(Button, {
+            variant: 'primary',
+            disabled: blockInfo('soul').busy || personaBusy !== '' || !(soulDirty || personaDirty),
+            onClick: () => void saveSoul(),
+          }, blockInfo('soul').busy ? t('busy.save') : t('button.soulSave')),
+          h(Button, {
+            disabled: blockInfo('soul').busy || personaBusy !== '',
+            onClick: () => void resetPersona(),
+          }, personaBusy === 'reset' ? '重置中…' : '重置'),
+        ),
+        blockFeedback('soul'),
+        personaFeedback,
       )
 
       const tabDefs = [
@@ -3511,7 +3542,6 @@ ${TRAIL_CSS}
         ['emotion', '情绪'],
         ['memory', '记忆'],
         ['meme', '表情包'],
-        ['persona', '人设'],
         ['speak', '主动'],
         ['appearance', '外观'],
         ['connect', '连接'],
@@ -3534,11 +3564,10 @@ ${TRAIL_CSS}
               header,
               pollError ? h('div', { className: 'qqn-error' }, t('error.load') + '：' + pollError) : null,
               tabNav,
-              tab === 'soul' ? soulSection : null,
+              tab === 'soul' ? h(React.Fragment, null, soulSection, personaSection) : null,
               tab === 'emotion' ? h(React.Fragment, null, emotionSection, relationSection) : null,
               tab === 'memory' ? memorySection : null,
               tab === 'meme' ? memeSection : null,
-              tab === 'persona' ? personaSection : null,
               tab === 'speak' ? speakSection : null,
               tab === 'appearance' ? appearanceSection : null,
               tab === 'connect' ? h(React.Fragment, null,
@@ -3606,11 +3635,12 @@ ${TRAIL_CSS}
       return allowed.includes(text) ? text : fallback
     }
 
-    /** 从 /dsh-aura/persona-api/state 的 payload 取光轨四项；取不到就退回默认。 */
-    function trailConfigOf(payload) {
+    /** 从 persona payload 取光轨四项；灵魂总开关关闭时整体不显示。 */
+    function trailConfigOf(payload, soulPayload) {
       const data = payload && typeof payload === 'object' ? payload : null
       const cfg = data && data.config && typeof data.config === 'object' ? data.config : null
-      if (!cfg) return TRAIL_DEFAULT_CONFIG
+      const soulEnabled = !(soulPayload && soulPayload.config && soulPayload.config.soulEnabled === false)
+      if (!cfg || !soulEnabled) return { ...TRAIL_DEFAULT_CONFIG, enabled: false }
       return {
         enabled: cfg.trailEnabled !== false,
         color: safeTrailColor(cfg.trailColor),
@@ -3819,8 +3849,11 @@ ${TRAIL_CSS}
         let alive = true
         const refresh = async () => {
           try {
-            const value = await fetchJson(PERSONA_API + '/state')
-            if (alive) setTrail(trailConfigOf(value))
+            const [value, soulValue] = await Promise.all([
+              fetchJson(PERSONA_API + '/state'),
+              fetchJson('/dsh-aura/api/state'),
+            ])
+            if (alive) setTrail(trailConfigOf(value, soulValue))
           } catch {
             // 取不到就保持默认配置，安静不报错
           }
