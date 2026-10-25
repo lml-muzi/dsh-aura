@@ -1,0 +1,6 @@
+# dsh-aura：自研 QQ 渠道 + 拟人陪伴，一个 bundle 包含 Host 与 Client。
+# 纯 insert 可热挂载；QQ 凭据与运行配置存在 $DSH_HOME/dsh-aura/config.json，
+# 由左侧栏面板写入，不在 patch 里写死。
+- insert:
+    - id: dsh-aura
+      name: dsh-aura

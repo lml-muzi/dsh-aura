@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "title": "Aura",
+    "description": "有灵魂的陪伴层：自研 QQ 渠道、情绪与主动搭话、可自定义左侧栏名字与图标，一个 bundle 全套。"
+  },
+  "panel": {
+    "title": "Aura",
+    "statusOnline": "已连接",
+    "statusOffline": "未连接",
+    "statusIdle": "未配置",
+    "appId": "AppID",
+    "appSecret": "AppSecret",
+    "secretSaved": "已保存（留空保持不变）",
+    "splitEnabled": "按正则拆句成多条消息",
+    "splitRegex": "拆句正则",
+    "maxMessages": "每回合最多消息条数",
+    "cwd": "会话工作区",
+    "save": "保存",
+    "connect": "连接",
+    "disconnect": "断开",
+    "import": "从 IM Connect 导入凭据",
+    "emotion": "情绪状态",
+    "proactive": "主动打扰",
+    "saved": "已保存",
+    "connecting": "连接中…",
+    "error": "操作失败"
+  }
+}

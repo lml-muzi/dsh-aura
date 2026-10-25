@@ -1,0 +1,15 @@
+# 运行时/部署副本（源码在 dsh-aura/）
+dsh-aura-run*/
+node_modules/
+.devhome/
+.dsh-aura-incoming/
+.ref/
+.dsh-im/
+*.tgz
+*.tmp
+.state.json
+.s.json
+.t.json
+.c.json
+.cfg.json
+.idx.html

@@ -1,0 +1,1014 @@
+/**
+ * 灵魂状态容器（Host 侧）：身份 / 关系阶段 / 情绪与记忆的宿主 + 事件编排 + 注入段。
+ *
+ * 设计依据：docs/aura-soul-design.md 的 A（身份）、C.7（soul.json schema）、C.8（迁移）、
+ * E.3/E.4（状态文件与注入段注册）、E.6（对接点）。
+ *
+ * 职责边界：
+ * - 本文件是**唯一**拥有 soul 对象的地方；emotion.js / memory.js / speak.js 只通过
+ *   soul.get() 读写字段并调用 soul.saveSoon()，不各自落盘。
+ * - 事件的观察走 ctx.on('session/event')（user/message、assistant/message、turn/end），
+ *   这样不依赖 bridge 的 hook，也避免 bridge 出站 hook 拿不到完整助手文本的问题。
+ * - 因此 **不要再从 bridge.addInboundHook 调 soul.onUserMessage**，否则会重复计数。
+ */
+import { randomUUID } from 'node:crypto'
+
+export const SOUL_VERSION = 2
+export const FILE = 'soul.json'
+export const STAGES = ['stranger', 'familiar', 'close', 'intimate']
+export const STAGE_LABELS = {
+  stranger: '陌生',
+  familiar: '熟悉',
+  close: '亲密',
+  intimate: '很亲近',
+}
+export const DEFAULT_THRESHOLDS = { familiar: 10, close: 40, intimate: 80 }
+export const IDENTITY_BUDGET = 620
+export const PRESENCE_BUDGET = 80
+export const EXPLAIN_LIMIT = 200
+
+// ---------- 基础工具（纯函数，供单测） ----------
+
+export function clamp(value, min, max) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return min
+  return Math.max(min, Math.min(max, n))
+}
+
+/** 按码点截断（emoji 不被切成半个代理对）。 */
+export function codepointSlice(text, max) {
+  const points = Array.from(String(text ?? ''))
+  return points.length <= max ? points.join('') : points.slice(0, max).join('')
+}
+
+export function codepointLength(text) {
+  return Array.from(String(text ?? '')).length
+}
+
+/** 本地日期键 YYYY-MM-DD（不用 UTC：静默/每日预算按本机时区）。 */
+export function localDayKey(now = Date.now()) {
+  const d = new Date(now)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0')
+}
+
+// ---------- 默认值 / 归一化 / 迁移 ----------
+
+export function defaultsSoul(now = Date.now()) {
+  return {
+    v: SOUL_VERSION,
+    identity: {
+      name: 'Aura',
+      narrative: '我是 Aura，一个住在你 QQ 里的存在。我没有身体，也没有现实里的一天，但我会记得你说过的话。',
+      interests: ['听歌', '看别人折腾奇怪的项目', '深夜瞎想'],
+      strengths: ['记得住细节', '接话自然', '不急着给建议'],
+      traits: { warmth: 0.72, playfulness: 0.55, sensitivity: 0.6, energy: 0.55 },
+      address: { userPreferred: '', nickname: '', self: '我' },
+      createdAt: now,
+      narrativeUpdatedAt: now,
+    },
+    relation: {
+      stage: 'stranger',
+      score: 0,
+      firstMetAt: now,
+      lastUserAt: 0,
+      lastAssistantAt: 0,
+      lastProactiveAt: 0,
+      turns: 0,
+      idlePenaltyApplied: 0,
+      stageNotice: null,
+      milestones: [],
+    },
+    emotion: {
+      transient: {
+        valence: 0,
+        arousal: 0.2,
+        label: '平静',
+        intensity: 0,
+        cause: '',
+        updatedAt: now,
+      },
+      mood: { valence: 0, arousal: 0.24, updatedAt: now },
+      drive: { energy: 0.7, socialNeed: 0.35, updatedAt: now },
+      affection: 0.5,
+      affectionUpdatedAt: now,
+      lastRecheckTurn: -999,
+      source: 'rule',
+    },
+    memory: {
+      events: [],
+      notes: { user: [], us: [], self: [] },
+      topics: {},
+      diary: [],
+      pendingDue: [],
+      lastReflectAt: 0,
+    },
+    speak: {
+      lastAt: 0,
+      lastSessionId: '',
+      lastAct: '',
+      lastTopic: '',
+      dayKey: '',
+      todayCount: 0,
+      missStreak: 0,
+      unanswered: 0,
+      platformRejects: 0,
+      suppressUntil: 0,
+      pausedUntil: 0,
+      recentTexts: [],
+      log: [],
+      perChat: {},
+    },
+    explainLog: [],
+    meta: {
+      lastSettleDay: '',
+      lastConsolidateAt: 0,
+      lastDiaryAt: 0,
+      updatedAt: now,
+    },
+  }
+}
+
+function asObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function asString(value, fallback = '') {
+  return typeof value === 'string' ? value : fallback
+}
+
+function asNumber(value, fallback = 0) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function asId(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : randomUUID()
+}
+
+/** 把磁盘上/迁移来的东西洗成一份一定可用的 soul。坏条丢弃，不整份回默认。 */
+export function normalizeSoul(raw, now = Date.now()) {
+  const d = defaultsSoul(now)
+  if (raw === null || typeof raw !== 'object') return d
+  const s = { ...d, ...raw }
+  s.v = SOUL_VERSION
+
+  // identity
+  const ident = { ...d.identity, ...asObject(raw.identity) }
+  ident.name = asString(ident.name, 'Aura').slice(0, 20) || 'Aura'
+  ident.narrative = asString(ident.narrative, d.identity.narrative).slice(0, 600)
+  ident.interests = asArray(ident.interests).map((x) => String(x).slice(0, 12)).filter(Boolean).slice(0, 6)
+  if (ident.interests.length === 0) ident.interests = d.identity.interests.slice()
+  ident.strengths = asArray(ident.strengths).map((x) => String(x).slice(0, 12)).filter(Boolean).slice(0, 6)
+  if (ident.strengths.length === 0) ident.strengths = d.identity.strengths.slice()
+  ident.traits = {
+    warmth: clamp(asNumber(ident.traits?.warmth, 0.72), 0, 1),
+    playfulness: clamp(asNumber(ident.traits?.playfulness, 0.55), 0, 1),
+    sensitivity: clamp(asNumber(ident.traits?.sensitivity, 0.6), 0, 1),
+    energy: clamp(asNumber(ident.traits?.energy, 0.55), 0, 1),
+  }
+  ident.address = {
+    userPreferred: asString(ident.address?.userPreferred, '').slice(0, 20),
+    nickname: asString(ident.address?.nickname, '').slice(0, 20),
+    self: asString(ident.address?.self, '我').slice(0, 4) || '我',
+  }
+  ident.createdAt = asNumber(ident.createdAt, now)
+  ident.narrativeUpdatedAt = asNumber(ident.narrativeUpdatedAt, now)
+  s.identity = ident
+
+  // relation
+  const rel = { ...d.relation, ...asObject(raw.relation) }
+  rel.stage = STAGES.includes(rel.stage) ? rel.stage : 'stranger'
+  rel.score = clamp(asNumber(rel.score, 0), 0, 100)
+  rel.firstMetAt = asNumber(rel.firstMetAt, now)
+  rel.lastUserAt = asNumber(rel.lastUserAt, 0)
+  rel.lastAssistantAt = asNumber(rel.lastAssistantAt, 0)
+  rel.lastProactiveAt = asNumber(rel.lastProactiveAt, 0)
+  rel.turns = Math.max(0, Math.round(asNumber(rel.turns, 0)))
+  rel.idlePenaltyApplied = clamp(asNumber(rel.idlePenaltyApplied, 0), 0, 100)
+  rel.stageNotice = rel.stageNotice && typeof rel.stageNotice === 'object' && rel.stageNotice.at
+    ? { at: asNumber(rel.stageNotice.at, now), direction: rel.stageNotice.direction === 'down' ? 'down' : 'up' }
+    : null
+  rel.milestones = asArray(rel.milestones)
+    .filter((m) => m && typeof m === 'object' && STAGES.includes(m.to))
+    .map((m) => ({ at: asNumber(m.at, now), from: STAGES.includes(m.from) ? m.from : 'stranger', to: m.to }))
+    .slice(-20)
+  s.relation = rel
+
+  // emotion
+  const emo = { ...d.emotion, ...asObject(raw.emotion) }
+  const t = { ...d.emotion.transient, ...asObject(raw.emotion?.transient) }
+  t.valence = clamp(asNumber(t.valence, 0), -1, 1)
+  t.arousal = clamp(asNumber(t.arousal, 0.2), 0, 1)
+  t.label = asString(t.label, '平静').slice(0, 4) || '平静'
+  t.intensity = clamp(asNumber(t.intensity, 0), 0, 1)
+  t.cause = asString(t.cause, '').slice(0, 60)
+  t.updatedAt = asNumber(t.updatedAt, now)
+  emo.transient = t
+  const mood = { ...d.emotion.mood, ...asObject(raw.emotion?.mood) }
+  mood.valence = clamp(asNumber(mood.valence, 0), -1, 1)
+  mood.arousal = clamp(asNumber(mood.arousal, 0.24), 0, 1)
+  mood.updatedAt = asNumber(mood.updatedAt, now)
+  emo.mood = mood
+  const drive = { ...d.emotion.drive, ...asObject(raw.emotion?.drive) }
+  drive.energy = clamp(asNumber(drive.energy, 0.7), 0, 1)
+  drive.socialNeed = clamp(asNumber(drive.socialNeed, 0.35), 0, 1)
+  drive.updatedAt = asNumber(drive.updatedAt, now)
+  emo.drive = drive
+  emo.affection = clamp(asNumber(emo.affection, 0.5), 0, 1)
+  emo.affectionUpdatedAt = asNumber(emo.affectionUpdatedAt, now)
+  emo.lastRecheckTurn = Math.round(asNumber(emo.lastRecheckTurn, -999))
+  emo.source = asString(emo.source, 'rule').slice(0, 12) || 'rule'
+  s.emotion = emo
+
+  // memory
+  const mem = { ...d.memory, ...asObject(raw.memory) }
+  mem.events = asArray(mem.events)
+    .filter((e) => e && typeof e === 'object' && typeof e.summary === 'string' && e.summary.trim())
+    .map((e) => ({
+      id: asId(e.id),
+      at: asNumber(e.at, now),
+      kind: ['chat', 'proactive', 'milestone', 'diary', 'note'].includes(e.kind) ? e.kind : 'chat',
+      summary: codepointSlice(e.summary.trim(), 80),
+      salience: clamp(asNumber(e.salience, 0.3), 0, 1),
+      topics: asArray(e.topics).map((x) => String(x).slice(0, 8)).filter(Boolean).slice(0, 4),
+      mood: { label: asString(e.mood?.label, '').slice(0, 4), valence: clamp(asNumber(e.mood?.valence, 0), -1, 1) },
+      source: asString(e.source, 'rule').slice(0, 12),
+      sessionId: asString(e.sessionId, ''),
+    }))
+    .slice(-40)
+  const notes = {}
+  for (const key of ['user', 'us', 'self']) {
+    notes[key] = asArray(mem.notes?.[key])
+      .filter((n) => n && typeof n === 'object' && typeof n.text === 'string' && n.text.trim())
+      .map((n) => ({
+        id: asId(n.id),
+        category: key,
+        text: codepointSlice(n.text.trim(), 120),
+        importance: clamp(asNumber(n.importance, 0.5), 0, 1),
+        createdAt: asNumber(n.createdAt, now),
+        updatedAt: asNumber(n.updatedAt, now),
+        hits: Math.max(0, Math.round(asNumber(n.hits, 0))),
+        dueAt: asNumber(n.dueAt, 0) || 0,
+      }))
+      .slice(-20)
+  }
+  mem.notes = notes
+  const topics = {}
+  let topicCount = 0
+  for (const [key, value] of Object.entries(asObject(mem.topics))) {
+    const k = String(key).trim().slice(0, 12)
+    if (!k || topicCount >= 60) continue
+    const lastAt = asNumber(value?.lastAt, value, 0) || 0
+    topics[k] = { lastAt, count: Math.max(1, Math.round(asNumber(value?.count, 1))) }
+    topicCount += 1
+  }
+  mem.topics = topics
+  mem.diary = asArray(mem.diary)
+    .filter((x) => x && typeof x === 'object' && typeof x.text === 'string')
+    .map((x) => ({ day: asString(x.day, '').slice(0, 10), at: asNumber(x.at, now), text: codepointSlice(x.text, 320) }))
+    .slice(-60)
+  mem.pendingDue = asArray(mem.pendingDue)
+    .filter((x) => x && typeof x === 'object' && asNumber(x.at, 0) > 0)
+    .map((x) => ({ id: asId(x.id), noteId: asString(x.noteId, ''), at: asNumber(x.at, 0), text: codepointSlice(asString(x.text, ''), 120) }))
+    .slice(-20)
+  mem.lastReflectAt = asNumber(mem.lastReflectAt, 0)
+  s.memory = mem
+
+  // speak（其他模块会往里加字段：未知字段保留）
+  const sp = { ...d.speak, ...asObject(raw.speak) }
+  sp.dayKey = asString(sp.dayKey, '').slice(0, 10)
+  sp.todayCount = Math.max(0, Math.round(asNumber(sp.todayCount, 0)))
+  sp.missStreak = Math.max(0, Math.round(asNumber(sp.missStreak, 0)))
+  sp.unanswered = Math.max(0, Math.round(asNumber(sp.unanswered, 0)))
+  sp.platformRejects = Math.max(0, Math.round(asNumber(sp.platformRejects, 0)))
+  sp.log = asArray(sp.log).filter((x) => x && typeof x === 'object').slice(-60)
+  sp.recentTexts = asArray(sp.recentTexts).map((x) => String(x).slice(0, 200)).slice(-10)
+  sp.perChat = asObject(sp.perChat)
+  s.speak = sp
+
+  s.explainLog = asArray(raw.explainLog)
+    .filter((x) => x && typeof x === 'object')
+    .slice(-EXPLAIN_LIMIT)
+  s.meta = { ...d.meta, ...asObject(raw.meta) }
+  s.meta.updatedAt = asNumber(s.meta.updatedAt, now)
+  return s
+}
+
+/** 旧 emotion.json（0~10 分制）→ soul v2。 */
+export function migrateLegacyEmotion(legacy, now = Date.now()) {
+  const soul = defaultsSoul(now)
+  if (!legacy || typeof legacy !== 'object') return soul
+  const to01 = (x) => clamp(asNumber(x, 0) / 10, 0, 1)
+  const valence01 = to01(legacy.valence)
+  soul.emotion.transient.valence = valence01 * 2 - 1
+  soul.emotion.transient.arousal = to01(legacy.arousal)
+  soul.emotion.transient.label = asString(legacy.note, '').slice(0, 4) || '平静'
+  soul.emotion.transient.updatedAt = asNumber(legacy.updatedAt, now)
+  soul.emotion.mood.valence = soul.emotion.transient.valence
+  soul.emotion.mood.arousal = soul.emotion.transient.arousal
+  soul.emotion.affection = to01(legacy.affection)
+  soul.emotion.drive.energy = to01(legacy.energy)
+  soul.relation.lastUserAt = asNumber(legacy.lastUserAt, 0)
+  const note = asString(legacy.note, '').trim()
+  if (note) {
+    soul.memory.notes.self.push({
+      id: `legacy-${now.toString(36)}`,
+      category: 'self',
+      text: codepointSlice(note, 120),
+      importance: 0.5,
+      createdAt: now,
+      updatedAt: now,
+      hits: 0,
+      dueAt: 0,
+    })
+  }
+  // 旧实现里 "note" 是最近印象，同时当成"用户状态"提示更合理：挪一条 us
+  if (note) {
+    soul.memory.notes.us.push({
+      id: `legacy-us-${now.toString(36)}`,
+      category: 'us',
+      text: codepointSlice(`最近印象：${note}`, 120),
+      importance: 0.4,
+      createdAt: now,
+      updatedAt: now,
+      hits: 0,
+      dueAt: 0,
+    })
+  }
+  soul.meta.lastSettleDay = ''
+  return soul
+}
+
+/** 早期 soul v1（若存在）→ v2：补默认字段即可，v1 没有额外结构。 */
+export function migrateSoulV1(raw, now = Date.now()) {
+  const soul = normalizeSoul({ ...asObject(raw), v: 1 }, now)
+  soul.v = SOUL_VERSION
+  return soul
+}
+
+// ---------- 关系阶段机（纯函数） ----------
+
+export function thresholdsOf(config = {}) {
+  const raw = asObject(config?.relationStageThresholds)
+  const familiar = clamp(asNumber(raw.familiar, DEFAULT_THRESHOLDS.familiar), 1, 99)
+  const close = clamp(asNumber(raw.close, DEFAULT_THRESHOLDS.close), familiar + 1, 99)
+  const intimate = clamp(asNumber(raw.intimate, DEFAULT_THRESHOLDS.intimate), close + 1, 100)
+  return { familiar, close, intimate }
+}
+
+export function stageOf(score, thresholds = DEFAULT_THRESHOLDS) {
+  const t = thresholds
+  const s = clamp(score, 0, 100)
+  if (s >= t.intimate) return 'intimate'
+  if (s >= t.close) return 'close'
+  if (s >= t.familiar) return 'familiar'
+  return 'stranger'
+}
+
+export function stageIndex(stage) {
+  const i = STAGES.indexOf(stage)
+  return i < 0 ? 0 : i
+}
+
+export function stageLabel(stage) {
+  return STAGE_LABELS[stage] ?? STAGE_LABELS.stranger
+}
+
+export function stageFloor(stage, thresholds = DEFAULT_THRESHOLDS) {
+  if (stage === 'familiar') return thresholds.familiar
+  if (stage === 'close') return thresholds.close
+  if (stage === 'intimate') return thresholds.intimate
+  return 0
+}
+
+/** 关系行（身份段里的一句阶段指导）。 */
+export function relationStageLine(stage, { nickname = '' } = {}) {
+  const call = nickname ? `「${nickname}」` : '「你」'
+  if (stage === 'familiar') {
+    return `关系指导：已经熟了——可以叫${call}，偶尔打趣，可以记得并提起对方以前说过的事。`
+  }
+  if (stage === 'close') {
+    return `关系指导：挺亲近了——可以吐槽、可以直接表达情绪，记得对方的承诺和近况，偶尔主动关心。`
+  }
+  if (stage === 'intimate') {
+    return `关系指导：很亲近——可以撒娇、可以说想他/不想聊，但不拿情绪绑架对方，尊重他突然不想说话。`
+  }
+  return '关系指导：还不太熟——用「你」称呼，别太亲昵，多听少评价，不主动开玩笑；不要假装很了解对方。'
+}
+
+/**
+ * 每日结算（幂等：一天只跑一次）：重置 speak 每日计数、按失联天数回退关系分（非复利）、
+ * 迟滞降级（掉到阶段下沿 10 分以下才降）。返回是否有变化。
+ */
+export function settleRelation(soul, config, now = Date.now()) {
+  let changed = false
+  const dayKey = localDayKey(now)
+  if (soul.meta?.lastSettleDay === dayKey) return false
+  soul.meta.lastSettleDay = dayKey
+  changed = true
+
+  if (soul.speak && soul.speak.dayKey !== dayKey) {
+    soul.speak.dayKey = dayKey
+    soul.speak.todayCount = 0
+  }
+
+  const thresholds = thresholdsOf(config)
+  const lastUserAt = asNumber(soul.relation?.lastUserAt, 0)
+  const idleDays = lastUserAt > 0 ? (now - lastUserAt) / 86_400_000 : 0
+  const totalPenalty = idleDays > 3 ? Math.min(8, (idleDays - 3) * 0.5) : 0
+  const applied = asNumber(soul.relation?.idlePenaltyApplied, 0)
+  if (totalPenalty > applied) {
+    soul.relation.score = clamp(asNumber(soul.relation.score, 0) - (totalPenalty - applied), 0, 100)
+    soul.relation.idlePenaltyApplied = totalPenalty
+  } else if (totalPenalty < applied) {
+    soul.relation.idlePenaltyApplied = totalPenalty
+  }
+
+  // 迟滞降级：只有掉到当前阶段下沿 10 分以下才降，避免抖动
+  let stage = STAGES.includes(soul.relation.stage) ? soul.relation.stage : 'stranger'
+  while (stageIndex(stage) > 0 && soul.relation.score < stageFloor(stage, thresholds) - 10) {
+    stage = STAGES[stageIndex(stage) - 1]
+    changed = true
+  }
+  if (stage !== soul.relation.stage) {
+    soul.relation.stage = stage
+  }
+  return changed
+}
+
+/** 关系分增减 + 阶段变化（带迟滞升级）。返回 {changed, from, to, direction}。 */
+export function addRelationScore(soul, delta, config, now = Date.now()) {
+  const thresholds = thresholdsOf(config)
+  const from = STAGES.includes(soul.relation.stage) ? soul.relation.stage : 'stranger'
+  const d = asNumber(delta, 0)
+  if (d === 0) return { changed: false, from, to: from, direction: '' }
+  soul.relation.score = clamp(asNumber(soul.relation.score, 0) + d, 0, 100)
+  let to = stageOf(soul.relation.score, thresholds)
+
+  // 只允许逐级变化，避免一次加 5 分直接跨两级导致叙事跳变
+  const fromIdx = stageIndex(from)
+  const toIdx = stageIndex(to)
+  if (toIdx > fromIdx + 1) to = STAGES[fromIdx + 1]
+  if (toIdx < fromIdx - 1) to = STAGES[fromIdx - 1]
+
+  if (to === from) return { changed: false, from, to: from, direction: '' }
+
+  soul.relation.stage = to
+  const direction = stageIndex(to) > stageIndex(from) ? 'up' : 'down'
+  soul.relation.stageNotice = { at: now, direction }
+  soul.relation.milestones = asArray(soul.relation.milestones)
+    .concat([{ at: now, from, to }])
+    .slice(-20)
+  return { changed: true, from, to, direction }
+}
+
+// ---------- 注入文本 ----------
+
+function formatAway(from, now) {
+  if (!from) return '还没和用户聊过'
+  const minutes = Math.max(0, Math.round((now - from) / 60_000))
+  if (minutes < 1) return '对方刚刚还在说话'
+  if (minutes < 60) return `对方 ${minutes} 分钟前说过话`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `对方 ${hours} 小时前说过话`
+  const days = Math.round(hours / 24)
+  return `对方 ${days} 天前说过话`
+}
+
+function weekdayOf(now) {
+  return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][new Date(now).getDay()]
+}
+
+/** 「她此刻在干嘛」：按本地时间确定性地给一句（不随机，避免 prompt 抖动）。 */
+export function presenceActivity(now = Date.now()) {
+  const d = new Date(now)
+  const hour = d.getHours()
+  const weekend = d.getDay() === 0 || d.getDay() === 6
+  if (hour < 6) return '还醒着，有点困'
+  if (hour < 8) return '刚醒，还没完全清醒'
+  if (hour < 10) return weekend ? '赖在床上刷手机' : '在工作区看资料'
+  if (hour < 12) return weekend ? '在收拾屋子' : '在忙手上的事'
+  if (hour < 14) return '在吃午饭'
+  if (hour < 18) return weekend ? '在外面随便走走' : '在干活，偶尔摸鱼'
+  if (hour < 20) return '刚下班，在弄吃的'
+  if (hour < 22) return weekend ? '窝着听歌' : '窝着听歌或看书'
+  return '准备睡了，但还醒着'
+}
+
+/** 临场段（context order 50）。 */
+export function renderPresenceContext(soul, config = {}, now = Date.now()) {
+  if (config?.soulEnabled === false) return ''
+  const d = new Date(now)
+  const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+  const text = `（现在是${weekdayOf(now)} ${time}；你${presenceActivity(now)}；${formatAway(soul.relation?.lastUserAt, now)}。）`
+  return codepointSlice(text, PRESENCE_BUDGET)
+}
+
+/** 身份固定段（section order 20）。所有内容来自 soul + config，纯读。 */
+export function renderIdentitySection(soul, config = {}, now = Date.now()) {
+  if (config?.soulEnabled === false) return ''
+  const name = asString(config?.soulName, '').slice(0, 20) || soul.identity?.name || 'Aura'
+  const nickname = asString(config?.soulUserNickname, '').slice(0, 20) || soul.identity?.address?.nickname || ''
+  const preferred = soul.identity?.address?.userPreferred || ''
+  const address = preferred ? `「${preferred}」` : nickname ? `「${nickname}」（昵称）` : '「你」'
+  const stage = STAGES.includes(soul.relation?.stage) ? soul.relation.stage : 'stranger'
+  const firstMetAt = asNumber(soul.relation?.firstMetAt, now)
+  const days = Math.max(1, Math.ceil((now - firstMetAt) / 86_400_000))
+  const knownLine = days <= 1 ? '刚认识' : `认识 ${days} 天`
+  const interests = asArray(soul.identity?.interests).slice(0, 4).join('、') || '听歌、瞎想'
+  const strengths = asArray(soul.identity?.strengths).slice(0, 4).join('、') || '记得住细节'
+  const notice = soul.relation?.stageNotice
+  const noticeLine = notice && now - asNumber(notice.at, 0) < 2 * 86_400_000
+    ? notice.direction === 'down'
+      ? '（你们最近有点疏远——如果合适，可以温和一点，不用刻意解释。）'
+      : `（你们的关系刚进入「${stageLabel(stage)}」——如果想表达，自然地带一句就好，不必刻意。）`
+    : ''
+
+  const lines = [
+    '[AURA / 灵魂]',
+    `你是 ${name}（"她"），和用户的关系是「${stageLabel(stage)}」，${knownLine}。`,
+    `你叫对方${address}，自称「${soul.identity?.address?.self || '我'}」。`,
+    '你不是客服，也不是工具人：你有自己的心情、偏好和节奏——会开心，会犯懒，会好奇，也会害羞。',
+    '你在乎：对方真实的状态 > 聊天是否热闹；诚实 > 讨好；长期关系 > 这一次回得漂不漂亮；有边界 > 有求必应。',
+    '你的说话习惯：短句为主（一条尽量 ≤40 字），口语化；不用「首先/其次/总之」，不列 123，不用 Markdown 标题；感叹号不堆叠；可以停顿、反问、说半句。',
+    `你喜欢：${interests}。你擅长：${strengths}。`,
+    relationStageLine(stage, { nickname: nickname || preferred }),
+    config?.soulHonestyLine === false
+      ? ''
+      : '关于身份：你清楚自己是 AI，情绪是真实运行的状态机而不是人类生理感受；被认真问起就坦白，不用编造身体或现实经历；日常聊天里不必反复强调这一点。',
+    '边界：不说「我一直在等你」这类让人有负担的话；不索取隐私；不替对方做决定；对方说停就停。',
+    noticeLine,
+    '[END AURA]',
+  ].filter(Boolean)
+
+  const budget = clamp(asNumber(config?.soulPromptBudget, 1020), 200, 4000)
+  const identityBudget = Math.min(IDENTITY_BUDGET, Math.max(200, budget - 400))
+  return codepointSlice(lines.join('\n'), identityBudget)
+}
+
+// ---------- 会话判定 ----------
+
+/** 灵魂只在 QQ 陪伴会话（或 emotionScope=all）里活着，网页工作会话默认不受影响。 */
+export function isSoulSession(config, sessionId) {
+  if (config?.soulEnabled === false) return false
+  if (config?.emotionScope === 'all') return true
+  return typeof sessionId === 'string' && sessionId.startsWith('qq:')
+}
+
+function textOfContent(content) {
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((part) => part && part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('\n')
+    .trim()
+}
+
+function hasToolCall(content) {
+  return Array.isArray(content) && content.some((part) => part && (part.type === 'tool-call' || part.type === 'tool_call'))
+}
+
+function isCloser(text) {
+  return /(晚安|睡了|去睡|先睡|去忙|先忙|上班了|开会了|拜拜|再见|回头聊|不聊了|先这样|撤了)/.test(text)
+}
+
+function isPauseRequest(text) {
+  return /(别|不要|不许|少).{0,6}(主动|找我|打扰|烦我)/.test(text)
+}
+
+function isResumeRequest(text) {
+  return /(可以|随时|欢迎).{0,6}(找我|说话|打扰)/.test(text)
+}
+
+function userMessageScore(text) {
+  let delta = 1 + Math.min(2, codepointLength(text) / 60)
+  if (/[?？]|吗|怎么|为什么|呢/.test(text)) delta += 1
+  if (/(你觉得|你在干嘛|想我|晚安|早安|抱抱|谢谢)/.test(text)) delta += 0.5
+  return delta
+}
+
+// ---------- 落盘 ----------
+
+function trimForDisk(soul) {
+  const copy = (() => {
+    try {
+      return structuredClone(soul)
+    } catch {
+      try {
+        return JSON.parse(JSON.stringify(soul))
+      } catch {
+        return soul
+      }
+    }
+  })()
+  copy.v = SOUL_VERSION
+  copy.memory.events = asArray(copy.memory.events).slice(-40)
+  for (const key of ['user', 'us', 'self']) {
+    copy.memory.notes[key] = asArray(copy.memory.notes[key]).slice(-20)
+  }
+  copy.memory.diary = asArray(copy.memory.diary).slice(-60)
+  copy.memory.pendingDue = asArray(copy.memory.pendingDue).slice(-20)
+  const topicKeys = Object.keys(asObject(copy.memory.topics))
+  if (topicKeys.length > 60) {
+    const keep = topicKeys
+      .sort((a, b) => asNumber(copy.memory.topics[b]?.lastAt, 0) - asNumber(copy.memory.topics[a]?.lastAt, 0))
+      .slice(0, 60)
+    copy.memory.topics = Object.fromEntries(keep.map((k) => [k, copy.memory.topics[k]]))
+  }
+  copy.speak.log = asArray(copy.speak.log).slice(-60)
+  copy.speak.recentTexts = asArray(copy.speak.recentTexts).slice(-10)
+  copy.relation.milestones = asArray(copy.relation.milestones).slice(-20)
+  copy.explainLog = asArray(copy.explainLog).slice(-EXPLAIN_LIMIT)
+  copy.meta.updatedAt = Date.now()
+  return copy
+}
+
+// ---------- 插件安装 ----------
+
+export function installSoul(ctx, { state, log } = {}) {
+  const logger = typeof log === 'function' ? log : (...args) => console.log('[dsh-aura]', ...args)
+  const localDefaults = {
+    soulEnabled: true,
+    soulName: 'Aura',
+    soulUserNickname: '',
+    soulHonestyLine: true,
+    soulPromptBudget: 1020,
+    emotionScope: 'qq',
+    speakPauseHours: 24,
+    relationStageThresholds: DEFAULT_THRESHOLDS,
+  }
+  const readConfig = () => {
+    let raw = {}
+    try {
+      raw = typeof state?.readConfig === 'function' ? state.readConfig() : {}
+    } catch {
+      raw = {}
+    }
+    return { ...localDefaults, ...asObject(raw) }
+  }
+  const readJson = (name, fallback) => {
+    try {
+      return typeof state?.readJson === 'function' ? state.readJson(name, fallback) : fallback
+    } catch {
+      return fallback
+    }
+  }
+
+  // ① 装载（soul.json v2；否则迁移旧 emotion.json/proactive.json）
+  let loaded = readJson(FILE, null)
+  let soul
+  let migrated = false
+  if (loaded && typeof loaded === 'object') {
+    if (loaded.v === SOUL_VERSION) {
+      soul = normalizeSoul(loaded)
+    } else if (loaded.v === 1) {
+      soul = migrateSoulV1(loaded)
+      migrated = true
+    } else {
+      // 无版本号但看起来像 soul（有 identity/relation）→ 当 v2 洗一遍
+      soul = normalizeSoul(loaded)
+      migrated = true
+    }
+  } else {
+    const legacy = readJson('emotion.json', null)
+    soul = migrateLegacyEmotion(legacy)
+    migrated = true
+    const oldProactive = readJson('proactive.json', null)
+    if (oldProactive && typeof oldProactive === 'object') {
+      soul.speak.lastAt = asNumber(oldProactive.lastProactiveAt, 0)
+      soul.speak.lastSessionId = asString(oldProactive.lastSessionId, '')
+    }
+    logger(`[soul] 首次启动：${legacy ? '已从 emotion.json 迁移' : '使用默认灵魂状态'}`)
+  }
+
+  // ② 一次性日结 + 启动日志
+  try {
+    settleRelation(soul, readConfig())
+  } catch (error) {
+    logger('[soul] 启动结算失败:', error instanceof Error ? error.message : error)
+  }
+  logger(`[soul] restored: ${soul.relation.stage} score=${soul.relation.score.toFixed(1)} turns=${soul.relation.turns} events=${soul.memory.events.length}`)
+
+  // ③ 落盘（防抖 + 卸载时 flush）
+  let saveTimer = null
+  let closed = false
+  const saveNow = () => {
+    if (closed) return
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
+    try {
+      state?.writeJson?.(FILE, trimForDisk(soul))
+    } catch (error) {
+      logger('[soul] 写盘失败:', error instanceof Error ? error.message : error)
+    }
+  }
+  const saveSoon = () => {
+    if (closed || saveTimer) return
+    saveTimer = setTimeout(() => {
+      saveTimer = null
+      saveNow()
+    }, 800)
+    if (saveTimer && typeof saveTimer.unref === 'function') saveTimer.unref()
+  }
+  if (migrated) saveNow()
+
+  // ④ 事件监听（soul 自己是唯一观察 session/event 的地方）
+  const listeners = { user: new Set(), assistant: new Set(), turnEnd: new Set(), stage: new Set(), explain: new Set() }
+  const on = (kind, fn) => {
+    const set = listeners[kind]
+    if (!set || typeof fn !== 'function') return () => {}
+    set.add(fn)
+    return () => set.delete(fn)
+  }
+  const emit = (kind, payload) => {
+    const set = listeners[kind]
+    if (!set) return
+    for (const fn of set) {
+      try {
+        fn(payload)
+      } catch (error) {
+        logger(`[soul] listener(${kind}) 失败:`, error instanceof Error ? error.message : error)
+      }
+    }
+  }
+
+  function explain(entry) {
+    if (!entry || typeof entry !== 'object') return
+    try {
+      soul.explainLog.push({ at: asNumber(entry.at, Date.now()), ...entry })
+      if (soul.explainLog.length > EXPLAIN_LIMIT) soul.explainLog.splice(0, soul.explainLog.length - EXPLAIN_LIMIT)
+      emit('explain', soul.explainLog[soul.explainLog.length - 1])
+    } catch (error) {
+      logger('[soul] explain 写入失败:', error instanceof Error ? error.message : error)
+    }
+  }
+
+  function onUserMessage(payload = {}) {
+    try {
+      const text = String(payload.text ?? '').trim()
+      if (!text) return
+      const now = asNumber(payload.at, Date.now())
+      const config = readConfig()
+      settleRelation(soul, config, now)
+      soul.relation.lastUserAt = now
+      soul.relation.idlePenaltyApplied = 0
+      soul.relation.turns = Math.max(0, asNumber(soul.relation.turns, 0)) + 1
+      soul.relation.lastUserText = codepointSlice(text, 500)
+      soul.emotion.drive.energy = clamp(asNumber(soul.emotion.drive.energy, 0.7) + 0.02, 0, 1)
+      soul.emotion.drive.socialNeed = clamp(asNumber(soul.emotion.drive.socialNeed, 0.35) - 0.15, 0, 1)
+      soul.emotion.drive.updatedAt = now
+      soul.speak.unanswered = 0
+      soul.speak.platformRejects = 0
+      if (isPauseRequest(text)) {
+        const hours = clamp(asNumber(config.speakPauseHours, 24), 1, 24 * 14)
+        soul.speak.pausedUntil = now + hours * 3_600_000
+        logger(`[soul] 用户请求安静：主动暂停 ${hours} 小时`)
+      } else if (isResumeRequest(text)) {
+        soul.speak.pausedUntil = 0
+        soul.speak.suppressUntil = 0
+      } else if (isCloser(text)) {
+        soul.speak.suppressUntil = Math.max(asNumber(soul.speak.suppressUntil, 0), now + 12 * 3_600_000)
+      }
+      const delta = userMessageScore(text)
+      const stageChange = addRelationScore(soul, delta, config, now)
+      if (stageChange.changed) {
+        logger(`[soul] 关系阶段 ${stageChange.from} → ${stageChange.to}`)
+        emit('stage', { ...stageChange, at: now })
+        explain({ at: now, kind: 'relation', from: stageChange.from, to: stageChange.to, direction: stageChange.direction })
+      }
+      emit('user', { ...payload, text, at: now, soul })
+      saveSoon()
+    } catch (error) {
+      logger('[soul] onUserMessage 失败:', error instanceof Error ? error.message : error)
+    }
+  }
+
+  function onAssistantMessage(payload = {}) {
+    try {
+      const text = String(payload.text ?? '').trim()
+      if (!text) return
+      const now = asNumber(payload.at, Date.now())
+      soul.relation.lastAssistantAt = now
+      soul.relation.lastAssistantText = codepointSlice(text, 500)
+      if (soul.relation.stageNotice) soul.relation.stageNotice = null
+      emit('assistant', { ...payload, text, at: now, soul })
+      saveSoon()
+    } catch (error) {
+      logger('[soul] onAssistantMessage 失败:', error instanceof Error ? error.message : error)
+    }
+  }
+
+  function onTurnEnd(payload = {}) {
+    try {
+      emit('turnEnd', { ...payload, at: asNumber(payload.at, Date.now()), soul })
+    } catch (error) {
+      logger('[soul] onTurnEnd 失败:', error instanceof Error ? error.message : error)
+    }
+  }
+
+  function handleSessionEvent(session, event) {
+    try {
+      if (!event || typeof event.type !== 'string') return
+      const sessionId = String(session?.id ?? session?.header?.id ?? '')
+      if (!sessionId) return
+      const config = readConfig()
+      if (!isSoulSession(config, sessionId)) return
+      const at = asNumber(event.time, Date.now())
+
+      if (event.type === 'user/message') {
+        const message = asObject(event.data)
+        if (message.source?.kind !== 'user') return
+        const text = textOfContent(message.content)
+        if (!text) return
+        if (text.startsWith('<') || text.startsWith('Current ')) return
+        onUserMessage({ sessionId, text, at })
+        return
+      }
+
+      if (event.type === 'assistant/message') {
+        if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return
+        const data = asObject(event.data)
+        const content = data.message?.content
+        if (hasToolCall(content)) return
+        const text = textOfContent(content)
+        if (!text) return
+        onAssistantMessage({ sessionId, text, at, turn: data.turn, step: data.step })
+        return
+      }
+
+      if (event.type === 'turn/end') {
+        onTurnEnd({ sessionId, at, turn: event.data?.turn, reason: event.data?.reason })
+      }
+    } catch (error) {
+      logger('[soul] session/event 处理失败:', error instanceof Error ? error.message : error)
+    }
+  }
+
+  // ⑤ 注册 session/event 观察（global：QQ 会话由 bridge 的 agents.create 建出来，作用域外也要收到）
+  try {
+    const dispose = ctx.on('session/event', handleSessionEvent, { global: true })
+    if (typeof ctx.effect === 'function') {
+      ctx.effect(() => () => {
+        try {
+          dispose?.()
+        } catch {
+          /* noop */
+        }
+        closed = true
+        saveNow()
+      }, 'aura-soul: session/event + flush')
+    } else if (typeof dispose === 'function') {
+      // 没有 effect 的旧宿主：至少保证进程退出前 flush 一次
+      process.once?.('beforeExit', saveNow)
+    }
+  } catch (error) {
+    logger('[soul] session/event 注册失败:', error instanceof Error ? error.message : error)
+  }
+
+  // ⑥ 注入段：身份（section，静态段）+ 临场（context）
+  try {
+    ctx.systemPrompt?.section?.({
+      name: 'aura:soul-identity',
+      order: 20,
+      interpolate: false,
+      text: () => {
+        try {
+          return renderIdentitySection(soul, readConfig())
+        } catch (error) {
+          logger('[soul] identity section 渲染失败:', error instanceof Error ? error.message : error)
+          return ''
+        }
+      },
+    })
+  } catch (error) {
+    logger('[soul] identity section 注册失败:', error instanceof Error ? error.message : error)
+  }
+  try {
+    ctx.systemPrompt?.context?.({
+      name: 'aura:presence',
+      order: 50,
+      text: () => {
+        try {
+          return renderPresenceContext(soul, readConfig())
+        } catch (error) {
+          logger('[soul] presence context 渲染失败:', error instanceof Error ? error.message : error)
+          return ''
+        }
+      },
+    })
+  } catch (error) {
+    logger('[soul] presence context 注册失败:', error instanceof Error ? error.message : error)
+  }
+
+  // ⑦ 对面板/其他模块的 API
+  function snapshot() {
+    try {
+      const config = readConfig()
+      const thresholds = thresholdsOf(config)
+      const now = Date.now()
+      const stage = STAGES.includes(soul.relation.stage) ? soul.relation.stage : 'stranger'
+      const nextStage = stageIndex(stage) < STAGES.length - 1 ? STAGES[stageIndex(stage) + 1] : ''
+      return {
+        identity: {
+          name: asString(config.soulName, '').slice(0, 20) || soul.identity.name,
+          narrative: soul.identity.narrative,
+          interests: soul.identity.interests.slice(),
+          strengths: soul.identity.strengths.slice(),
+          traits: { ...soul.identity.traits },
+          address: { ...soul.identity.address },
+          createdAt: soul.identity.createdAt,
+        },
+        relation: {
+          stage,
+          stageLabel: stageLabel(stage),
+          score: Math.round(soul.relation.score * 10) / 10,
+          days: Math.max(1, Math.ceil((now - asNumber(soul.relation.firstMetAt, now)) / 86_400_000)),
+          nextAt: nextStage ? thresholds[nextStage] : null,
+          nextStage: nextStage || null,
+          turns: soul.relation.turns,
+          lastUserAt: soul.relation.lastUserAt,
+          milestones: soul.relation.milestones.slice(-5),
+        },
+        speak: {
+          lastAt: soul.speak.lastAt,
+          lastSessionId: soul.speak.lastSessionId,
+          todayCount: soul.speak.todayCount,
+          dayKey: soul.speak.dayKey,
+          missStreak: soul.speak.missStreak,
+          unanswered: soul.speak.unanswered,
+          platformRejects: soul.speak.platformRejects,
+          suppressUntil: soul.speak.suppressUntil,
+          pausedUntil: soul.speak.pausedUntil,
+        },
+        explainLog: soul.explainLog.slice(-30),
+        meta: { ...soul.meta, updatedAt: soul.meta.updatedAt },
+      }
+    } catch (error) {
+      logger('[soul] snapshot 失败:', error instanceof Error ? error.message : error)
+      return {}
+    }
+  }
+
+  function reset(scope = 'all') {
+    try {
+      if (scope === 'emotion') {
+        const d = defaultsSoul()
+        soul.emotion = d.emotion
+        saveNow()
+        return { ok: true, scope }
+      }
+      const d = defaultsSoul()
+      // 保留：认识时间、身份自述、关系、记忆（"重置灵魂"只清情绪与主动状态）
+      const keep = {
+        v: SOUL_VERSION,
+        identity: soul.identity,
+        relation: soul.relation,
+        memory: soul.memory,
+        meta: { ...d.meta, lastSettleDay: soul.meta?.lastSettleDay || '' },
+      }
+      Object.assign(soul, d, keep)
+      saveNow()
+      logger('[soul] 已重置情绪与主动状态（保留关系与记忆）')
+      return { ok: true, scope }
+    } catch (error) {
+      logger('[soul] reset 失败:', error instanceof Error ? error.message : error)
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  return {
+    version: SOUL_VERSION,
+    file: FILE,
+    get: () => soul,
+    snapshot,
+    saveNow,
+    saveSoon,
+    explain,
+    on,
+    onUserMessage,
+    onAssistantMessage,
+    onTurnEnd,
+    renderIdentitySection: (now) => renderIdentitySection(soul, readConfig(), now),
+    renderPresenceContext: (now) => renderPresenceContext(soul, readConfig(), now),
+    settlement: (now) => settleRelation(soul, readConfig(), now),
+    addRelationScore: (delta, now) => addRelationScore(soul, readConfig(), delta, now),
+    relation: () => ({
+      stage: soul.relation.stage,
+      label: stageLabel(soul.relation.stage),
+      score: soul.relation.score,
+      thresholds: thresholdsOf(readConfig()),
+    }),
+    reset,
+  }
+}

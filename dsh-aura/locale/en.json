@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "title": "Aura",
+    "description": "A companion layer with a soul: self-hosted QQ channel, emotions and proactive pings, customizable sidebar name and icon, in one bundle."
+  },
+  "panel": {
+    "title": "Aura",
+    "statusOnline": "Connected",
+    "statusOffline": "Disconnected",
+    "statusIdle": "Not configured",
+    "appId": "AppID",
+    "appSecret": "AppSecret",
+    "secretSaved": "Saved (leave empty to keep)",
+    "splitEnabled": "Split replies into multiple messages by regex",
+    "splitRegex": "Split regex",
+    "maxMessages": "Max messages per turn",
+    "cwd": "Session workspace",
+    "save": "Save",
+    "connect": "Connect",
+    "disconnect": "Disconnect",
+    "import": "Import credentials from IM Connect",
+    "emotion": "Mood",
+    "proactive": "Proactive pings",
+    "saved": "Saved",
+    "connecting": "Connecting…",
+    "error": "Action failed"
+  }
+}

@@ -1,0 +1,190 @@
+# pmp-dsh-tavern
+
+独立提示词装配插件（新版仅标准版；进阶冻结于 DSH 0.2.0-rc.2）：[dsh-prompt-assembler](https://github.com/Player-MINEPIG/dsh-prompt-assembler)。Tavern 默认携带并加载标准 Assembler，与独立安装共存的方式见[接入说明](docs/ASSEMBLER_INTEGRATION.md)。
+
+[dsh-memory-manager v1.0.0](https://github.com/Player-MINEPIG/dsh-memory-manager/releases/tag/v1.0.0) 是可选的查看与管理扩展。Tavern 不依赖它；未安装或卸载后，世界书和 MVU 使用来源默认行为，原会话与资源保留。
+
+[当前源码：请求装配](docs/REQUEST_ASSEMBLY.md) · [MVU](docs/MVU.md) · [提示词模板](docs/PROMPT_TEMPLATE.md) · [完整接口索引](docs/API_SURFACES.md)。
+
+[English](README_en.md)
+
+以 DeepSeek Harness（DSH）原生会话与执行机制为权威的酒馆兼容插件，提供前后端 API，支持自由组合酒馆能力与 DSH 原生功能。
+
+本文描述 Tavern **3.0.5**。独立 assembler、受限 MVU 与提示词模板的组合安装见[接入说明](docs/ASSEMBLER_INTEGRATION.md)；旧版完整文档保留在对应 Git tag。
+
+3.0.5 与 Assembler 1.1.2 扩展 0.2.1 系列兼容范围，验证 rc.3 并保留 rc.2 支持；已有 V4 历史与引用无需迁移。
+
+> 当前 Tavern 源码适配 DSH **0.2.1-rc.2 / 0.2.1-rc.3**，提供独立 assembler 接入、受限 MVU、只读提示词模板与 RP 渲染。[变更记录](CHANGELOG.md) · [MIT License](LICENSE)。
+>
+> 从 Tavern 2.5.x 升级到 3.0.5 会自动加载 assembler 并合并旧策略，见[接入说明](docs/ASSEMBLER_INTEGRATION.md)。本版 DSH 兼容范围为 `>=0.2.1-rc.2 <0.2.2-0`；更新前保留备份并停止目标 Host。从旧 DSH 升级时，已完成 V4 迁移的会话与 Tavern 引用无需再次转换；更早格式按 [升级指南](docs/DSH_0.1.7_MIGRATION.md) 单向迁移。不支持旧版 Host。
+>
+> Tavern Trace 可查看每次请求的配置、世界书触发情况和提示词段落的内容与来源；第三方工具也可通过只读 v3 API 读取这些信息。见 [API 与设计](docs/PROMPT_API_V3.md)。
+>
+> 公式默认启用，支持 `$…$`、`$$…$$`、`\(...\)`、`\[...\]`，使用现代浏览器的 MathML，无需额外按钮或远程字体。字面分隔符请转义或放入代码；完整 HTML 模板和交互卡片内不自动解析公式。RP 还支持头像、可配置气泡与可选受限交互卡片；卡片脚本默认关闭。已支持的 MVU 状态与受限 Helper 兼容见 [MVU](docs/MVU.md)；不宣称完整酒馆助手兼容。见[显示能力与边界](docs/CONVERSATION_PRESENTATION.md)。
+
+本项目只维护嵌入 DSH Web 与桌面端的前端，不额外开发独立 Web UI。导航、输入框与会话生命周期继续由 DSH 拥有，Tavern 通过公开扩展点提供 RP 展示；第三方仍可组合 HTTP API 开发客户端。这项决策调整产品范围，不引入数据迁移。
+
+兼容范围：`>=0.2.1-rc.2 <0.2.2-0`。已验证 DSH rc.2 与 rc.3；范围内后续 RC 和正式版按策略允许加载，不表示已经逐版验收。0.2.2 及其预发布需重新评估。
+
+## 设计理念
+
+pmp-dsh-tavern 不是用另一套界面取代 DSH，也不会复制一份会话历史。它以公开扩展点和原子 API 为基础，在 DSH 之上增加一层可测试、可审计、可卸载的 Tavern 兼容框架：
+
+- **灵珠 / DSH 原生模式**：保留 DSH 原生会话、侧边栏和插件生态；
+- **魔丸 / RP 模式**：按角色卡与周目重组 RP 侧栏，提供开场白、显示正则、swipe、分支、回退、导入与导出；
+- **DSH 仍是权威**：durable history、工具、权限和最终模型请求继续由 DSH 拥有；
+- **最小程度改动，最大程度兼容**：优先复用 DSH 公开机制，不替换原生前端，不依赖私有 DOM；
+- **卸载后仍可阅读原始会话**：插件保存资源、选择、周目指针、显示元数据与有界的 Trace metadata/官方历史引用，不伪造、覆盖或复制 DSH 历史正文。
+
+双模式本身就是兼容方案：不进入魔丸时，用户看到的仍是普通 DSH；只有进入 RP 模式后，插件才挂载自己的 RP 表面。
+
+## ⚠️ 安全警示
+
+安装本插件等同于允许其代码在 DSH Host 和浏览器页面中运行。请只从可信仓库与提交安装，并在更新前检查变更、备份插件数据。以下防护用于降低风险，**不构成操作系统级隔离或账号鉴权**：
+
+- **Agent 与工具风险**：预设、角色卡、世界书、外部记录和用户消息都可能包含 prompt injection。高权限 Agent 仍可能在模型诱导下调用获准的终端、文件、网络、浏览器或其他插件能力；不要在对话中提供密钥，保留 DSH 审批与沙箱，并按最小权限启用工具。
+- **RP 安全模式边界**：RP 模式会在 DSH 权限之上增加只读与高风险工具限制，子 agent 也继承该叠加，但它不是虚拟机、容器或系统沙箱，不能约束本机其他进程，也不能把恶意提示词变成可信内容。
+- **后端与 API 风险**：v1/v2/v3 API 面向本机 loopback，Host、Origin 和 Content-Type 检查不是登录认证，本机恶意进程仍可能访问。不要把 DSH Web 或本插件 API 直接暴露到局域网或公网；反向代理必须自行增加 TLS、认证和可信 Host 配置。
+- **前端渲染风险**：模型输出经过净化并禁止自动远程资源。可选卡片脚本使用有配额的解释器与受限 DOM 桥；昂贵的 CSS 和布局仍可能导致拒绝服务。显示正则使用 JavaScript `RegExp`，灾难性回溯可能冻结页面；只导入和启用你信任的模板与正则。
+- **数据与生命周期风险**：swipe、分支和周目会创建真实 DSH session，并可能增加磁盘占用。revision/CAS、路径检查和原子写入不能替代备份，也不能把多个 API 组合变成跨文件事务。
+
+遇到可疑行为时，停止 Agent、切回 DSH 原生模式并检查原始会话与工具记录。完整威胁模型、已实现边界和漏洞报告方式见 [安全策略](SECURITY.md)；RP 模式具体拦截范围见 [RP 安全模式](docs/RP_SECURE_MODE.md)。
+
+## Quick Start：从角色卡到第一轮 RP 对话
+
+宣传视频：[Tavern 3.0.0](https://www.bilibili.com/video/BV1oxpG6pE1v/)（操作细节以本文当前说明为准）
+
+### 0. 安装
+
+请使用 DSH `0.2.1-rc.2` / `0.2.1-rc.3`、Node `^22.19.0 || >=24.0.0` 与已初始化的 profile，安装前停止目标 Host。只需安装 Tavern 3.0.5，标准 Assembler v1.1.2 自动安装并加载；标准版通过公开接口运行，进阶扩展冻结于 Assembler 1.1.0 / DSH 0.2.0-rc.2，不承诺后续适配，见接入说明：
+
+```sh
+dsh plugin --profile web add pmp-dsh-tavern@3.0.5
+```
+
+可选 Memory Manager v1.0.0 仅在旧 DSH 0.2.0-rc.2 上验证，当前目标的组合兼容性须另行验证；能力与通用资源装配要求见[接入说明](docs/ASSEMBLER_INTEGRATION.md#可选-memory-manager)：
+
+```sh
+dsh plugin --profile web add github:Player-MINEPIG/dsh-memory-manager#v1.0.0
+```
+
+安装完成后重启 DSH Web。Tavern 默认把角色卡、预设、世界书、设置与绑定保存在 `<DSH_HOME>/pmp-dsh-tavern/`，普通 `dsh plugin remove` 不会删除该目录，但也不会创建卸载前快照；需要快照时请检出仓库并使用项目卸载脚本。从仍把数据放在插件包内的旧版本首次升级时，先停止目标 `dsh web` 并使用项目安装脚本，以便在 pnpm 替换旧包前保住数据；新 Host 首次启动会复制到外部目录并保留旧副本。其他 profile、独立 `DSH_HOME`、手动安装、备份与卸载方法见 [安装与卸载](docs/INSTALLATION.md)。
+
+### 1. 导入角色卡
+
+左键点击 `DT` 悬浮球打开菜单，进入“角色卡”，导入 SillyTavern JSON 或 PNG 角色卡。导入只创建资源，不会伪造会话或自动发送消息。
+
+![悬浮球角色卡](docs/assets/悬浮球角色卡.png)
+
+![导入角色卡](docs/assets/导入角色卡.png)
+
+### 2. 创建 DSH 工作区
+
+回到 DSH 原生界面，使用 DSH 自己的工作区能力创建一个准备专门用于 RP 的工作区。所有周目 session 都会归入同一工作区，避免多个角色会话散落并遮挡普通工作。
+
+![新建工作区](docs/assets/新建工作区.png)
+
+### 3. 进入 RP 前端并选择工作区
+
+右键单击 `DT` 悬浮球，或在菜单中点击“切换到自定义前端模式”。首次进入魔丸时，插件会要求从 DSH 已有工作区中明确选择 RP 工作区；写入并回读确认前不会进入 RP 内容。
+
+![切换](docs/assets/切换.png)
+
+### 4. 创建周目
+
+在 RP 侧边栏找到刚导入的角色卡，点击角色卡右侧的 `+`。插件先保存独立的开场草稿与新 `N周目`，不会创建 DSH 会话；初次发送后才把获接纳的真实会话关联到周目。自动名称随 UI 语言显示，用户主动重命名的标题保持原文。
+
+![创建周目](docs/assets/创建周目.png)
+
+### 5. 选择开场白
+
+空周目的 opening dock 会显示角色卡 greeting。存在备选开场白时可用左右按钮选择；这只是前端展示与首轮提示词参考，不会伪造成一次已经发生的 assistant 回复。
+
+![开场白](docs/assets/开场白.png)
+
+### 6. 开始对话
+
+在开场草稿自己的输入栏发送第一条用户消息；首次准备与受理完成后，后续输入使用 DSH 原生输入栏。用户消息会立即出现在 RP 视图中；随后可继续使用 swipe、分支新周目、同周目回退、显示文字编辑及导入/导出等功能。
+
+![对话](docs/assets/对话.png)
+
+完整操作与边界见 [中文使用指南](docs/USAGE_zh-CN.md)。
+
+## 功能概览
+
+| 模块 | 主要能力 | 详细文档 |
+| --- | --- | --- |
+| 资源 | ST 预设、V1/V2/V3 JSON/PNG 角色卡、独立/内嵌世界书、用户资料、资源绑定与导出 | [中文使用指南](docs/USAGE_zh-CN.md) |
+| 请求装配 | Assembler v1.1.2 的策略、来源模块、标准投递、旧进阶配置读取；预览和已记录请求 | [请求装配](docs/REQUEST_ASSEMBLY.md) · [接入说明](docs/ASSEMBLER_INTEGRATION.md) |
+| MVU 变量 | [initvar] 初始化、受限 schema、回复变量更新、分支独立状态、Trace 查看与受限卡片读写 | [MVU](docs/MVU.md) |
+| 提示词模板 | 受限只读 EJS、来源变量依赖与装配模块接入 | [提示词模板](docs/PROMPT_TEMPLATE.md) |
+| RP 前端 | 角色卡/周目侧栏、greeting、Markdown/HTML/LaTeX 渲染、显示正则、swipe、分支、回退和显示层编辑 | [中文使用指南](docs/USAGE_zh-CN.md) |
+| 周目数据 | DSH 权威 session、树状 timeline、工作区 catalog、外部记录首轮只读注入、静态 HTML 与 ST JSONL 导出 | [API](docs/API.md) · [架构](docs/ARCHITECTURE.md) |
+| 安全 | RP 权限叠加、同源/loopback API、工作区路径防护、CAS、DOMPurify、无正文 operation log | [RP 安全模式](docs/RP_SECURE_MODE.md) · [安全策略](SECURITY.md) |
+| 调试 | Tavern Trace 保存每次请求的段落/来源 metadata 与官方历史引用；详情按需验证并读取可恢复的段落正文，来源正文不另存 | [Trace API 与设计](docs/PROMPT_API_V3.md) |
+| 工作区诊断 | DT → 诊断集中显示当前 RP 工作区问题，支持重新检查、复制报告；侧栏摘要可关闭，异常周目保留独立警告入口 | [中文使用指南](docs/USAGE_zh-CN.md) |
+| 第三方开发 | v1 资源管理、v2 RP 元操作、v3 提示词装配追踪与溯源；模式服务、DSH slots/store 与独立客户端接入 | [HTTP API](docs/API.md) · [第三方 RP 前端接入](docs/FRONTEND_INTEGRATION_zh-CN.md) |
+
+![切换首轮 swipe，同时恢复各自后续的用户输入与回复](docs/assets/market/07-swipe-paths.png)
+
+更多交互按钮、原生 Agent 能力、会话资产绑定、ST 兼容资源、显示正则和原生会话对比，见 [功能图集](docs/assets/market/README.md#gallery)。
+
+## 重要边界
+
+- “预设”指 SillyTavern 风格的采样参数与提示词编排，不是 DSH agent preset。
+- greeting 不进入 timeline，也不会伪造成 DSH 历史；外部记录只在首次真实请求中作为 `untrusted` 只读上下文注入。
+- 显示正则只影响魔丸前端渲染，不改写模型请求、DSH 原始消息或导出所依据的权威正文。
+- MVU 使用来源拥有的状态实例、schema、CAS 与受限卡片绑定；可选交互卡片实现[受限接口](docs/CONVERSATION_PRESENTATION.md)。任意酒馆助手 API 与浏览器库仍不支持。
+- 魔丸隐藏 reasoning、工具 context 与子 agent 通知；需要查看完整运行细节时切回 DSH 原生“对话”视图。
+- 当前没有“导入一个配置文件即可替换整个魔丸”的动态前端加载器。完整替换请发布独立 DSH 插件、独立 Web 客户端或维护 fork。
+- 当前目标 DSH 的外层“新建会话”没有供 Tavern 接管点击的公开 seam。魔丸不使用私有 DOM 覆盖它；创建周目请使用角色卡右侧的 `+`。
+- 本插件面向本机 loopback DSH Web，不应直接暴露到局域网或公网。
+
+## 文档导航
+
+默认文档为中文。英文入口见 [README_en.md](README_en.md)（无截图）。
+
+- [中文使用指南](docs/USAGE_zh-CN.md) · [Usage](docs/USAGE_en.md)：全部用户功能、操作步骤与兼容边界
+- [安装与卸载](docs/INSTALLATION.md) · [Installation](docs/INSTALLATION_en.md)：安装参数、更新恢复、备份与卸载
+- [HTTP API](docs/API.md) · [HTTP API](docs/API_en.md)：v1 资源合同与 v2 RP 前端稳定面
+- [请求装配](docs/REQUEST_ASSEMBLY.md) · [Request assembly](docs/REQUEST_ASSEMBLY_en.md)：策略、来源模块、标准与进阶后端、预览及实际请求
+- [Assembler 接入](docs/ASSEMBLER_INTEGRATION.md) · [Assembler integration](docs/ASSEMBLER_INTEGRATION_en.md)：v1.1.2 安装、服务分工、可选 Manager 与卸载
+- [MVU](docs/MVU.md) · [MVU](docs/MVU_en.md)：变量初始化、schema、更新命令、状态实例、分支与卡片权限
+- [提示词模板](docs/PROMPT_TEMPLATE.md) · [Prompt templates](docs/PROMPT_TEMPLATE_en.md)：受限 EJS 与只读变量依赖
+- [Trace v3 API 与设计](docs/PROMPT_API_V3.md) · [Trace v3 API and design](docs/PROMPT_API_V3_en.md)：历史装配索引、官方引用与按需正文读取
+- [第三方 RP 前端接入](docs/FRONTEND_INTEGRATION_zh-CN.md) · [RP frontend integration](docs/FRONTEND_INTEGRATION_en.md)：模式生命周期、交付方式与动作组合
+- [架构说明](docs/ARCHITECTURE.md) · [Architecture](docs/ARCHITECTURE_en.md)：最小改动原则、模块边界与 DSH 公开 seam
+- [Tavern Host 与资源合同](docs/LOADER_CONTRACT.md) · [Tavern Host and resource contract](docs/LOADER_CONTRACT_en.md)：会话选择、资源解析、权限与 Assembler 接入
+- [DSH 消息流](docs/DSH_MESSAGE_FLOW.md) · [DSH message flow](docs/DSH_MESSAGE_FLOW_en.md)：DSH、Tavern 与 Assembler 的请求流程及两类后端介入点
+- [Prompt pipeline](docs/PROMPT_PIPELINE.md) · [Prompt pipeline](docs/PROMPT_PIPELINE_en.md)：ST 格式、宏、角色字段与世界书兼容范围
+- [RP 安全模式](docs/RP_SECURE_MODE.md) · [RP secure mode](docs/RP_SECURE_MODE_en.md)：RP 模式拦截与不拦截的能力
+- [世界书设计](docs/world-book/DESIGN.md) · [World-book design](docs/world-book/DESIGN_en.md)：World Info 格式、匹配与投影契约
+- [开发验证指南](docs/TESTING.md) · [Developer verification](docs/TESTING_en.md)：测试命令、目标 DSH 环境与运行时检查
+- [发布变更](CHANGELOG.md)（英文）
+- [安全策略](SECURITY.md) · [Security policy](SECURITY_en.md)
+
+## 共同开发
+
+项目采用 [MIT License](LICENSE) 开源。欢迎通过 GitHub 提交 Issue、Pull Request、兼容性报告与设计讨论。
+
+如果你希望基于这套框架开发自己的工具，不必先 fork 整个仓库：
+
+- 资源管理工具可使用公开 v1 API；
+- RP 视图或 DSH 客户端插件可使用 v2 API、`pmpDshTavernChrome` 模式生命周期和 DSH 公开 slots/store；
+- 调试与审计工具可读取 v3 历史装配；需要观察或调整当前装配时，应使用 DSH 官方 `system-prompt/assemble`，观察完整请求则使用官方 `llm/stream`；
+- 独立 Web 客户端可以只消费 HTTP v2；
+- 提示词来源、渲染与排列扩展应接入独立 [Assembler](https://github.com/Player-MINEPIG/dsh-prompt-assembler)，或向其仓库提交改动；见[接入说明](docs/ASSEMBLER_INTEGRATION.md)；
+- 需要改变 Tavern 资源模型或内置魔丸本身时，再选择 fork。
+
+请让第三方 UI 使用独立 slot id，只清理自己注册的表面，并在离开 `play` 模式或卸载时完整 dispose。模式服务负责生命周期，不负责替多个插件仲裁同一个 slot。
+
+希望 pmp-dsh-tavern 不只服务于一个 RP 前端，也能成为社区共同开发、验证和复用的基础。
+
+## 参考
+
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+- [SillyTavern](https://github.com/SillyTavern/SillyTavern)
+- [NemoPresetExt](https://github.com/NemoVonNirgend/NemoPresetExt)
+- [MagVarUpdate (MVU)](https://github.com/MagicalAstrogy/MagVarUpdate)
+
+Copyright © 2026 Zhu Bohan.
