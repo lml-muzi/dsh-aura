@@ -1202,6 +1202,7 @@ ${TRAIL_CSS}
         soulPromptBudget: clampInt(cfg.soulPromptBudget, 200, 4000, 1020),
         soulBio: typeof cfg.soulBio === 'string' ? cfg.soulBio.slice(0, 500) : '',
         soulContent: typeof cfg.soulContent === 'string' ? cfg.soulContent.slice(0, 4000) : '',
+        soulGrowthReflection: cfg.soulGrowthReflection !== false,
       }
     }
 
@@ -2549,6 +2550,7 @@ ${TRAIL_CSS}
           soulPromptBudget: effectiveSoulBudget(soulForm.soulContent, soulForm.soulPromptBudget),
           soulBio: String(soulForm.soulBio || '').slice(0, 500),
           soulContent: String(soulForm.soulContent || '').slice(0, 4000),
+          soulGrowthReflection: soulForm.soulGrowthReflection !== false,
         }
         setBlock('soul', { busy: true, error: '', notice: '' })
         setPersonaError('')
@@ -3040,6 +3042,16 @@ ${TRAIL_CSS}
               type: 'checkbox',
               checked: soulForm.soulEnabled === true,
               onChange: event => setSoulForm(prev => ({ ...prev, soulEnabled: event.target.checked })),
+            }),
+          }),
+          h(Row, {
+            label: '每日自省',
+            hint: '每天最多一次，从最近的记忆里提炼一条成长；写前自动备份',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: soulForm.soulGrowthReflection !== false,
+              onChange: event => setSoulForm(prev => ({ ...prev, soulGrowthReflection: event.target.checked })),
             }),
           }),
           h(Row, {

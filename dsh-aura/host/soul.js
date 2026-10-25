@@ -18,6 +18,7 @@ import {
   GROWTH_KINDS,
   GROWTH_LIMIT,
   GROWTH_NOTE_MAX,
+  GROWTH_SOURCES,
   GROWTH_TEXT_MAX,
   addGrowth,
   composeIdentityText,
@@ -27,6 +28,7 @@ import {
   trimGrowth,
   updateGrowth,
 } from './growth.js'
+import { createGrowthReflection } from './growth-reflection.js'
 
 export const SOUL_VERSION = 2
 export const FILE = 'soul.json'
@@ -117,6 +119,7 @@ export function defaultsSoul(now = Date.now()) {
     },
     memory: emptyMemoryState(),
     growth: [],
+    growthReflection: { lastAt: 0, dayKey: '', count: 0 },
     speak: {
       lastAt: 0,
       lastSessionId: '',
@@ -243,6 +246,13 @@ export function normalizeSoul(raw, now = Date.now()) {
   // 旧文件里的 memory 由 installSoul 捕获一次，交给 installMemory 迁移。
   s.memory = emptyMemoryState()
   s.growth = normalizeGrowth(raw.growth, now)
+  const gr = asObject(raw.growthReflection)
+  const grDayKey = asString(gr.dayKey, '').slice(0, 10)
+  s.growthReflection = {
+    lastAt: Math.max(0, Math.round(asNumber(gr.lastAt, 0))),
+    dayKey: /^\d{4}-\d{2}-\d{2}$/.test(grDayKey) ? grDayKey : '',
+    count: Math.max(0, Math.round(asNumber(gr.count, 0))),
+  }
 
   // speak（其他模块会往里加字段：未知字段保留）
   const sp = { ...d.speak, ...asObject(raw.speak) }
@@ -871,6 +881,46 @@ export function installSoul(ctx, { state, log } = {}) {
   }
   if (migrated) saveNow()
 
+  /**
+   * 成长写入入口（内部 / 每日反思用）：备份快照 → addGrowth → 立即落盘。
+   * 备份失败只 warn，不阻塞写入；返回 {ok, growth, deduped, total, backupId}。
+   */
+  async function grow(input = {}) {
+    const src = asObject(input)
+    const text = codepointSlice(asString(src.text, '').replace(/\s+/g, ' ').trim(), GROWTH_TEXT_MAX)
+    if (!text) return { ok: false, reason: 'text 不能为空' }
+    const kind = GROWTH_KINDS.includes(src.kind) ? src.kind : 'trait'
+    const note = codepointSlice(asString(src.note, '').replace(/\s+/g, ' ').trim(), GROWTH_NOTE_MAX)
+    const source = GROWTH_SOURCES.includes(src.source) ? src.source : 'reflection'
+
+    let backupId = ''
+    try {
+      const mod = backupModule || (await import('./backup.js'))
+      backupModule = mod
+      const result = await mod.snapshot('soul-reflection', { reason: 'soul-reflection: ' + codepointSlice(text, 60) })
+      if (result && result.ok === false) {
+        logger('[soul] 成长反思备份失败（继续写）:', result.error || 'unknown')
+      } else if (result && result.id) {
+        backupId = result.id
+        lastBackupAt = Date.now()
+      }
+    } catch (error) {
+      logger('[soul] 成长反思备份失败（继续写）:', error instanceof Error ? error.message : error)
+    }
+
+    const mutation = addGrowth(soul.growth, { text, kind, note, source }, Date.now())
+    if (!mutation.ok) return { ok: false, reason: mutation.reason }
+    soul.growth = mutation.entries
+    saveNow({ reason: 'soul-reflection', skipBackup: true, force: true })
+    return {
+      ok: true,
+      growth: { ...mutation.growth },
+      deduped: mutation.deduped === true,
+      total: soul.growth.length,
+      ...(backupId ? { backupId } : {}),
+    }
+  }
+
   // ④ 事件监听（soul 自己是唯一观察 session/event 的地方）
   const listeners = { user: new Set(), assistant: new Set(), turnEnd: new Set(), stage: new Set(), explain: new Set() }
   const on = (kind, fn) => {
@@ -889,6 +939,34 @@ export function installSoul(ctx, { state, log } = {}) {
         logger(`[soul] listener(${kind}) 失败:`, error instanceof Error ? error.message : error)
       }
     }
+  }
+
+  // ④.5 每日成长反思：turnEnd 后节流排队；install 5s 后先试一次（都不 await，不挡聊天）
+  const REFLECT_TRY_INTERVAL_MS = 10 * 60 * 1000
+  let growthReflection = null
+  let lastReflectTryAt = 0
+  function tryReflect(force = false) {
+    if (!growthReflection) return
+    const now = Date.now()
+    if (!force && now - lastReflectTryAt < REFLECT_TRY_INTERVAL_MS) return
+    lastReflectTryAt = now
+    try {
+      growthReflection.schedule(0, { force })
+    } catch (error) {
+      logger('[soul] 成长反思排队失败:', error instanceof Error ? error.message : error)
+    }
+  }
+  try {
+    growthReflection = createGrowthReflection({
+      ctx,
+      state,
+      soul: { get: () => soul, grow, saveSoon, saveNow },
+      log: logger,
+    })
+    growthReflection.schedule(5000, { force: false })
+  } catch (error) {
+    logger('[soul] 成长反思初始化失败:', error instanceof Error ? error.message : error)
+    growthReflection = null
   }
 
   function explain(entry) {
@@ -960,6 +1038,7 @@ export function installSoul(ctx, { state, log } = {}) {
   function onTurnEnd(payload = {}) {
     try {
       emit('turnEnd', { ...payload, at: asNumber(payload.at, Date.now()), soul })
+      tryReflect(false)
     } catch (error) {
       logger('[soul] onTurnEnd 失败:', error instanceof Error ? error.message : error)
     }
@@ -1010,6 +1089,11 @@ export function installSoul(ctx, { state, log } = {}) {
       ctx.effect(() => () => {
         try {
           dispose?.()
+        } catch {
+          /* noop */
+        }
+        try {
+          growthReflection?.dispose?.()
         } catch {
           /* noop */
         }
@@ -1316,6 +1400,13 @@ export function installSoul(ctx, { state, log } = {}) {
     saveNow,
     saveSoon,
     saveWithBackup,
+    grow,
+    growthReflection: {
+      dispose: () => growthReflection?.dispose?.(),
+      disposition: () => growthReflection?.disposition?.() ?? null,
+      lastState: () => growthReflection?.lastState?.() ?? null,
+      reflect: (options) => growthReflection?.maybeReflect?.(options) ?? Promise.resolve({ ok: false, reason: 'disabled' }),
+    },
     listGrowth: (options) => listGrowth(soul.growth, options),
     evolve: evolveSoul,
     explain,

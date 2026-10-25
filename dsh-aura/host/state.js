@@ -71,6 +71,7 @@ export const DEFAULT_CONFIG = {
   soulName: 'Aura',
   soulUserNickname: '',
   soulPromptBudget: 1020,
+  soulGrowthReflection: true,
   soulBio: '',
   soulContent: DEFAULT_SOUL_CONTENT,
   emotionEnabled: true,
@@ -159,7 +160,7 @@ const FLOAT_RANGES = {
 }
 
 const BOOL_FIELDS = new Set([
-  'autoConnect', 'splitEnabled', 'soulEnabled', 'emotionEnabled',
+  'autoConnect', 'splitEnabled', 'soulEnabled', 'soulGrowthReflection', 'emotionEnabled',
   'emotionGuardOnNegative', 'memoryDiaryEnabled', 'speakEnabled', 'speakDryRun',
   'speakStickerEnabled', 'proactiveEnabled',
 ])
