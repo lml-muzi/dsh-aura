@@ -282,13 +282,14 @@ await test('预算：核心放完才放成长；核心超预算时成长完全�
 })
 
 section('3. config 白名单与参数校验（纯函数）')
-await test('sanitizeSoulConfigPatch：7 字段白名单、长度/范围校验', () => {
+await test('sanitizeSoulConfigPatch：8 字段白名单、长度/范围校验', () => {
   const ok = sanitizeSoulConfigPatch({
     soulName: ' Aura ',
     soulUserNickname: ' 木子 ',
     soulEnabled: false,
-    soulHonestyLine: true,
     soulPromptBudget: 900,
+    soulBio: '在做项目',
+    soulContent: '## 性格\n嘴硬心软',
     interests: [' 听歌 ', '看代码'],
     strengths: ['记得住细节'],
   })
@@ -297,7 +298,7 @@ await test('sanitizeSoulConfigPatch：7 字段白名单、长度/范围校验', 
   assert.equal(ok.configPatch.soulUserNickname, '木子')
   assert.equal(ok.configPatch.soulPromptBudget, 900)
   assert.deepEqual(ok.identityPatch.interests, ['听歌', '看代码'])
-  assert.deepEqual(ok.changed, ['soulName', 'soulUserNickname', 'soulEnabled', 'soulHonestyLine', 'soulPromptBudget', 'interests', 'strengths'])
+  assert.deepEqual(ok.changed, ['soulName', 'soulUserNickname', 'soulEnabled', 'soulPromptBudget', 'soulBio', 'soulContent', 'interests', 'strengths'])
 
   const bads = [
     { hack: 1 },
@@ -415,8 +416,9 @@ await test('config：通过 state.writeConfig 写 config.json，interests/streng
       soulName: 'Aura',
       soulUserNickname: '木子',
       soulEnabled: true,
-      soulHonestyLine: true,
       soulPromptBudget: 880,
+      soulBio: '在做项目',
+      soulContent: '## 性格\n嘴硬心软',
       interests: ['听歌', '看人折腾项目'],
       strengths: ['记得住细节'],
     },
@@ -424,7 +426,7 @@ await test('config：通过 state.writeConfig 写 config.json，interests/streng
   assert.equal(result.ok, true)
   assert.deepEqual(
     [...result.configChanged].sort(),
-    ['interests', 'soulEnabled', 'soulHonestyLine', 'soulName', 'soulPromptBudget', 'soulUserNickname', 'strengths'].sort(),
+    ['interests', 'soulEnabled', 'soulBio', 'soulContent', 'soulName', 'soulPromptBudget', 'soulUserNickname', 'strengths'].sort(),
   )
   const cfg = state.readConfig()
   assert.equal(cfg.soulName, 'Aura')
@@ -434,18 +436,19 @@ await test('config：通过 state.writeConfig 写 config.json，interests/streng
   assert.deepEqual(installed.get().identity.interests, ['听歌', '看人折腾项目'])
   assert.deepEqual(installed.get().identity.strengths, ['记得住细节'])
   const text = identitySection.text()
-  assert.ok(text.includes('你喜欢：听歌、看人折腾项目。你擅长：记得住细节。'))
+  assert.ok(text.includes('## 性格'))
+  assert.ok(text.includes('嘴硬心软'))
   assert.ok(text.length <= 880)
 })
 
 await test('再次写入后，备份里会出现 config.json（先快照后写盘）', async () => {
-  const result = await evolve.execute({ text: '克制也算一种表达', config: { soulHonestyLine: false } })
+  const result = await evolve.execute({ text: '克制也算一种表达', config: { soulContent: '## 性格\n克制也算一种表达' } })
   assert.equal(result.ok, true)
   const ids = readdirSync(backupsRoot).filter((id) => id.endsWith('-soul-evolve'))
   assert.ok(ids.length >= 5, `应有多次 soul-evolve 快照，实际 ${ids.length}`)
   const manifests = ids.map((id) => JSON.parse(readFileSync(join(backupsRoot, id, 'manifest.json'), 'utf8')))
   assert.ok(manifests.some((manifest) => manifest.files.some((file) => file.name === 'config.json')))
-  assert.equal(state.readConfig().soulHonestyLine, false)
+  assert.ok(String(state.readConfig().soulContent).includes('克制也算一种表达'))
   assert.equal(identitySection.text().includes('关于身份：'), false)
 })
 

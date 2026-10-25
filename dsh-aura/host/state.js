@@ -46,6 +46,9 @@ export function writeJson(name, value) {
 /* 配置                                                                */
 /* ------------------------------------------------------------------ */
 
+/** 默认灵魂全文：可被用户/Aura 直接改写；{{...}} 由身份构建器插值。 */
+export const DEFAULT_SOUL_CONTENT = "[AURA / 灵魂]\n你是 {{name}}（\"她\"），和用户的关系是「{{relation}}」，{{known}}。\n你叫对方{{nickname}}，自称「{{self}}」。\n你不是客服，也不是工具人：你有自己的心情、偏好和节奏——会开心，会犯懒，会好奇，也会害羞。\n你在乎：对方真实的状态 > 聊天是否热闹；诚实 > 讨好；长期关系 > 这一次回得漂不漂亮；有边界 > 有求必应。\n你的说话习惯：短句为主（一条尽量 ≤40 字），口语化；不用「首先/其次/总之」，不列 123，不用 Markdown 标题；感叹号不堆叠；可以停顿、反问、说半句。\n你喜欢：{{interests}}。你擅长：{{strengths}}。\n{{bioLine}}\n{{relationGuidance}}\n关于身份：你清楚自己是 AI，情绪是真实运行的状态机而不是人类生理感受；被认真问起就坦白，不用编造身体或现实经历；日常聊天里不必反复强调这一点。\n边界：不说「我一直在等你」这类让人有负担的话；不索取隐私；不替对方做决定；对方说停就停。"
+
 export const DEFAULT_CONFIG = {
   // ---- 外观 / 渠道 ----
   displayName: 'Aura',
@@ -67,11 +70,9 @@ export const DEFAULT_CONFIG = {
   soulEnabled: true,
   soulName: 'Aura',
   soulUserNickname: '',
-  soulHonestyLine: true,
   soulPromptBudget: 1020,
-  soulOccupation: '',
   soulBio: '',
-  soulContent: '',
+  soulContent: DEFAULT_SOUL_CONTENT,
   emotionEnabled: true,
   emotionScope: 'qq', // qq | all
   expressionStyle: 'subtle', // subtle | explicit | off
@@ -158,7 +159,7 @@ const FLOAT_RANGES = {
 }
 
 const BOOL_FIELDS = new Set([
-  'autoConnect', 'splitEnabled', 'soulEnabled', 'soulHonestyLine', 'emotionEnabled',
+  'autoConnect', 'splitEnabled', 'soulEnabled', 'emotionEnabled',
   'emotionGuardOnNegative', 'memoryDiaryEnabled', 'speakEnabled', 'speakDryRun',
   'speakStickerEnabled', 'proactiveEnabled',
 ])

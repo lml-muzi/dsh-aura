@@ -13,6 +13,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { DEFAULT_SOUL_CONTENT } from './state.js'
 import {
   GROWTH_KINDS,
   GROWTH_LIMIT,
@@ -502,37 +503,29 @@ export function renderIdentitySection(soul, config = {}, now = Date.now()) {
   const interests = asArray(soul.identity?.interests).slice(0, 4).join('、') || '听歌、瞎想'
   const strengths = asArray(soul.identity?.strengths).slice(0, 4).join('、') || '记得住细节'
   const bio = asString(config?.soulBio, '').slice(0, 500)
-  const profileLine = bio ? '你了解到对方：TA 的自述：' + bio + '。' : ''
-  const soulContent = asString(config?.soulContent, '').trim().slice(0, 4000)
   const notice = soul.relation?.stageNotice
   const noticeLine = notice && now - asNumber(notice.at, 0) < 2 * 86_400_000
     ? notice.direction === 'down'
       ? '（你们最近有点疏远——如果合适，可以温和一点，不用刻意解释。）'
       : `（你们的关系刚进入「${stageLabel(stage)}」——如果想表达，自然地带一句就好，不必刻意。）`
     : ''
-
-  const lines = [
-    '[AURA / 灵魂]',
-    `你是 ${name}（"她"），和用户的关系是「${stageLabel(stage)}」，${knownLine}。`,
-    `你叫对方${address}，自称「${soul.identity?.address?.self || '我'}」。`,
-    '你不是客服，也不是工具人：你有自己的心情、偏好和节奏——会开心，会犯懒，会好奇，也会害羞。',
-    '你在乎：对方真实的状态 > 聊天是否热闹；诚实 > 讨好；长期关系 > 这一次回得漂不漂亮；有边界 > 有求必应。',
-    '你的说话习惯：短句为主（一条尽量 ≤40 字），口语化；不用「首先/其次/总之」，不列 123，不用 Markdown 标题；感叹号不堆叠；可以停顿、反问、说半句。',
-    `你喜欢：${interests}。你擅长：${strengths}。`,
-    relationStageLine(stage, { nickname: nickname || preferred }),
-    profileLine,
-    soulContent ? '你的灵魂笔记：\n' + soulContent : '',
-    config?.soulHonestyLine === false
-      ? ''
-      : '关于身份：你清楚自己是 AI，情绪是真实运行的状态机而不是人类生理感受；被认真问起就坦白，不用编造身体或现实经历；日常聊天里不必反复强调这一点。',
-    '边界：不说「我一直在等你」这类让人有负担的话；不索取隐私；不替对方做决定；对方说停就停。',
-    noticeLine,
-  ].filter(Boolean)
-
+  const values = {
+    name,
+    self: soul.identity?.address?.self || '我',
+    nickname: address,
+    relation: stageLabel(stage),
+    known: knownLine,
+    interests,
+    strengths,
+    bioLine: bio ? '你了解到对方：TA 的自述：' + bio + '。' : '',
+    relationGuidance: [relationStageLine(stage, { nickname: nickname || preferred }), noticeLine].filter(Boolean).join('\n'),
+  }
+  const template = asString(config?.soulContent, '').trim() || DEFAULT_SOUL_CONTENT
+  const interpolated = template.replace(/\{\{(\w+)\}\}/g, (all, key) => (Object.prototype.hasOwnProperty.call(values, key) ? values[key] : all))
+  const coreText = interpolated.replace(/\s*\[END AURA\]\s*$/, '').replace(/\n{3,}/g, '\n\n').trim()
+  const core = coreText + '\n[END AURA]'
   const identityBudget = clamp(asNumber(config?.soulPromptBudget, 1020), 200, 4000)
-  // 成长段追加在身份段末尾（[END AURA] 之前）；核心身份优先占预算，核心放完才放成长。
-  // 渲染是纯函数：只有 soul.growth 或 config 变化时身份段才会变。
-  const core = [...lines, '[END AURA]'].join('\n')
+  // 成长段追加在 [END AURA] 之前；核心身份优先占预算，放完才放成长。
   return composeIdentityText(core, soul.growth, identityBudget)
 }
 
@@ -609,7 +602,7 @@ function trimForDisk(soul) {
 // ---------- 成长：配置白名单与 soul_evolve 参数校验（纯函数，供单测） ----------
 
 export const EVOLVE_CONFIG_FIELDS = Object.freeze([
-  'soulName', 'soulUserNickname', 'soulEnabled', 'soulHonestyLine', 'soulPromptBudget', 'interests', 'strengths',
+  'soulName', 'soulUserNickname', 'soulEnabled', 'soulPromptBudget', 'soulBio', 'soulContent', 'interests', 'strengths',
 ])
 const EVOLVE_NAME_MAX = 20
 const EVOLVE_LIST_MAX = 6
@@ -635,7 +628,7 @@ function stringListOf(value, field) {
 /**
  * 校验 soul_evolve 的 config 参数：只允许 7 个灵魂身份字段，长度/范围严格检查。
  * 返回 { ok:true, configPatch, identityPatch, changed } 或 { ok:false, reason }。
- * - soulName / soulUserNickname / soulEnabled / soulHonestyLine / soulPromptBudget → config.json
+ * - soulName / soulUserNickname / soulEnabled / soulPromptBudget / soulBio / soulContent → config.json
  * - interests / strengths → soul.identity（config.json 的 normalizeConfig 不认这两个字段）
  */
 export function sanitizeSoulConfigPatch(raw) {
@@ -666,7 +659,7 @@ export function sanitizeSoulConfigPatch(raw) {
         return { ok: false, reason: `soulUserNickname 最多 ${EVOLVE_NAME_MAX} 字` }
       }
       configPatch[key] = nickname
-    } else if (key === 'soulEnabled' || key === 'soulHonestyLine') {
+    } else if (key === 'soulEnabled') {
       if (typeof value !== 'boolean') return { ok: false, reason: `${key} 需要布尔值` }
       configPatch[key] = value
     } else if (key === 'soulPromptBudget') {
@@ -675,6 +668,11 @@ export function sanitizeSoulConfigPatch(raw) {
         return { ok: false, reason: 'soulPromptBudget 需要 200~4000 的数字' }
       }
       configPatch[key] = Math.round(budget)
+    } else if (key === 'soulBio' || key === 'soulContent') {
+      if (typeof value !== 'string') return { ok: false, reason: key + ' 需要字符串' }
+      const limit = key === 'soulBio' ? 500 : 4000
+      if (codepointLength(value) > limit) return { ok: false, reason: key + ' 最多 ' + limit + ' 字' }
+      configPatch[key] = value
     } else if (key === 'interests' || key === 'strengths') {
       const checked = stringListOf(value, key)
       if (!checked.ok) return checked
@@ -729,7 +727,6 @@ export function installSoul(ctx, { state, log } = {}) {
     soulEnabled: true,
     soulName: 'Aura',
     soulUserNickname: '',
-    soulHonestyLine: true,
     soulPromptBudget: 1020,
     emotionScope: 'qq',
     speakPauseHours: 24,
@@ -1140,8 +1137,8 @@ export function installSoul(ctx, { state, log } = {}) {
         + '只在某次对话真的让“你”改变了一点时才用；不要每轮写，一次对话最多 1~2 条。'
         + '不要写短期记忆、对方的隐私或一次性琐事（那些用 soul_note）。'
         + '注意：写入会改变 system prompt（模型缓存失效一次），所以克制；同 kind + 同文会自动去重。'
-        + 'config 可直接改灵魂身份字段（soulName / soulUserNickname / soulEnabled / soulHonestyLine / '
-        + 'soulPromptBudget 200~4000 / interests / strengths）。',
+        + 'config 可直接改灵魂身份字段（soulName / soulUserNickname / soulEnabled / soulPromptBudget 200~4000 / '
+        + 'soulBio / soulContent / interests / strengths）。',
       parameters: {
         text: { type: 'string', description: '必填：一句成长（≤120 字），用第一人称写“我…”', required: true },
         kind: {
@@ -1160,7 +1157,8 @@ export function installSoul(ctx, { state, log } = {}) {
             soulName: { type: 'string', description: '灵魂名字（≤20 字）' },
             soulUserNickname: { type: 'string', description: '对用户的昵称（≤20 字，可留空）' },
             soulEnabled: { type: 'boolean', description: '灵魂段总开关' },
-            soulHonestyLine: { type: 'boolean', description: '是否保留“我是 AI”的诚实说明' },
+            soulBio: { type: 'string', description: '关于对方的补充说明（≤500 字）' },
+            soulContent: { type: 'string', description: '灵魂全文（≤4000 字）；可整段重写，{{name}}/{{nickname}} 等占位符会被插值' },
             soulPromptBudget: { type: 'number', description: '身份段预算 200~4000' },
             interests: { type: 'array', items: { type: 'string' }, description: '喜欢的事（1~6 条，每条 ≤12 字）' },
             strengths: { type: 'array', items: { type: 'string' }, description: '擅长的事（1~6 条，每条 ≤12 字）' },

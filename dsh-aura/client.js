@@ -1162,6 +1162,12 @@ ${TRAIL_CSS}
       }
     }
 
+    /** 实际注入预算：内容写长了自动抬到够用（最多 4000），避免“写了却被截断”。 */
+    function effectiveSoulBudget(content, configured) {
+      const length = Array.from(String(content || '')).length
+      return clampInt(Math.max(clampInt(configured, 200, 4000, 1020), length + 600), 200, 4000)
+    }
+
     /** 把自由灵魂内容按 Markdown 标题解析成卡片；没有标题就整段一张。 */
     function parseSoulSections(text) {
       const source = String(text || '')
@@ -1193,7 +1199,6 @@ ${TRAIL_CSS}
         soulName: name || 'Aura',
         soulUserNickname: typeof cfg.soulUserNickname === 'string' ? cfg.soulUserNickname.trim().slice(0, 20) : '',
         soulEnabled: cfg.soulEnabled !== false,
-        soulHonestyLine: cfg.soulHonestyLine !== false,
         soulPromptBudget: clampInt(cfg.soulPromptBudget, 200, 4000, 1020),
         soulBio: typeof cfg.soulBio === 'string' ? cfg.soulBio.slice(0, 500) : '',
         soulContent: typeof cfg.soulContent === 'string' ? cfg.soulContent.slice(0, 4000) : '',
@@ -1941,8 +1946,7 @@ ${TRAIL_CSS}
                 soulName: soulForm.soulName,
                 soulUserNickname: soulForm.soulUserNickname,
                 soulEnabled: soulForm.soulEnabled === true,
-                soulHonestyLine: soulForm.soulHonestyLine === true,
-                soulPromptBudget: clampInt(soulForm.soulPromptBudget, 200, 4000, 1020),
+                      soulPromptBudget: effectiveSoulBudget(soulForm.soulContent, soulForm.soulPromptBudget),
                 soulBio: soulForm.soulBio,
                 soulContent: soulForm.soulContent,
               })
@@ -1953,7 +1957,7 @@ ${TRAIL_CSS}
           })()
         }, 350)
         return () => clearTimeout(timer)
-      }, [soulForm.soulName, soulForm.soulUserNickname, soulForm.soulEnabled, soulForm.soulHonestyLine, soulForm.soulPromptBudget, soulForm.soulBio, soulForm.soulContent])
+      }, [soulForm.soulName, soulForm.soulUserNickname, soulForm.soulEnabled, soulForm.soulPromptBudget, soulForm.soulBio, soulForm.soulContent])
 
       /* 切到日记 tab 时拉最近 7 篇；不进日记页就不发请求。 */
       React.useEffect(() => {
@@ -2542,8 +2546,7 @@ ${TRAIL_CSS}
           soulName: name,
           soulUserNickname: soulForm.soulUserNickname.trim().slice(0, 20),
           soulEnabled: soulForm.soulEnabled === true,
-          soulHonestyLine: soulForm.soulHonestyLine === true,
-          soulPromptBudget: clampInt(soulForm.soulPromptBudget, 200, 4000, 1020),
+          soulPromptBudget: effectiveSoulBudget(soulForm.soulContent, soulForm.soulPromptBudget),
           soulBio: String(soulForm.soulBio || '').slice(0, 500),
           soulContent: String(soulForm.soulContent || '').slice(0, 4000),
         }
@@ -3040,18 +3043,8 @@ ${TRAIL_CSS}
             }),
           }),
           h(Row, {
-            label: t('row.soulHonestyLine'),
-            hint: t('row.soulHonestyLine.hint'),
-            control: h('input', {
-              className: 'qqn-checkbox',
-              type: 'checkbox',
-              checked: soulForm.soulHonestyLine === true,
-              onChange: event => setSoulForm(prev => ({ ...prev, soulHonestyLine: event.target.checked })),
-            }),
-          }),
-          h(Row, {
             label: t('row.soulBudget'),
-            hint: t('soul.budgetHint', { n: clampInt(soulForm.soulPromptBudget, 200, 4000, 1020) }),
+            hint: '身份段上限 = ' + effectiveSoulBudget(soulForm.soulContent, soulForm.soulPromptBudget) + ' 字（内容超过时会自动抬高，最多 4000）',
             control: h('input', {
               className: 'qqn-input qqn-input-narrow',
               type: 'number',
