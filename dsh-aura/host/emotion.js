@@ -16,7 +16,10 @@ import {
   stageLabel,
   isSoulSession,
   STAGES,
+  EMOTION_HISTORY_MAX,
 } from './soul.js'
+
+export { EMOTION_HISTORY_MAX }
 
 // ---------- 常量 / 纯函数 ----------
 
@@ -33,6 +36,18 @@ export const IRONY_MARKS = ['呵呵', '真是', '可真是', '真行', '服了',
 export const RELATION_EVENT_RE = /(分手|吵架|道歉|和好|离职|表白|家里人|去世|生病|面试|生日|纪念日|搬家|结婚|怀孕|住院)/
 export const GAIN = { valence: 0.35, arousal: 0.55, affection: 0.12, energy: 0.2 }
 export const DEFAULT_HALF_LIFE = { valenceMs: 3 * 3_600_000, arousalMs: 45 * 60_000, energyMs: 6 * 3_600_000 }
+
+/** 本次升级新增：长期基准 / 趋势 / 事件显著性 / 注入预算（对外导出，自测复用）。 */
+export const BASELINE_HALF_LIFE_MS = 3 * 86_400_000
+export const AFFECTION_HALF_LIFE_MS = 30 * 86_400_000
+export const TREND_RECENT_HOURS = 6
+export const TREND_PREV_HOURS = 24
+export const TREND_THRESHOLD = 0.05
+export const SALIENCE_MIN = 0.3
+export const SALIENCE_MAX = 1.8
+export const EMOTION_CONTEXT_BUDGET = 160
+export const SUBTLE_CONTEXT_BUDGET = 100
+export const EMOTION_SNAPSHOT_HISTORY = 40
 
 const STYLE_HINTS = {
   兴奋: '可以接梗、说快点、多互动',
@@ -94,7 +109,7 @@ export function ruleAppraise(text, ctx = {}) {
   valence = clamp(valence / 2, -1, 1)
   const irony = IRONY_MARKS.some((mark) => s.includes(mark))
   const cause = hits.slice(0, 3).join('、')
-  return {
+  const appraisal = {
     valenceDelta: valence,
     arousalDelta: clamp(arousal, -1, 1),
     affectionDelta: clamp(affection, -1, 1),
@@ -104,6 +119,9 @@ export function ruleAppraise(text, ctx = {}) {
     confidence: irony ? 0.4 : 0.5,
     irony,
   }
+  // 事件显著性：冲突/道歉/表白/约定/重要分享高，日常寒暄低（0.3~1.8）。
+  appraisal.salience = salienceOf(s, appraisal)
+  return appraisal
 }
 
 export function personalityGain(traits = {}) {
@@ -139,6 +157,215 @@ export function decayTo(value, base, updatedAt, halfLifeMs, now) {
   return base + (value - base) * Math.pow(0.5, h)
 }
 
+// ---------- 长期基准 / 历史 / 趋势 ----------
+
+const finiteNumber = (value, fallback) => {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+/** 默认长期基准：首次用性格 + 昼夜推出来的值兜底，之后交给 EWMA 跟随历史。 */
+export function defaultBaseline(traits = {}, now = Date.now()) {
+  const base = baseOf(traits, now)
+  return {
+    valence: clamp(finiteNumber(base.valence, 0), -1, 1),
+    arousal: clamp(finiteNumber(base.arousal, 0.2), 0, 1),
+    affection: 0.5,
+    energy: clamp(finiteNumber(base.energy, 0.7), 0, 1),
+    updatedAt: now,
+  }
+}
+
+/** 读当前基准（纯函数）：缺失/坏值回落默认，不写状态。 */
+export function baselineOf(emotion, traits = {}, now = Date.now()) {
+  const raw = emotion && typeof emotion === 'object' ? emotion.baseline : null
+  const fallback = defaultBaseline(traits, now)
+  if (!raw || typeof raw !== 'object') return fallback
+  return {
+    valence: clamp(finiteNumber(raw.valence, fallback.valence), -1, 1),
+    arousal: clamp(finiteNumber(raw.arousal, fallback.arousal), 0, 1),
+    affection: clamp(finiteNumber(raw.affection, fallback.affection), 0, 1),
+    energy: clamp(finiteNumber(raw.energy, fallback.energy), 0, 1),
+    updatedAt: finiteNumber(raw.updatedAt, now),
+  }
+}
+
+/** 时间加权 EWMA：每过一个半衰期吃掉一半差距（不是按调用次数）。 */
+export function ewmaToward(previous, target, updatedAt, now, halfLifeMs) {
+  const life = finiteNumber(halfLifeMs, 0)
+  if (!(life > 0)) return target
+  const elapsed = Math.max(0, now - finiteNumber(updatedAt, now))
+  const alpha = 1 - Math.pow(0.5, elapsed / life)
+  return previous + (target - previous) * alpha
+}
+
+/**
+ * 基准缓慢跟随历史（半衰期约 3 天）；没有 baseline 时用当前值初始化（"初始取首条"）。
+ * 会写回 emotion.baseline，返回新基准。
+ */
+export function updateBaseline(emotion, values = {}, now = Date.now(), halfLifeMs = BASELINE_HALF_LIFE_MS) {
+  const raw = emotion && typeof emotion === 'object' ? emotion : {}
+  const hasPrevious = raw.baseline !== null && typeof raw.baseline === 'object'
+  const fallback = defaultBaseline({}, now)
+  const previous = hasPrevious ? baselineOf(raw, {}, now) : null
+  const pick = (key, fallbackValue, min, max) => clamp(finiteNumber(values[key], fallbackValue), min, max)
+  const next = hasPrevious
+    ? {
+        valence: clamp(ewmaToward(previous.valence, pick('valence', previous.valence, -1, 1), previous.updatedAt, now, halfLifeMs), -1, 1),
+        arousal: clamp(ewmaToward(previous.arousal, pick('arousal', previous.arousal, 0, 1), previous.updatedAt, now, halfLifeMs), 0, 1),
+        affection: clamp(ewmaToward(previous.affection, pick('affection', previous.affection, 0, 1), previous.updatedAt, now, halfLifeMs), 0, 1),
+        energy: clamp(ewmaToward(previous.energy, pick('energy', previous.energy, 0, 1), previous.updatedAt, now, halfLifeMs), 0, 1),
+        updatedAt: now,
+      }
+    : {
+        valence: pick('valence', fallback.valence, -1, 1),
+        arousal: pick('arousal', fallback.arousal, 0, 1),
+        affection: pick('affection', fallback.affection, 0, 1),
+        energy: pick('energy', fallback.energy, 0, 1),
+        updatedAt: now,
+      }
+  if (emotion && typeof emotion === 'object') emotion.baseline = next
+  return next
+}
+
+/** 往 ring 里压一条情绪历史（超 240 丢最旧）。会写回 emotion.history。 */
+export function pushHistory(emotion, entry = {}, max = EMOTION_HISTORY_MAX) {
+  const raw = emotion && typeof emotion === 'object' ? emotion : {}
+  const history = Array.isArray(raw.history) ? raw.history : []
+  history.push({
+    at: finiteNumber(entry.at, Date.now()),
+    valence: clamp(finiteNumber(entry.valence, 0), -1, 1),
+    arousal: clamp(finiteNumber(entry.arousal, 0.2), 0, 1),
+    affection: clamp(finiteNumber(entry.affection, 0.5), 0, 1),
+    energy: clamp(finiteNumber(entry.energy, 0.7), 0, 1),
+    label: codepointSlice(String(entry.label ?? ''), 4),
+    cause: codepointSlice(String(entry.cause ?? ''), 40),
+    weight: clamp(finiteNumber(entry.weight, 1), SALIENCE_MIN, SALIENCE_MAX),
+  })
+  const cap = Math.max(1, Math.round(finiteNumber(max, EMOTION_HISTORY_MAX)))
+  if (history.length > cap) history.splice(0, history.length - cap)
+  if (emotion && typeof emotion === 'object') emotion.history = history
+  return history
+}
+
+/** 面板用快照：旧→新，最多 limit 条（默认 60）。 */
+export function historySnapshot(emotion, limit = 60) {
+  const list = Array.isArray(emotion?.history) ? emotion.history : []
+  const rows = list
+    .filter((row) => row && typeof row === 'object' && Number.isFinite(Number(row.at)))
+    .map((row) => ({
+      at: Math.round(Number(row.at)),
+      valence: round3(clamp(finiteNumber(row.valence, 0), -1, 1)),
+      arousal: round3(clamp(finiteNumber(row.arousal, 0.2), 0, 1)),
+      affection: round3(clamp(finiteNumber(row.affection, 0.5), 0, 1)),
+      energy: round3(clamp(finiteNumber(row.energy, 0.7), 0, 1)),
+      label: String(row.label ?? '').slice(0, 4),
+      cause: String(row.cause ?? '').slice(0, 40),
+      weight: round3(clamp(finiteNumber(row.weight, 1), SALIENCE_MIN, SALIENCE_MAX)),
+    }))
+  const cap = Math.max(1, Math.round(finiteNumber(limit, 60)))
+  return rows.slice(-cap)
+}
+
+/** 最近一次变化（面板/快照展示用）。 */
+export function lastChangeOf(emotion) {
+  const rows = historySnapshot(emotion, 1)
+  const last = rows[rows.length - 1]
+  if (!last) return { at: 0, label: '', cause: '', weight: 0 }
+  return { at: last.at, label: last.label, cause: last.cause, weight: last.weight }
+}
+
+/** 四维压成一个 0..1 的综合分（valence 折算进 0..1），只用于趋势/基准对比。 */
+export function compositeOf(values = {}) {
+  const v = (clamp(finiteNumber(values.valence, 0), -1, 1) + 1) / 2
+  const a = clamp(finiteNumber(values.arousal, 0.2), 0, 1)
+  const affection = clamp(finiteNumber(values.affection, 0.5), 0, 1)
+  const energy = clamp(finiteNumber(values.energy, 0.7), 0, 1)
+  return v * 0.4 + a * 0.2 + affection * 0.25 + energy * 0.15
+}
+
+function meanOf(values) {
+  if (!values.length) return 0
+  return values.reduce((sum, value) => sum + value, 0) / values.length
+}
+
+/**
+ * 趋势：最近 6 小时均值 vs 前 24 小时均值（没有前 24 小时就退回 baseline）。
+ * Δ > +0.05 走高、Δ < -0.05 走低，否则平稳；volatility = 最近窗口的综合分标准差。
+ */
+export function computeTrend(emotion, now = Date.now(), current = null) {
+  const rows = historySnapshot(emotion, EMOTION_HISTORY_MAX)
+  const recentFrom = now - TREND_RECENT_HOURS * 3_600_000
+  const prevFrom = now - (TREND_RECENT_HOURS + TREND_PREV_HOURS) * 3_600_000
+  const recentValues = rows.filter((row) => row.at >= recentFrom).map(compositeOf)
+  const previousValues = rows.filter((row) => row.at >= prevFrom && row.at < recentFrom).map(compositeOf)
+  const baseline = baselineOf(emotion, {}, now)
+  const currentValue = current ? compositeOf(current) : compositeOf(baseline)
+  const recentMean = recentValues.length ? meanOf(recentValues) : currentValue
+  const referenceMean = previousValues.length ? meanOf(previousValues) : compositeOf(baseline)
+  const delta = clamp(recentMean - referenceMean, -1, 1)
+  const volatility = recentValues.length > 1
+    ? clamp(Math.sqrt(meanOf(recentValues.map((value) => (value - recentMean) ** 2))), 0, 1)
+    : 0
+  return {
+    direction: delta > TREND_THRESHOLD ? 'up' : delta < -TREND_THRESHOLD ? 'down' : 'flat',
+    delta: round3(delta),
+    windowHours: TREND_RECENT_HOURS,
+    volatility: round3(volatility),
+    reference: previousValues.length ? 'history' : 'baseline',
+  }
+}
+
+// ---------- 事件显著性（salience） ----------
+
+/** 高权重：冲突 / 道歉 / 表白 / 约定 / 重要分享（≥1.3）。 */
+export const SALIENCE_HIGH_RE = /(分手|吵架|冷战|道歉|对不起|我错了|和好|表白|喜欢你|爱你|想你|约定|说好了|答应|承诺|发誓|重要|秘密|只有你|别走|别离开|去世|走了|生病|住院|手术|离职|辞职|搬家|结婚|怀孕|面试|生日|纪念日|第一次|最后一次)/
+/** 低权重：日常寒暄 / 极短应答（≤0.6）。 */
+export const SALIENCE_LOW_RE = /^(嗯+|哦+|噢+|好的?|行|在吗|在不在|早|早安|晚安|哈+|嘿嘿|收到|没事|随便|都行|算了|吃了吗|睡了|拜拜|88|好呀|好嘞|辛苦了)[。.!！…~～\s]*$/
+
+/** 一条消息对情绪的冲击权重（0.3~1.8）；规则侧默认 1。 */
+export function salienceOf(text, appraisal = {}) {
+  const s = String(text ?? '').trim()
+  const ap = appraisal && typeof appraisal === 'object' ? appraisal : {}
+  const high = SALIENCE_HIGH_RE.test(s)
+  const low = SALIENCE_LOW_RE.test(s)
+  let weight = 1
+  if (high) {
+    weight = 1.3
+    if (/(分手|去世|走了|住院|手术|辞职|离职|结婚|怀孕|表白)/.test(s)) weight = 1.5
+    if (ap.irony === true) weight += 0.1
+  } else if (low) {
+    weight = 0.4
+  } else {
+    // 重要分享：明显长的一段话（1.3）；一般分享（1.15）；极短应答（0.8）。
+    const length = codepointLength(s)
+    if (length >= 160) weight = 1.3
+    else if (length >= 90) weight = 1.15
+    else if (length > 0 && length <= 3) weight = 0.8
+  }
+  const magnitude = Math.max(
+    Math.abs(finiteNumber(ap.valenceDelta, 0)),
+    Math.abs(finiteNumber(ap.affectionDelta, 0)),
+    Math.abs(finiteNumber(ap.arousalDelta, 0)) * 0.6,
+  )
+  if (!low && magnitude >= 0.5) weight += 0.1
+  return round3(clamp(weight, SALIENCE_MIN, SALIENCE_MAX))
+}
+
+/** LLM 复核给了 intensity 时乘进规则 salience，再夹回 0.3~1.8。 */
+export function salienceWithIntensity(base, intensity) {
+  const factor = clamp(finiteNumber(intensity, 1), 0, 2)
+  return round3(clamp(finiteNumber(base, 1) * factor, SALIENCE_MIN, SALIENCE_MAX))
+}
+
+/** appraisal 上的最终权重：显式 salience 优先，否则按原文估一个。 */
+export function salienceOfAppraisal(appraisal = {}) {
+  const ap = appraisal && typeof appraisal === 'object' ? appraisal : {}
+  const explicit = Number(ap.salience)
+  if (Number.isFinite(explicit)) return clamp(explicit, SALIENCE_MIN, SALIENCE_MAX)
+  return salienceOf(ap.text ?? '', ap)
+}
+
 export function computeIntensity(transient, mood) {
   const v = clamp(Number(transient?.valence) || 0, -1, 1)
   const a = clamp(Number(transient?.arousal) || 0, 0, 1)
@@ -167,24 +394,26 @@ export function decayedEmotion(soul, config = {}, now = Date.now()) {
   const mood = raw.mood ?? {}
   const drive = raw.drive ?? {}
   const traits = soul?.identity?.traits ?? {}
-  const base = baseOf(traits, now)
+  // 衰减目标 = 长期基准（不再回中性/性格基线）；基准本身由 appraisal 时的 EWMA 缓慢跟随历史。
+  const baseline = baselineOf(raw, traits, now)
   const halfLife = halfLivesOf(config)
   const updatedAt = Number(t.updatedAt) || now
-  const valence = clamp(decayTo(clamp(Number(t.valence) || 0, -1, 1), base.valence, updatedAt, halfLife.valenceMs, now), -1, 1)
-  const arousal = clamp(decayTo(clamp(Number(t.arousal) || 0.2, 0, 1), base.arousal, updatedAt, halfLife.arousalMs, now), 0, 1)
-  const energy = clamp(decayTo(clamp(Number(drive.energy) || 0.7, 0, 1), base.energy, Number(drive.updatedAt) || now, halfLife.energyMs, now), 0, 1)
+  const valence = clamp(decayTo(clamp(Number(t.valence) || 0, -1, 1), baseline.valence, updatedAt, halfLife.valenceMs, now), -1, 1)
+  const arousal = clamp(decayTo(clamp(Number(t.arousal) || 0.2, 0, 1), baseline.arousal, updatedAt, halfLife.arousalMs, now), 0, 1)
+  const energy = clamp(decayTo(clamp(Number(drive.energy) || 0.7, 0, 1), baseline.energy, Number(drive.updatedAt) || now, halfLife.energyMs, now), 0, 1)
   // 心情标签：保留 LLM/自报的自由标签 2 小时内，否则按平面重算
   const source = String(t.source ?? 'rule')
   const freeRecent = (source === 'llm' || source === 'self') && now - updatedAt < 2 * 3_600_000
   const label = freeRecent && t.label ? String(t.label).slice(0, 4) : planeLabel(valence, arousal)
   const moodView = {
-    valence: clamp(decayTo(clamp(Number(mood.valence) || 0, -1, 1), base.valence, Number(mood.updatedAt) || now, halfLife.valenceMs * 3, now), -1, 1),
-    arousal: clamp(decayTo(clamp(Number(mood.arousal) || 0.24, 0, 1), base.arousal, Number(mood.updatedAt) || now, halfLife.arousalMs * 3, now), 0, 1),
+    valence: clamp(decayTo(clamp(Number(mood.valence) || 0, -1, 1), baseline.valence, Number(mood.updatedAt) || now, halfLife.valenceMs * 3, now), -1, 1),
+    arousal: clamp(decayTo(clamp(Number(mood.arousal) || 0.24, 0, 1), baseline.arousal, Number(mood.updatedAt) || now, halfLife.arousalMs * 3, now), 0, 1),
   }
-  let affection = clamp(Number(raw.affection) || 0.5, 0, 1)
-  if (affection > 0.85) {
-    affection = clamp(decayTo(affection, 0.85, Number(raw.affectionUpdatedAt) || now, 30 * 86_400_000, now), 0, 1)
-  }
+  // affection 的时间常数沿用原来的 30 天（旧实现只在 >0.85 时朝 0.85 收），现在朝基准收。
+  const affection = clamp(
+    decayTo(clamp(Number(raw.affection) || 0.5, 0, 1), baseline.affection, Number(raw.affectionUpdatedAt) || now, AFFECTION_HALF_LIFE_MS, now),
+    0, 1,
+  )
   const lastUserAt = Number(soul?.relation?.lastUserAt) || 0
   const idleHours = lastUserAt > 0 ? Math.max(0, now - lastUserAt) / 3_600_000 : 0
   const socialNeed = clamp(clamp(Number(drive.socialNeed) || 0.35, 0, 1) + Math.min(0.6, idleHours * 0.04), 0, 1)
@@ -195,6 +424,8 @@ export function decayedEmotion(soul, config = {}, now = Date.now()) {
     mood: moodView,
     drive: { energy, socialNeed },
     affection,
+    baseline,
+    trend: computeTrend(raw, now, { valence, arousal, affection, energy }),
     lastRecheckTurn: Number(raw.lastRecheckTurn) || -999,
     source,
     style: normalizeStyle(config.expressionStyle),
@@ -219,26 +450,28 @@ function moodK(previousAt, now) {
 }
 
 /**
- * 把一次 Appraisal 落到 soul.emotion（会写状态）。返回 {before, after}。
- * 单次修正限幅：|Δval| ≤ 0.6、|Δaff| ≤ 0.4（LLM 复核必过这里）。
+ * 把一次 Appraisal 落到 soul.emotion（会写状态）。返回 {before, after, salience}。
+ * 事件显著性 salience（0.3~1.8）先乘进 Δ 再限幅：|Δval| ≤ 0.6、|Δaff| ≤ 0.4（LLM 复核必过这里）。
+ * 同时更新长期基准（EWMA）并压一条 history。
  */
 export function applyAppraisal(soul, appraisal, config = {}, now = Date.now()) {
   const ap = appraisal && typeof appraisal === 'object' ? appraisal : {}
   const before = decayedEmotion(soul, config, now)
   const traits = soul?.identity?.traits ?? {}
-  const base = baseOf(traits, now)
+  const emo = soul.emotion
+  const baseline = baselineOf(emo, traits, now)
   const gain = personalityGain(traits)
   const scale = 0.7 + clamp(Number(ap.confidence) || 0.5, 0, 1) * 0.6
-  const dv = clamp(Number(ap.valenceDelta) || 0, -0.6, 0.6)
-  const da = clamp(Number(ap.arousalDelta) || 0, -0.6, 0.6)
-  const dAff = clamp(Number(ap.affectionDelta) || 0, -0.4, 0.4)
-  const dEnergy = clamp(Number(ap.energyDelta) || 0, -0.4, 0.4)
-  const emo = soul.emotion
+  const salience = salienceOfAppraisal(ap)
+  const dv = clamp((Number(ap.valenceDelta) || 0) * salience, -0.6, 0.6)
+  const da = clamp((Number(ap.arousalDelta) || 0) * salience, -0.6, 0.6)
+  const dAff = clamp((Number(ap.affectionDelta) || 0) * salience, -0.4, 0.4)
+  const dEnergy = clamp((Number(ap.energyDelta) || 0) * salience, -0.4, 0.4)
   const t = emo.transient
   const valenceGain = dv < 0 ? gain.negativeValence : gain.valence
-  const targetV = clamp(base.valence + dv * valenceGain * scale, -1, 1)
+  const targetV = clamp(baseline.valence + dv * valenceGain * scale, -1, 1)
   t.valence = clamp(Number(t.valence) || 0, -1, 1) + (targetV - (Number(t.valence) || 0)) * GAIN.valence
-  const targetA = clamp(base.arousal + da * gain.arousal * scale + Math.abs(dv) * 0.2, 0, 1)
+  const targetA = clamp(baseline.arousal + da * gain.arousal * scale + Math.abs(dv) * 0.2, 0, 1)
   t.arousal = clamp(clamp(Number(t.arousal) || 0.2, 0, 1) + (targetA - (Number(t.arousal) || 0.2)) * GAIN.arousal, 0, 1)
   emo.affection = clamp(clamp(Number(emo.affection) || 0.5, 0, 1) + dAff * gain.affection * scale, 0, 1)
   emo.affectionUpdatedAt = now
@@ -255,7 +488,24 @@ export function applyAppraisal(soul, appraisal, config = {}, now = Date.now()) {
   emo.mood.updatedAt = now
   emo.source = t.source
   const after = decayedEmotion(soul, config, now)
-  return { before, after }
+  // 基准缓慢跟随历史；再压一条带权重的 history（ring 240）。
+  updateBaseline(emo, {
+    valence: after.transient.valence,
+    arousal: after.transient.arousal,
+    affection: after.affection,
+    energy: after.drive.energy,
+  }, now)
+  pushHistory(emo, {
+    at: now,
+    valence: after.transient.valence,
+    arousal: after.transient.arousal,
+    affection: after.affection,
+    energy: after.drive.energy,
+    label: after.transient.label,
+    cause: after.transient.cause,
+    weight: salience,
+  })
+  return { before, after, salience }
 }
 
 /** 情绪调节（纯本地、不花模型）：过载降温 / 内感受挫败 / 混合情绪词。 */
@@ -283,6 +533,27 @@ export function regulateEmotion(soul, options = {}) {
   return { changed }
 }
 
+/**
+ * 趋势/基准的一句话（≤40 字，不暴露数值）。
+ * 例：「最近整体比基线略低，在走低，有点起伏」。
+ */
+export function describeTrend(emotion) {
+  const e = emotion && typeof emotion === 'object' ? emotion : {}
+  const trend = e.trend && typeof e.trend === 'object' ? e.trend : {}
+  const current = compositeOf({
+    valence: e.transient?.valence,
+    arousal: e.transient?.arousal,
+    affection: e.affection,
+    energy: e.drive?.energy,
+  })
+  const baseline = e.baseline && typeof e.baseline === 'object' ? e.baseline : {}
+  const diff = current - compositeOf(baseline)
+  const compare = diff > 0.04 ? '比基线略高' : diff < -0.04 ? '比基线略低' : '跟基线差不多'
+  const move = trend.direction === 'up' ? '，在走高' : trend.direction === 'down' ? '，在走低' : '，偏稳'
+  const wiggle = finiteNumber(trend.volatility, 0) > 0.12 ? '，有点起伏' : ''
+  return codepointSlice(`最近整体${compare}${move}${wiggle}`, 40)
+}
+
 /** 情绪上下文段（context order 30）。off 返回空串；subtle 只在显著时注入；不向用户暴露数值。 */
 export function renderEmotionContext(soul, config = {}, now = Date.now()) {
   const style = normalizeStyle(config.expressionStyle)
@@ -290,17 +561,18 @@ export function renderEmotionContext(soul, config = {}, now = Date.now()) {
   if (config.emotionEnabled === false || config.soulEnabled === false) return ''
   const e = decayedEmotion(soul, config, now)
   const hint = STYLE_HINTS[e.transient.label] ?? '自然即可'
+  const trendText = describeTrend(e)
   if (style === 'subtle') {
     if (!isSalient(e)) return ''
     const tired = Number(e.drive.energy) < 0.3 && !/低落|沮丧|烦躁/.test(e.transient.label) ? '，也有一点累' : ''
-    return codepointSlice(`（此刻心情：${e.transient.label}${tired}，${hint}。）`, 60)
+    return codepointSlice(`（此刻心情：${e.transient.label}${tired}；${trendText}，${hint}。）`, SUBTLE_CONTEXT_BUDGET)
   }
   const neg = e.transient.valence < -0.3 ? '偏负面' : e.transient.valence > 0.3 ? '偏正面' : '中性'
   return codepointSlice(
     `[情绪] 标签=${e.transient.label} 愉悦=${e.transient.valence.toFixed(2)} 唤醒=${e.transient.arousal.toFixed(2)}`
     + ` 亲近=${e.affection.toFixed(2)} 精力=${e.drive.energy.toFixed(2)} 强度=${e.transient.intensity.toFixed(2)}`
-    + ` 关系=${e.stageLabel}；表达：${hint}（整体${neg}）；不要向用户报告这些数值，也不要解释"我的情绪"。`,
-    140,
+    + ` 关系=${e.stageLabel}；${trendText}；表达：${hint}（整体${neg}）；不要向用户报告这些数值，也不要解释"我的情绪"。`,
+    EMOTION_CONTEXT_BUDGET,
   )
 }
 
@@ -321,7 +593,8 @@ export const RECHECK_SYSTEM = [
   '只输出一行 JSON，不要解释，不要 markdown 代码块，不要思考过程。',
   '字段：valenceDelta(-1..1，对愉悦的影响；反讽注意表面褒义实际负面)、',
   'arousalDelta(-1..1，被激活的程度)、affectionDelta(-1..1，对和这个人亲近感的影响)、',
-  'energyDelta(-1..1，精力变化，通常 0)、label(可选，中文 2~4 字，如"感动""心虚")、',
+  'energyDelta(-1..1，精力变化，通常 0)、intensity(0..2，这条消息的冲击强度，1=普通)、',
+  'label(可选，中文 2~4 字，如"感动""心虚")、',
   'cause(≤30 字，一句话原因，用"用户…"开头)、confidence(0..1)。',
   '关系阶段会影响解读：陌生阶段的调侃不当冒犯；亲密阶段的冷淡更伤。',
 ].join('\n')
@@ -361,6 +634,7 @@ export function parseRecheckOutput(out) {
     arousalDelta: clamp(number(parsed.arousalDelta) ?? 0, -0.6, 0.6),
     affectionDelta: clamp(number(parsed.affectionDelta) ?? 0, -0.4, 0.4),
     energyDelta: clamp(number(parsed.energyDelta) ?? 0, -0.4, 0.4),
+    intensity: number(parsed.intensity) === undefined ? undefined : clamp(number(parsed.intensity), 0, 2),
     label,
     cause: codepointSlice(String(parsed.cause ?? '用户这条消息').trim(), 40),
     confidence: clamp(number(parsed.confidence) ?? 0.8, 0, 1),
@@ -506,6 +780,8 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
         logger('[soul] 情绪复核输出无法解析:', codepointSlice(out.slice(-80), 80))
         return
       }
+      // 规则 salience × LLM intensity ⇒ 最终权重（0.3~1.8）
+      appraisal.salience = salienceWithIntensity(ruleAppraisal?.salience ?? salienceOf(text), appraisal.intensity)
       const current = readSoul()
       const applied = applyAppraisal(current, appraisal, config)
       current.emotion.source = 'llm'
@@ -726,6 +1002,23 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
         lastRecheckTurn: Number(raw.lastRecheckTurn) || -999,
         recheckModel: recheckModel ? `${recheckModel.provider}/${recheckModel.model}` : '',
         updatedAt: Number(e.transient.updatedAt) || 0,
+        // 本次升级：长期基准 / 趋势 / 最近 40 条历史 / 最近一次变化
+        baseline: {
+          valence: round3(e.baseline.valence),
+          arousal: round3(e.baseline.arousal),
+          affection: round3(e.baseline.affection),
+          energy: round3(e.baseline.energy),
+          updatedAt: Number(e.baseline.updatedAt) || 0,
+        },
+        trend: {
+          direction: e.trend.direction,
+          delta: e.trend.delta,
+          windowHours: e.trend.windowHours,
+          volatility: e.trend.volatility,
+          reference: e.trend.reference,
+        },
+        history: historySnapshot(raw, EMOTION_SNAPSHOT_HISTORY),
+        lastChange: lastChangeOf(raw),
       }
     } catch (error) {
       logger('[soul] emotion snapshot 失败:', error instanceof Error ? error.message : error)
@@ -764,7 +1057,22 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
     recheck,
     enabledForSession: (assembly) => enabledForSession(assembly, readConfig()),
     regulate: (options) => regulateEmotion(readSoul(), options),
-    constants: { LEXICON, IRONY_MARKS, GAIN, DEFAULT_HALF_LIFE, RECHECK_SYSTEM },
+    historySnapshot: (limit = 60) => historySnapshot(readSoul().emotion, limit),
+    trend: (now) => computeTrend(readSoul().emotion, now ?? Date.now()),
+    constants: {
+      LEXICON,
+      IRONY_MARKS,
+      GAIN,
+      DEFAULT_HALF_LIFE,
+      RECHECK_SYSTEM,
+      EMOTION_HISTORY_MAX,
+      BASELINE_HALF_LIFE_MS,
+      AFFECTION_HALF_LIFE_MS,
+      TREND_THRESHOLD,
+      SALIENCE_MIN,
+      SALIENCE_MAX,
+      EMOTION_CONTEXT_BUDGET,
+    },
   }
 }
 

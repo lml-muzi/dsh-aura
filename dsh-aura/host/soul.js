@@ -116,6 +116,16 @@ export function defaultsSoul(now = Date.now()) {
       affectionUpdatedAt: now,
       lastRecheckTurn: -999,
       source: 'rule',
+      // 长期情绪基准（EWMA，半衰期约 3 天）：四维衰减不再回中性，而是回这里。
+      // 旧 soul.json 没有这两个字段，normalizeSoul 会按默认值/空历史补齐。
+      baseline: {
+        valence: 0.05,
+        arousal: 0.4,
+        affection: 0.5,
+        energy: 0.7,
+        updatedAt: now,
+      },
+      history: [],
     },
     memory: emptyMemoryState(),
     growth: [],
@@ -165,6 +175,41 @@ function asNumber(value, fallback = 0) {
 
 function asId(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : randomUUID()
+}
+
+/** 情绪历史 ring 上限（与 host/emotion.js 共用；emotion.js 从这里 import，避免两处常量漂移）。 */
+export const EMOTION_HISTORY_MAX = 240
+
+/** 情绪长期基准：缺失取默认值，非法值夹取。 */
+function normalizeEmotionBaseline(raw, fallback, now) {
+  const source = asObject(raw)
+  const base = asObject(fallback)
+  // null/空串按"缺字段"处理：Number(null) === 0，直接 asNumber 会把缺失压成 0。
+  const pick = (value, fallbackValue) => (value === null || value === undefined || value === '' ? fallbackValue : asNumber(value, fallbackValue))
+  return {
+    valence: clamp(pick(source.valence, asNumber(base.valence, 0.05)), -1, 1),
+    arousal: clamp(pick(source.arousal, asNumber(base.arousal, 0.4)), 0, 1),
+    affection: clamp(pick(source.affection, asNumber(base.affection, 0.5)), 0, 1),
+    energy: clamp(pick(source.energy, asNumber(base.energy, 0.7)), 0, 1),
+    updatedAt: asNumber(source.updatedAt, now),
+  }
+}
+
+/** 情绪历史：只留带合法时间戳的条目（坏条整条丢弃），旧→新，ring 截到 240。 */
+function normalizeEmotionHistory(raw, now) {
+  return asArray(raw)
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row) && Number.isFinite(Number(row.at)) && Number(row.at) > 0)
+    .map((row) => ({
+      at: asNumber(row.at, now),
+      valence: clamp(asNumber(row.valence, 0), -1, 1),
+      arousal: clamp(asNumber(row.arousal, 0.2), 0, 1),
+      affection: clamp(asNumber(row.affection, 0.5), 0, 1),
+      energy: clamp(asNumber(row.energy, 0.7), 0, 1),
+      label: asString(row.label, '').slice(0, 4),
+      cause: asString(row.cause, '').slice(0, 40),
+      weight: clamp(asNumber(row.weight, 1), 0.3, 1.8),
+    }))
+    .slice(-EMOTION_HISTORY_MAX)
 }
 
 /** 把磁盘上/迁移来的东西洗成一份一定可用的 soul。坏条丢弃，不整份回默认。 */
@@ -240,6 +285,9 @@ export function normalizeSoul(raw, now = Date.now()) {
   emo.affectionUpdatedAt = asNumber(emo.affectionUpdatedAt, now)
   emo.lastRecheckTurn = Math.round(asNumber(emo.lastRecheckTurn, -999))
   emo.source = asString(emo.source, 'rule').slice(0, 12) || 'rule'
+  // 本次升级新增字段：旧文件缺 baseline/history，坏条丢弃、数值夹取，不整份回默认。
+  emo.baseline = normalizeEmotionBaseline(raw.emotion?.baseline, d.emotion.baseline, now)
+  emo.history = normalizeEmotionHistory(raw.emotion?.history, now)
   s.emotion = emo
 
   // memory 已拆到独立 memory.json（host/memory-store.js）：soul 不再归一化/保存短期记忆。
@@ -607,6 +655,9 @@ function trimForDisk(soul) {
   copy.speak.log = asArray(copy.speak.log).slice(-60)
   copy.speak.recentTexts = asArray(copy.speak.recentTexts).slice(-10)
   copy.relation.milestones = asArray(copy.relation.milestones).slice(-20)
+  if (copy.emotion && typeof copy.emotion === 'object') {
+    copy.emotion.history = asArray(copy.emotion.history).slice(-EMOTION_HISTORY_MAX)
+  }
   copy.explainLog = asArray(copy.explainLog).slice(-EXPLAIN_LIMIT)
   copy.meta.updatedAt = Date.now()
   return copy
@@ -1354,6 +1405,33 @@ export function installSoul(ctx, { state, log } = {}) {
           turns: soul.relation.turns,
           lastUserAt: soul.relation.lastUserAt,
           milestones: soul.relation.milestones.slice(-5),
+        },
+        emotion: {
+          // 兜底块：web.js 优先用 emotion.snapshot()（带 trend 等实时计算），
+          // 这里保证 emotion 模块缺席时面板也有四维/基准/历史可渲染。
+          label: soul.emotion.transient.label,
+          valence: soul.emotion.transient.valence,
+          arousal: soul.emotion.transient.arousal,
+          affection: soul.emotion.affection,
+          energy: soul.emotion.drive.energy,
+          intensity: soul.emotion.transient.intensity,
+          cause: soul.emotion.transient.cause,
+          source: soul.emotion.source,
+          updatedAt: soul.emotion.transient.updatedAt,
+          baseline: { ...soul.emotion.baseline },
+          trend: null,
+          history: asArray(soul.emotion.history).slice(-40).map((row) => ({ ...row })),
+          lastChange: (() => {
+            const last = asArray(soul.emotion.history).slice(-1)[0]
+            return last
+              ? {
+                  at: asNumber(last.at, 0),
+                  label: asString(last.label, ''),
+                  cause: asString(last.cause, ''),
+                  weight: asNumber(last.weight, 1),
+                }
+              : { at: 0, label: '', cause: '', weight: 0 }
+          })(),
         },
         speak: {
           lastAt: soul.speak.lastAt,

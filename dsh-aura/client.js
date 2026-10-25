@@ -287,6 +287,16 @@ window.__ModuleLoader__.load({
       'style.off': '关闭',
       'row.emotionLastChange': '最近一次变化',
       'emotion.empty': '还没有情绪数据（灵魂层启动后会自动记录）',
+      'emotion.baseline': '基准',
+      'emotion.trend.up': '走高',
+      'emotion.trend.down': '走低',
+      'emotion.trend.flat': '平稳',
+      'emotion.volatility': '波动 {value}',
+      'emotion.window': '近 {hours} 小时',
+      'emotion.chart.title': '情绪曲线',
+      'emotion.chart.empty': '历史还不够，聊几句就有曲线了',
+      'emotion.chart.valence': '愉悦',
+      'emotion.chart.affection': '亲近',
       'button.emotionSave': '保存情绪设置',
       'notice.emotionSaved': '情绪设置已保存',
       'section.relation': '关系',
@@ -488,6 +498,16 @@ window.__ModuleLoader__.load({
       'style.off': 'Off',
       'row.emotionLastChange': 'Last change',
       'emotion.empty': 'No emotion data yet (the soul layer records it once running)',
+      'emotion.baseline': 'Baseline',
+      'emotion.trend.up': 'Rising',
+      'emotion.trend.down': 'Falling',
+      'emotion.trend.flat': 'Steady',
+      'emotion.volatility': 'Volatility {value}',
+      'emotion.window': 'Last {hours}h',
+      'emotion.chart.title': 'Emotion curve',
+      'emotion.chart.empty': 'Not enough history yet; chat a bit and the curve shows up',
+      'emotion.chart.valence': 'Pleasure',
+      'emotion.chart.affection': 'Closeness',
       'button.emotionSave': 'Save emotion settings',
       'notice.emotionSaved': 'Emotion settings saved',
       'section.relation': 'Relationship',
@@ -655,6 +675,26 @@ window.__ModuleLoader__.load({
 .qqn-mood-fill{height:100%;border-radius:2px;background:var(--dsw-alias-state-business-primary)}
 .qqn-mood-note{padding:12px 0;border-top:.5px solid var(--dsw-alias-border-l3);color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
 .qqn-mood-empty{padding:16px 0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
+.aura-emotion-baseline{display:flex;align-items:center;gap:6px;margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.aura-emotion-baseline-label{flex:none;font-variant-numeric:tabular-nums}
+.aura-emotion-baseline-track{position:relative;flex:1;min-width:20px;height:2px;border-radius:1px;background:var(--dsw-alias-bg-layer-3);overflow:hidden}
+.aura-emotion-baseline-fill{height:100%;border-radius:1px;background:var(--dsw-alias-label-tertiary);opacity:.5}
+.aura-emotion-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:2px 0 10px}
+.aura-emotion-badge{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:11px;background:var(--dsw-specific-sidebar-fill);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;font-variant-numeric:tabular-nums}
+.aura-emotion-badge-up{color:var(--dsw-alias-state-success-primary)}
+.aura-emotion-badge-down{color:var(--dsw-alias-state-error-primary)}
+.aura-emotion-badge-flat,.aura-emotion-badge-quiet{color:var(--dsw-alias-label-tertiary)}
+.aura-emotion-chart{padding:6px 0 2px;border-top:.5px solid var(--dsw-alias-border-l3);margin-top:2px}
+.aura-emotion-chart svg{display:block;width:100%;height:92px;overflow:visible}
+.aura-emotion-chart-empty{border-top:0;padding-top:10px}
+.aura-emotion-axis{stroke:var(--dsw-alias-border-l3);stroke-width:1;vector-effect:non-scaling-stroke}
+.aura-emotion-line{fill:none;stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}
+.aura-emotion-line-valence{stroke:var(--dsw-alias-state-business-primary)}
+.aura-emotion-line-affection{stroke:var(--dsw-alias-state-success-primary)}
+.aura-emotion-legend{display:flex;flex-wrap:wrap;gap:14px;padding-top:8px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.aura-emotion-swatch{display:inline-block;width:10px;height:2px;margin-right:5px;vertical-align:middle}
+.aura-emotion-swatch-valence{background:var(--dsw-alias-state-business-primary)}
+.aura-emotion-swatch-affection{background:var(--dsw-alias-state-success-primary)}
 .qqn-session{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:56px;padding:10px 0;border-bottom:.5px solid var(--dsw-alias-border-l3)}
 .qqn-rows>.qqn-session:last-child{border-bottom:0}
 .qqn-session-left{display:flex;flex-direction:column;gap:2px;min-width:0}
@@ -1160,6 +1200,82 @@ ${TRAIL_CSS}
         at: timeOf(source.at || source.updatedAt || source.createdAt),
         text: rowText(value, 'summary', 'cause', 'text', 'detail', 'label'),
       }
+    }
+
+    /** 情绪历史（Host 的 soul.emotion.history，旧→新）→ 折线用的行。 */
+    function emotionHistoryRows(value) {
+      return asArray(value)
+        .map(row => {
+          const source = asObject(row)
+          return {
+            at: timeOf(source.at),
+            valence: Number(source.valence),
+            affection: Number(source.affection),
+            label: typeof source.label === 'string' ? source.label : '',
+          }
+        })
+        .filter(row => row.at > 0 && Number.isFinite(row.valence) && Number.isFinite(row.affection))
+    }
+
+    /** 趋势徽标数据：宿主没给 trend（旧 Host）时返回 null。 */
+    function emotionTrendInfo(value) {
+      if (!value || typeof value !== 'object') return null
+      const source = asObject(value)
+      const direction = source.direction === 'up' || source.direction === 'down' ? source.direction : 'flat'
+      const volatility = Number(source.volatility)
+      const delta = Number(source.delta)
+      const hours = Number(source.windowHours)
+      return {
+        direction,
+        delta: Number.isFinite(delta) ? delta : 0,
+        volatility: Number.isFinite(volatility) ? Math.max(0, Math.min(1, volatility)) : 0,
+        hours: Number.isFinite(hours) && hours > 0 ? Math.round(hours) : 6,
+      }
+    }
+
+    /**
+     * 双色折线（愉悦 / 亲近），无第三方库：
+     * viewBox 0 0 100 40 + preserveAspectRatio=none，宽高跟着容器走；
+     * vector-effect 保持线宽不随拉伸变形。少于 2 条时给占位文案。
+     */
+    function emotionChart(rows, labels) {
+      const data = Array.isArray(rows) ? rows : []
+      const text = asObject(labels)
+      if (data.length < 2) {
+        return h('div', { className: 'aura-emotion-chart aura-emotion-chart-empty qqn-mood-empty' }, text.empty || '')
+      }
+      const points = (key, signed) => data.map((row, index) => {
+        const raw = Number(row[key])
+        const safe = Number.isFinite(raw) ? raw : 0
+        const value = signed ? Math.max(-1, Math.min(1, safe)) / 2 + 0.5 : Math.max(0, Math.min(1, safe))
+        const x = Math.round((index / (data.length - 1)) * 10000) / 100
+        const y = Math.round((1 - value) * 4000) / 100
+        return x + ',' + y
+      }).join(' ')
+      return h('div', { className: 'aura-emotion-chart' },
+        h('svg', {
+          viewBox: '0 0 100 40',
+          preserveAspectRatio: 'none',
+          role: 'img',
+          'aria-label': text.title || 'emotion',
+        },
+          h('line', { x1: 0, y1: 20, x2: 100, y2: 20, className: 'aura-emotion-axis' }),
+          h('polyline', {
+            className: 'aura-emotion-line aura-emotion-line-valence',
+            points: points('valence', true),
+            vectorEffect: 'non-scaling-stroke',
+          }),
+          h('polyline', {
+            className: 'aura-emotion-line aura-emotion-line-affection',
+            points: points('affection', false),
+            vectorEffect: 'non-scaling-stroke',
+          }),
+        ),
+        h('div', { className: 'aura-emotion-legend' },
+          h('span', null, h('span', { className: 'aura-emotion-swatch aura-emotion-swatch-valence' }), text.valence || ''),
+          h('span', null, h('span', { className: 'aura-emotion-swatch aura-emotion-swatch-affection' }), text.affection || ''),
+        ),
+      )
     }
 
     /** 实际注入预算：内容写长了自动抬到够用（最多 4000），避免“写了却被截断”。 */
@@ -2728,6 +2844,19 @@ ${TRAIL_CSS}
         affection: moodUnit(soulEmotion.affection, legacyEmotion.affection, false),
         energy: moodUnit(soulEmotion.energy, legacyEmotion.energy, false),
       }
+      /* 基准四维 / 趋势徽标 / 折线历史：旧 Host 缺字段时整块降级，不报错。 */
+      const emotionBaselineRaw = asObject(soulEmotion.baseline)
+      const hasBaseline = moodKeys.every(key => Number.isFinite(Number(emotionBaselineRaw[key])))
+      const baselineValues = hasBaseline
+        ? {
+            valence: unitValue(emotionBaselineRaw.valence, true),
+            arousal: unitValue(emotionBaselineRaw.arousal, false),
+            affection: unitValue(emotionBaselineRaw.affection, false),
+            energy: unitValue(emotionBaselineRaw.energy, false),
+          }
+        : null
+      const emotionTrend = emotionTrendInfo(soulEmotion.trend)
+      const emotionHistory = emotionHistoryRows(soulEmotion.history).slice(-40)
       const lastChangeRaw = lastChangeInfo(soulEmotion.lastChange)
       const lastChange = (lastChangeRaw.text || lastChangeRaw.at)
         ? lastChangeRaw
@@ -3089,8 +3218,29 @@ ${TRAIL_CSS}
               h('div', { className: 'qqn-mood-track' },
                 h('div', { className: 'qqn-mood-fill', style: { width: (moodValues[key] * 100) + '%' } }),
               ),
+              baselineValues
+                ? h('div', { className: 'aura-emotion-baseline' },
+                    h('span', { className: 'aura-emotion-baseline-label' }, t('emotion.baseline') + ' ' + baselineValues[key].toFixed(2)),
+                    h('div', { className: 'aura-emotion-baseline-track' },
+                      h('div', { className: 'aura-emotion-baseline-fill', style: { width: (baselineValues[key] * 100) + '%' } }),
+                    ),
+                  )
+                : null,
             )),
           ),
+          emotionTrend
+            ? h('div', { className: 'aura-emotion-head' },
+                h('span', { className: 'aura-emotion-badge aura-emotion-badge-' + emotionTrend.direction }, t('emotion.trend.' + emotionTrend.direction)),
+                h('span', { className: 'aura-emotion-badge' }, t('emotion.volatility', { value: emotionTrend.volatility.toFixed(2) })),
+                h('span', { className: 'aura-emotion-badge aura-emotion-badge-quiet' }, t('emotion.window', { hours: emotionTrend.hours })),
+              )
+            : null,
+          emotionChart(emotionHistory, {
+            empty: t('emotion.chart.empty'),
+            title: t('emotion.chart.title'),
+            valence: t('emotion.chart.valence'),
+            affection: t('emotion.chart.affection'),
+          }),
           typeof soulEmotion.label === 'string' && soulEmotion.label
             ? h(Row, { label: t('row.emotionNow'), control: h('span', { className: 'qqn-unit' }, soulEmotion.label) })
             : null,
