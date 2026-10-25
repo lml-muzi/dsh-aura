@@ -69,6 +69,9 @@ export const DEFAULT_CONFIG = {
   soulUserNickname: '',
   soulHonestyLine: true,
   soulPromptBudget: 1020,
+  soulOccupation: '',
+  soulBio: '',
+  soulContent: '',
   emotionEnabled: true,
   emotionScope: 'qq', // qq | all
   expressionStyle: 'subtle', // subtle | explicit | off
@@ -226,7 +229,12 @@ export function normalizeConfig(patch = {}, base = DEFAULT_CONFIG) {
       next[key] = objectOfNumbers(raw, fallback, 0, 3)
     } else if (typeof raw === 'string') {
       if (key === 'appSecret' && (raw === '' || raw === '******')) continue
-      const limit = key === 'splitRegex' ? 200 : key === 'displayName' || key === 'soulName' || key === 'soulUserNickname' ? 24 : 400
+      const limit = key === 'splitRegex' ? 200
+        : key === 'displayName' || key === 'soulName' || key === 'soulUserNickname' ? 24
+          : key === 'soulContent' ? 4000
+            : key === 'soulOccupation' ? 50
+              : key === 'soulBio' ? 500
+                : 400
       next[key] = raw.slice(0, limit)
     }
   }

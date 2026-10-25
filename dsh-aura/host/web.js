@@ -11,6 +11,7 @@
  * POST /dsh-aura/api/proactive/tick  旧面板兼容入口
  */
 import { importImConnectQq, redactConfig, writeConfig } from './state.js'
+import { buildIdentityText } from './soul.js'
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
 const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
@@ -128,6 +129,7 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
         pendingDue: memorySnap.pendingDue,
       },
       speak: speakSnap,
+      growth: Array.isArray(snap.growth) ? snap.growth : [],
       explainLog: Array.isArray(snap.explainLog) ? snap.explainLog.slice(-50) : [],
     }
   }
@@ -155,6 +157,20 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
             sessions: Object.values(state.readSessions()),
             bridge: bridge ? bridge.stats() : undefined,
           })
+          return
+        }
+        if (route === '/soul/preview' && (req.method === 'GET' || req.method === 'POST')) {
+          let cfg = state.readConfig()
+          if (req.method === 'POST') {
+            const body = await readBody(req)
+            const patch = body && typeof body === 'object' && !Array.isArray(body) ? body : {}
+            cfg = { ...cfg }
+            for (const key of ['soulName', 'soulUserNickname', 'soulEnabled', 'soulHonestyLine', 'soulPromptBudget', 'soulBio', 'soulContent']) {
+              if (Object.prototype.hasOwnProperty.call(patch, key)) cfg[key] = patch[key]
+            }
+          }
+          const text = buildIdentityText(soul.get(), cfg)
+          json(res, 200, { ok: true, text, chars: Array.from(text).length, budget: cfg.soulPromptBudget })
           return
         }
         if (req.method === 'GET' && route === '/soul/state') {

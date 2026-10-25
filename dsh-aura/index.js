@@ -11,6 +11,7 @@ import { installMedia } from './host/media.js'
 import { installSoul } from './host/soul.js'
 import { initPersona } from './host/persona.js'
 import { initMeme, dispose as disposeMeme, getMemeState } from './host/meme.js'
+import { createDiary } from './host/diary.js'
 import { installEmotion } from './host/emotion.js'
 import { installMemory } from './host/memory.js'
 import { installSpeak } from './host/speak.js'
@@ -123,6 +124,8 @@ export function apply(ctx, config = {}) {
   const emotion = installEmotion(ctx, { state, soul, bridge, log })
   const memory = installMemory(ctx, { state, soul, log })
   const speak = installSpeak(ctx, { state, soul, emotion, memory, bridge, log })
+  // 日记：独立 diary.json，不是记忆；自动注册 soul_diary 工具与 /dsh-aura/diary-api
+  const diary = createDiary({ home: state.stateDir(), getSoul: () => soul.get(), getConfig: () => state.readConfig(), log, ctx })
   safe(() => bridge.setTextFilter((text, options) => speak.checkProactiveText?.(text, options)), 'bridge.setTextFilter')
 
   let starting = null
@@ -155,6 +158,7 @@ export function apply(ctx, config = {}) {
     meme: () => safe(() => getMemeState(), {}),
     speak: () => safe(() => speak.snapshot(), {}),
     memory: () => safe(() => memory.snapshot(), {}),
+    diary: () => safe(() => diary.list(7), []),
   })
 
   try {
@@ -182,6 +186,7 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => () => {
     safe(() => persona.dispose?.(), 'dispose persona')
     safe(() => disposeMeme(), 'dispose meme')
+    safe(() => diary.dispose?.(), 'dispose diary')
     for (const dispose of disposers) safe(dispose, 'dispose soul listener')
     safe(() => speak.stop?.(), 'speak.stop')
     void stop()

@@ -1905,8 +1905,8 @@ export function initPersona({ ctx, state, log } = {}) {
       text: () => {
         try {
           if (readSoulDisabled()) return ''
-          // enabled 由面板随灵魂总开关一起镜像保存；首次未保存前保持关闭，避免默认风格劫持。
-          return compilePersonaPrompt(getConfig())
+          // 人设已并入灵魂自由内容（soulContent）：旧的风格字段不再单独注入，仅保留模块兼容旧数据与预设。
+          return ''
         } catch (error) {
           warn('[aura] 人设提示词渲染失败:', (error && error.message) || error)
           return ''

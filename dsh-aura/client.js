@@ -19,6 +19,8 @@ window.__ModuleLoader__.load({
     const MEME_BASE = '/dsh-aura/memes'
     /** 人设 Host API（收编 dsh-soul）。 */
     const PERSONA_API = '/dsh-aura/persona-api'
+    /** 日记 Host API（本机同源；mode=rule 零 token）。 */
+    const DIARY_API = '/dsh-aura/diary-api'
     /** 人设保存成功后广播的 window 事件：光轨等常驻组件据此立即刷新配置。 */
     const PERSONA_SAVED_EVENT = 'aura:persona-saved'
     const MEME_TAG_LABELS = {
@@ -666,6 +668,12 @@ window.__ModuleLoader__.load({
 .qqn-tab{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;padding:6px 14px;border-radius:9px;cursor:pointer;line-height:20px}
 .qqn-tab:hover{color:var(--dsw-alias-label-primary)}
 .qqn-tab-active{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.aura-soul-editor{width:100%;min-height:220px;resize:vertical;font-family:inherit;line-height:1.7}
+.aura-soul-sections{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:12px}
+.aura-soul-card{padding:10px 12px;border-radius:10px;background:var(--dsw-specific-sidebar-fill);min-width:0}
+.aura-soul-card-title{font-size:12px;color:var(--dsw-alias-label-tertiary);margin-bottom:6px}
+.aura-soul-card-body{white-space:pre-wrap;font-size:13px;line-height:1.7;word-break:break-word}
+.aura-soul-preview{margin:0;padding:12px 14px;border-radius:10px;background:var(--dsw-specific-sidebar-fill);font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto}
 .qqn-notice{display:flex;gap:9px;margin-top:28px;padding:12px 14px;border-radius:10px;background:var(--dsw-specific-sidebar-fill);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .qqn-loading{padding:24px 0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
 .qqn-page :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
@@ -756,6 +764,14 @@ window.__ModuleLoader__.load({
 .aura-persona-history-meta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
 .aura-persona-history-changes{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
 .aura-persona-history-row .qqn-button{flex:none;height:28px;padding:0 10px;border-radius:14px;font-size:12px}
+.aura-growth-list{display:flex;flex-direction:column;padding:6px 0}
+.aura-growth-row{padding:8px 0;border-bottom:.5px solid var(--dsw-alias-border-l3)}
+.aura-growth-row:last-child{border-bottom:0}
+.aura-growth-head{display:flex;align-items:center;gap:6px;min-width:0}
+.aura-growth-badge{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:10px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:20px}
+.aura-growth-pin{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:10px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-state-business-primary);font-size:11px;line-height:20px}
+.aura-growth-time{flex:none;margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
+.aura-growth-text{margin-top:4px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
 .aura-persona-prompt{max-height:320px;margin:0;padding:12px 14px;overflow:auto;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;background:var(--dsw-specific-sidebar-fill);color:var(--dsw-alias-label-secondary);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere}
 @media (max-width:640px){
 .aura-meme-grid{grid-template-columns:repeat(auto-fill,minmax(96px,1fr))}
@@ -1005,6 +1021,15 @@ ${TRAIL_CSS}
     const SOUL_STAGES = ['stranger', 'familiar', 'close', 'intimate']
     const EXPRESSION_STYLES = ['subtle', 'explicit', 'off']
 
+    /** growth.kind 的中文徽标映射（Host 只读快照；本轮不提供编辑）。 */
+    const GROWTH_KIND_LABELS = {
+      trait: '性格',
+      interest: '兴趣',
+      habit: '习惯',
+      bond: '默契',
+      self: '自省',
+    }
+
     function asArray(value) {
       return Array.isArray(value) ? value : []
     }
@@ -1137,6 +1162,30 @@ ${TRAIL_CSS}
       }
     }
 
+    /** 把自由灵魂内容按 Markdown 标题解析成卡片；没有标题就整段一张。 */
+    function parseSoulSections(text) {
+      const source = String(text || '')
+      const lines = source.split(/\r?\n/)
+      const sections = []
+      let current = null
+      for (const line of lines) {
+        const match = /^#{1,6}\s+(.+?)\s*$/.exec(line)
+        if (match) {
+          current = { title: match[1].trim(), body: [] }
+          sections.push(current)
+          continue
+        }
+        if (!current) {
+          current = { title: '全部', body: [] }
+          sections.push(current)
+        }
+        current.body.push(line)
+      }
+      return sections
+        .map(section => ({ title: section.title, body: section.body.join('\n').trim() }))
+        .filter(section => section.title || section.body)
+    }
+
     function buildSoulForm(config) {
       const cfg = asObject(config)
       const name = typeof cfg.soulName === 'string' ? cfg.soulName.trim().slice(0, 20) : ''
@@ -1146,6 +1195,8 @@ ${TRAIL_CSS}
         soulEnabled: cfg.soulEnabled !== false,
         soulHonestyLine: cfg.soulHonestyLine !== false,
         soulPromptBudget: clampInt(cfg.soulPromptBudget, 200, 4000, 1020),
+        soulBio: typeof cfg.soulBio === 'string' ? cfg.soulBio.slice(0, 500) : '',
+        soulContent: typeof cfg.soulContent === 'string' ? cfg.soulContent.slice(0, 4000) : '',
       }
     }
 
@@ -1231,6 +1282,31 @@ ${TRAIL_CSS}
         throw new Error(String(detail))
       }
       return value
+    }
+
+    /** 本地时区的 YYYY-MM-DD，和日记 API 的 date 对齐。 */
+    function diaryDateKey(ms) {
+      const date = new Date(Number.isFinite(Number(ms)) ? Number(ms) : Date.now())
+      const pad = value => String(value).padStart(2, '0')
+      return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
+    }
+
+    function clipText(value, max) {
+      const text = String(value === undefined || value === null ? '' : value)
+      if (text.length <= max) return text
+      return text.slice(0, max) + '…'
+    }
+
+    function diaryMoodLabel(entry) {
+      const mood = asObject(asObject(entry).mood)
+      return typeof mood.label === 'string' ? mood.label : ''
+    }
+
+    /** highlights 正常是字符串数组；坏数据也接受 {text} 之类的对象。 */
+    function diaryHighlights(value) {
+      return asArray(value)
+        .map(item => (typeof item === 'string' ? item.trim() : rowText(item, 'text', 'summary', 'note', 'label')))
+        .filter(Boolean)
     }
 
     function readFileBase64(file) {
@@ -1387,6 +1463,7 @@ ${TRAIL_CSS}
       const [lookError, setLookError] = React.useState('')
       const [lookNotice, setLookNotice] = React.useState('')
       const [soulForm, setSoulForm] = React.useState(() => buildSoulForm({}))
+      const [soulPreview, setSoulPreview] = React.useState({ text: '', chars: 0, budget: 0, error: '' })
       const [soulBaseline, setSoulBaseline] = React.useState(() => buildSoulForm({}))
       const [emotionForm, setEmotionForm] = React.useState(() => buildEmotionForm({}))
       const [emotionBaseline, setEmotionBaseline] = React.useState(() => buildEmotionForm({}))
@@ -1420,6 +1497,17 @@ ${TRAIL_CSS}
       const [personaPresetName, setPersonaPresetName] = React.useState('')
       const [personaPreviewOpen, setPersonaPreviewOpen] = React.useState(false)
       const [personaPreview, setPersonaPreview] = React.useState('')
+      const [diaryEntries, setDiaryEntries] = React.useState([])
+      const [diaryLoading, setDiaryLoading] = React.useState(false)
+      const [diaryLoaded, setDiaryLoaded] = React.useState(false)
+      const [diaryError, setDiaryError] = React.useState('')
+      const [diaryNotice, setDiaryNotice] = React.useState('')
+      const [diaryBusy, setDiaryBusy] = React.useState('')
+      const [diaryOpenDate, setDiaryOpenDate] = React.useState('')
+      const [diaryComposeOpen, setDiaryComposeOpen] = React.useState(false)
+      const [diaryDraft, setDiaryDraft] = React.useState('')
+      const [diaryToday, setDiaryToday] = React.useState(null)
+      const [diaryTodayChecked, setDiaryTodayChecked] = React.useState(false)
 
       const mounted = React.useRef(true)
       const inflight = React.useRef(false)
@@ -1443,6 +1531,8 @@ ${TRAIL_CSS}
       const memeImportRef = React.useRef(null)
       const personaRef = React.useRef(personaForm)
       const personaBaselineRef = React.useRef(personaBaseline)
+      const diaryTimer = React.useRef(null)
+      const diaryLoadingRef = React.useRef(false)
 
       React.useEffect(() => {
         lookRef.current = look
@@ -1505,6 +1595,10 @@ ${TRAIL_CSS}
           if (personaTimer.current !== null) {
             clearTimeout(personaTimer.current)
             personaTimer.current = null
+          }
+          if (diaryTimer.current !== null) {
+            clearTimeout(diaryTimer.current)
+            diaryTimer.current = null
           }
         }
       }, [])
@@ -1643,6 +1737,138 @@ ${TRAIL_CSS}
         }, 3000)
       }, [])
 
+      /* ---------------- 日记：列表 / 今天 / 补写 / 手写 / 删除 ---------------- */
+      const flashDiary = React.useCallback(text => {
+        setDiaryNotice(text)
+        if (diaryTimer.current !== null) clearTimeout(diaryTimer.current)
+        diaryTimer.current = setTimeout(() => {
+          diaryTimer.current = null
+          if (mounted.current) setDiaryNotice('')
+        }, 3500)
+      }, [])
+
+      const loadDiary = React.useCallback(async () => {
+        if (diaryLoadingRef.current) return
+        diaryLoadingRef.current = true
+        setDiaryLoading(true)
+        setDiaryError('')
+        try {
+          const value = await fetchJson(DIARY_API + '?action=list&limit=7')
+          if (!mounted.current) return
+          const rows = asArray(value.entries).slice()
+          rows.sort((left, right) => String(asObject(right).date || '').localeCompare(String(asObject(left).date || '')))
+          setDiaryEntries(rows.slice(0, 7))
+          setDiaryLoaded(true)
+        } catch (error) {
+          if (mounted.current) setDiaryError(errorMessage(error))
+        } finally {
+          diaryLoadingRef.current = false
+          if (mounted.current) setDiaryLoading(false)
+        }
+      }, [])
+
+      const loadDiaryToday = React.useCallback(async () => {
+        if (diaryBusy) return
+        setDiaryBusy('today')
+        setDiaryError('')
+        setDiaryNotice('')
+        try {
+          const date = diaryDateKey()
+          const value = await fetchJson(DIARY_API + '?action=get&date=' + encodeURIComponent(date))
+          if (!mounted.current) return
+          const entry = value && value.entry ? asObject(value.entry) : null
+          setDiaryTodayChecked(true)
+          setDiaryToday(entry)
+          flashDiary(entry ? '今天的日记在下面' : '今天还没有日记，可以补写一篇')
+        } catch (error) {
+          if (mounted.current) setDiaryError(errorMessage(error))
+        } finally {
+          if (mounted.current) setDiaryBusy('')
+        }
+      }, [diaryBusy, flashDiary])
+
+      const generateDiary = React.useCallback(async () => {
+        if (diaryBusy) return
+        setDiaryBusy('generate')
+        setDiaryError('')
+        setDiaryNotice('')
+        try {
+          const date = diaryDateKey()
+          const value = await fetchJson(DIARY_API, { action: 'generate', date, mode: 'rule' })
+          if (!mounted.current) return
+          if (value && value.skipped) {
+            flashDiary('没写成：' + (rowText(value, 'reason') || '今天没有可写的素材'))
+            return
+          }
+          if (!value || !value.entry) {
+            flashDiary('今天没有可写的素材，先空着')
+            return
+          }
+          setDiaryToday(asObject(value.entry))
+          setDiaryTodayChecked(true)
+          flashDiary(value.overwritten === true ? '今天的日记已重写' : '补写好了')
+          await loadDiary()
+        } catch (error) {
+          if (mounted.current) setDiaryError(errorMessage(error))
+        } finally {
+          if (mounted.current) setDiaryBusy('')
+        }
+      }, [diaryBusy, flashDiary, loadDiary])
+
+      const saveDiaryDraft = React.useCallback(async () => {
+        const text = diaryDraft.trim()
+        if (!text) {
+          setDiaryError('先写点什么再保存')
+          return
+        }
+        if (diaryBusy) return
+        setDiaryBusy('save')
+        setDiaryError('')
+        setDiaryNotice('')
+        try {
+          const date = diaryDateKey()
+          const value = await fetchJson(DIARY_API, { action: 'save', date, summary: text, highlights: [], source: 'user' })
+          if (!mounted.current) return
+          setDiaryDraft('')
+          setDiaryComposeOpen(false)
+          if (value && value.entry) {
+            setDiaryToday(asObject(value.entry))
+            setDiaryTodayChecked(true)
+          }
+          flashDiary(value && value.overwritten === true ? '已覆盖今天的日记' : '写好了')
+          await loadDiary()
+        } catch (error) {
+          if (mounted.current) setDiaryError(errorMessage(error))
+        } finally {
+          if (mounted.current) setDiaryBusy('')
+        }
+      }, [diaryBusy, diaryDraft, flashDiary, loadDiary])
+
+      const removeDiary = React.useCallback(async date => {
+        const key = String(date || '')
+        if (!key || diaryBusy) return
+        let confirmed = true
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+          confirmed = window.confirm('删除 ' + key + ' 的日记？')
+        }
+        if (!confirmed) return
+        setDiaryBusy('delete:' + key)
+        setDiaryError('')
+        setDiaryNotice('')
+        try {
+          const value = await fetchJson(DIARY_API, { action: 'delete', date: key })
+          if (!mounted.current) return
+          setDiaryEntries(previous => previous.filter(item => String(asObject(item).date || '') !== key))
+          setDiaryOpenDate(previous => (previous === key ? '' : previous))
+          setDiaryToday(previous => (previous && String(asObject(previous).date || '') === key ? null : previous))
+          flashDiary(value && value.removed === false ? '那天本来就没有日记' : '已删除')
+        } catch (error) {
+          if (mounted.current) setDiaryError(errorMessage(error))
+        } finally {
+          if (mounted.current) setDiaryBusy('')
+        }
+      }, [diaryBusy, flashDiary])
+
       /** 人设表单同步：默认不覆盖用户正在编辑的草稿。 */
       const syncPersona = React.useCallback((config, force) => {
         const next = buildPersonaForm(config)
@@ -1705,8 +1931,36 @@ ${TRAIL_CSS}
       /* 首次挂载就和 /api/state 一起拉取人设，之后只在保存/预设操作后主动刷新，避免切 tab 覆盖草稿。 */
       React.useEffect(() => {
         void loadPersona(true)
-        return undefined
       }, [loadPersona])
+
+      React.useEffect(() => {
+        const timer = setTimeout(() => {
+          void (async () => {
+            try {
+              const value = await fetchJson(API + '/soul/preview', {
+                soulName: soulForm.soulName,
+                soulUserNickname: soulForm.soulUserNickname,
+                soulEnabled: soulForm.soulEnabled === true,
+                soulHonestyLine: soulForm.soulHonestyLine === true,
+                soulPromptBudget: clampInt(soulForm.soulPromptBudget, 200, 4000, 1020),
+                soulBio: soulForm.soulBio,
+                soulContent: soulForm.soulContent,
+              })
+              if (mounted.current) setSoulPreview({ text: String(value.text || ''), chars: Number(value.chars) || 0, budget: Number(value.budget) || 0, error: '' })
+            } catch (error) {
+              if (mounted.current) setSoulPreview(previous => ({ ...previous, error: error instanceof Error ? error.message : String(error) }))
+            }
+          })()
+        }, 350)
+        return () => clearTimeout(timer)
+      }, [soulForm.soulName, soulForm.soulUserNickname, soulForm.soulEnabled, soulForm.soulHonestyLine, soulForm.soulPromptBudget, soulForm.soulBio, soulForm.soulContent])
+
+      /* 切到日记 tab 时拉最近 7 篇；不进日记页就不发请求。 */
+      React.useEffect(() => {
+        if (tab !== 'diary') return undefined
+        void loadDiary()
+        return undefined
+      }, [tab, loadDiary])
 
       const toggleMemePack = async pack => {
         const packId = String((pack && pack.id) || '')
@@ -2290,6 +2544,8 @@ ${TRAIL_CSS}
           soulEnabled: soulForm.soulEnabled === true,
           soulHonestyLine: soulForm.soulHonestyLine === true,
           soulPromptBudget: clampInt(soulForm.soulPromptBudget, 200, 4000, 1020),
+          soulBio: String(soulForm.soulBio || '').slice(0, 500),
+          soulContent: String(soulForm.soulContent || '').slice(0, 4000),
         }
         setBlock('soul', { busy: true, error: '', notice: '' })
         setPersonaError('')
@@ -2303,8 +2559,15 @@ ${TRAIL_CSS}
           if (nextSoul && !payloadApplied(nextSoul, soulPayload)) {
             throw new Error(t('notice.configNotApplied'))
           }
+          // 表达方式已并入自由灵魂内容；这里只保留光轨外观字段。
           const personaValue = await fetchJson(PERSONA_API + '/save', {
-            config: { ...personaPayload(), enabled: soulForm.soulEnabled === true },
+            config: {
+              trailEnabled: personaForm.trailEnabled === true,
+              trailColor: personaForm.trailColor,
+              trailSpeed: personaForm.trailSpeed,
+              trailWidth: personaForm.trailWidth,
+              enabled: soulForm.soulEnabled === true,
+            },
           })
           if (!mounted.current) return
           nextPersona = (personaValue && personaValue.config) || null
@@ -2472,6 +2735,19 @@ ${TRAIL_CSS}
       })
       const noteCount = noteGroups.reduce((total, group) => total + group.items.length, 0)
       const topics = topicRows(memory.topics).slice(0, 24)
+      /* ---- 成长：她自己长出来的部分（只读；宿主暂未开放编辑 HTTP） ---- */
+      const growthAll = rowsNewest(soulData.growth, 'at')
+      const growthTotal = growthAll.length
+      const growthRows = growthAll.slice(0, 8).map((row, index) => {
+        const source = asObject(row)
+        return {
+          key: String(source.id || '') || ('growth-' + index + '-' + String(source.at || '')),
+          at: timeOf(source.at),
+          kind: typeof source.kind === 'string' ? source.kind : '',
+          text: rowText(row, 'text', 'note', 'summary'),
+          pinned: source.pinned === true,
+        }
+      }).filter(row => row.text)
       const speakState = asObject(soulData.speak)
       const legacyProactive = asObject(proactive)
       const speakLog = speakLogRows(speakState.log).slice(0, 8)
@@ -2743,25 +3019,14 @@ ${TRAIL_CSS}
             }),
           }),
           h(Row, {
-            label: '职业',
-            hint: '用于贴合你的背景，不代表她的身份',
-            control: h('input', {
-              className: 'qqn-input',
-              value: personaForm.occupation,
-              maxLength: 50,
-              spellCheck: false,
-              onChange: event => setPersonaForm(previous => ({ ...previous, occupation: event.target.value })),
-            }),
-          }),
-          h(Row, {
             label: '介绍',
             hint: '关于你的补充说明（≤500 字）',
             control: h('textarea', {
               className: 'qqn-input aura-persona-textarea',
               rows: 3,
               maxLength: 500,
-              value: personaForm.bio,
-              onChange: event => setPersonaForm(previous => ({ ...previous, bio: event.target.value })),
+              value: soulForm.soulBio,
+              onChange: event => setSoulForm(previous => ({ ...previous, soulBio: event.target.value })),
             }),
           }),
           h(Row, {
@@ -3359,6 +3624,99 @@ ${TRAIL_CSS}
       const personaFeedback = personaError
         ? h('div', { className: 'qqn-feedback qqn-feedback-error', role: 'status', 'aria-live': 'polite' }, personaError)
         : (personaNotice ? h('div', { className: 'qqn-feedback', role: 'status', 'aria-live': 'polite' }, personaNotice) : null)
+      const growthSection = h(Section, {
+        title: '成长',
+        action: h('span', null, '共 ' + growthTotal + ' 条'),
+      },
+        h('div', { className: 'qqn-row-hint', style: { marginTop: 0, marginBottom: 8 } }, '她可以自己长出来的部分；写入会触发一次提示词刷新'),
+        growthRows.length > 0
+          ? h('div', { className: 'aura-growth-list' }, growthRows.map(row => h('div', { key: row.key, className: 'aura-growth-row' },
+              h('div', { className: 'aura-growth-head' },
+                h('span', { className: 'aura-growth-badge' }, GROWTH_KIND_LABELS[row.kind] || row.kind || '其他'),
+                row.pinned ? h('span', { className: 'aura-growth-pin' }, '置顶') : null,
+                h('span', { className: 'aura-growth-time' }, row.at > 0 ? formatRelative(row.at, t) : '—'),
+              ),
+              h('div', { className: 'aura-growth-text' }, row.text),
+            )))
+          : h('div', { className: 'qqn-mood-empty' }, '还没长出新东西'),
+      )
+
+      const soulSections = parseSoulSections(soulForm.soulContent)
+      const soulContentSection = h(Section, {
+        title: '灵魂内容',
+        action: h('span', null, Array.from(String(soulForm.soulContent || '')).length + ' / 4000 字'),
+      },
+        h('div', { className: 'qqn-row-hint', style: { marginTop: 0, marginBottom: 8 } }, '随便写：性格、爱好、在意的事、说话习惯。用 # 或 ## 标题分节，下面会按标题拆成卡片。'),
+        h('textarea', {
+          className: 'qqn-input aura-soul-editor',
+          rows: 12,
+          maxLength: 4000,
+          value: soulForm.soulContent,
+          placeholder: '## 性格\n嘴硬心软，怕冷场。\n\n## 爱好\n听歌、看别人折腾奇怪的项目、深夜瞎想。',
+          spellCheck: false,
+          onChange: event => setSoulForm(previous => ({ ...previous, soulContent: event.target.value })),
+        }),
+        soulSections.length > 0
+          ? h('div', { className: 'aura-soul-sections' }, soulSections.map((section, index) => h('div', { key: section.title + '-' + index, className: 'aura-soul-card' },
+              h('div', { className: 'aura-soul-card-title' }, section.title || '未命名'),
+              h('div', { className: 'aura-soul-card-body' }, section.body || '（空）'),
+            )))
+          : null,
+      )
+
+      const soulPreviewSection = h(Section, {
+        title: '完整灵魂',
+        action: h('span', null, soulPreview.chars + (soulPreview.budget ? ' / ' + soulPreview.budget : '') + ' 字'),
+      },
+        h('div', { className: 'qqn-row-hint', style: { marginTop: 0, marginBottom: 8 } }, '现在实际注入的全文：核心身份 + 关于你 + 自由内容 + 成长。改动会实时预览。'),
+        soulPreview.error ? h('div', { className: 'qqn-error' }, soulPreview.error) : null,
+        h('pre', { className: 'aura-soul-preview' }, soulPreview.text || '（还没有内容）'),
+      )
+
+      const trailSection = h(Section, { title: t('section.trail') },
+        h('div', { className: 'qqn-rows' },
+          h(Row, {
+            label: '光轨动画',
+            hint: '聊天里流动的光轨；跟上面的灵魂开关一起生效',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: personaForm.trailEnabled === true,
+              onChange: event => setPersonaForm(previous => ({ ...previous, trailEnabled: event.target.checked })),
+            }),
+          }),
+          h(Row, {
+            label: '光轨颜色',
+            control: h('div', { className: 'aura-persona-inline' },
+              h('input', {
+                type: 'color',
+                className: 'aura-persona-color',
+                value: personaForm.trailColor,
+                'aria-label': '光轨颜色',
+                onChange: event => setPersonaForm(previous => ({ ...previous, trailColor: personaColorOf(event.target.value) })),
+              }),
+              h('span', { className: 'qqn-unit' }, personaForm.trailColor),
+            ),
+          }),
+          h(Row, {
+            label: '光轨速度',
+            control: selectField(PERSONA_TRAIL_SPEEDS, personaForm.trailSpeed, value => setPersonaForm(previous => ({ ...previous, trailSpeed: value })), '光轨速度'),
+          }),
+          h(Row, {
+            label: '光轨粗细',
+            control: selectField(PERSONA_TRAIL_WIDTHS, personaForm.trailWidth, value => setPersonaForm(previous => ({ ...previous, trailWidth: value })), '光轨粗细'),
+          }),
+        ),
+      )
+
+      const soulActions = h('div', { className: 'qqn-actions' },
+        h(Button, {
+          variant: 'primary',
+          disabled: blockInfo('soul').busy || personaBusy !== '' || !(soulDirty || personaDirty),
+          onClick: () => void saveSoul(),
+        }, blockInfo('soul').busy ? t('busy.save') : t('button.soulSave')),
+      )
+
       const personaSection = h(React.Fragment, null,
         h(Section, { title: t('section.expression') },
           h('div', { className: 'qqn-row-hint', style: { marginTop: 0, marginBottom: 8 } }, t('section.expression.hint')),
@@ -3410,6 +3768,7 @@ ${TRAIL_CSS}
             }),
           ),
         ),
+        growthSection,
         h(Section, {
           title: '预设',
           action: personaData.activeId ? h('span', null, '当前：' + personaData.activeId) : null,
@@ -3537,10 +3896,122 @@ ${TRAIL_CSS}
         personaFeedback,
       )
 
+      /* ---------------- 日记 tab ---------------- */
+      const diaryTodayDate = diaryDateKey()
+      const diaryFeedback = diaryError
+        ? h('div', { className: 'qqn-error', role: 'status', 'aria-live': 'polite' }, '日记：' + diaryError)
+        : (diaryNotice ? h('div', { className: 'qqn-feedback', role: 'status', 'aria-live': 'polite' }, diaryNotice) : null)
+
+      const diaryTodayHighlights = diaryHighlights(diaryToday && diaryToday.highlights)
+      const diaryTodayCard = diaryTodayChecked
+        ? (diaryToday
+            ? h('div', { className: 'qqn-rows', style: { marginBottom: 12 } },
+                h('div', { className: 'qqn-memory-block' },
+                  h('div', { className: 'qqn-memory-group' },
+                    h('div', { className: 'qqn-memory-group-title' },
+                      diaryTodayDate
+                        + ' · ' + (diaryMoodLabel(diaryToday) || '无情绪')
+                        + (diaryToday.source === 'user' ? ' · 你写的' : '')),
+                    h('div', { className: 'qqn-memory-item' }, String(diaryToday.summary || '（没有摘要）')),
+                    diaryTodayHighlights.length > 0
+                      ? h('div', { className: 'qqn-chip-list' }, diaryTodayHighlights.map((text, index) => h('span', { key: 'diary-today-hl-' + index, className: 'qqn-tag' }, text)))
+                      : null,
+                  ),
+                ),
+              )
+            : h('div', { className: 'qqn-mood-empty' }, '今天还没有日记；点「补写今天的日记」让她用规则写一篇'))
+        : null
+
+      const diaryList = diaryEntries.length > 0
+        ? h('div', { className: 'aura-persona-history' }, diaryEntries.map((entry, index) => {
+            const row = asObject(entry)
+            const date = String(row.date || '')
+            const open = date !== '' && diaryOpenDate === date
+            const mood = diaryMoodLabel(row)
+            const summary = String(row.summary || '')
+            const highlights = diaryHighlights(row.highlights)
+            const meta = [
+              date || '未知日期',
+              mood,
+              row.source === 'user' ? '你写的' : '',
+              open ? '收起 ▴' : '展开 ▾',
+            ].filter(Boolean).join(' · ')
+            return h('div', { key: 'diary-' + (date || index), className: 'aura-persona-history-row' },
+              h('div', {
+                className: 'aura-persona-history-main',
+                role: 'button',
+                tabIndex: 0,
+                'aria-expanded': open,
+                title: open ? '点击收起' : '点击展开',
+                style: { cursor: 'pointer' },
+                onClick: () => { if (date) setDiaryOpenDate(open ? '' : date) },
+                onKeyDown: event => {
+                  if (!date) return
+                  if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+                    event.preventDefault()
+                    setDiaryOpenDate(open ? '' : date)
+                  }
+                },
+              },
+                h('div', { className: 'aura-persona-history-meta' }, meta),
+                h('div', { className: 'aura-persona-history-changes' }, summary ? (open ? summary : clipText(summary, 60)) : '（没有摘要）'),
+                open && highlights.length > 0
+                  ? h('div', { className: 'qqn-memory-group', style: { marginTop: 6 } },
+                      h('div', { className: 'qqn-memory-group-title' }, '亮点'),
+                      highlights.map((text, number) => h('div', { key: 'diary-hl-' + number, className: 'qqn-memory-item' }, '· ' + text)),
+                    )
+                  : null,
+              ),
+              h(Button, {
+                variant: 'danger',
+                disabled: diaryBusy !== '' || !date,
+                onClick: () => { void removeDiary(date) },
+              }, diaryBusy === 'delete:' + date ? '删除中…' : '删除'),
+            )
+          }))
+        : null
+
+      const diarySection = h(Section, { title: '日记' },
+        h('div', { className: 'qqn-row-hint', style: { marginTop: 0, marginBottom: 10 } }, '她自己的记录，不是记忆；不会自动注入提示词'),
+        h('div', { className: 'qqn-actions', style: { marginTop: 0, marginBottom: 12 } },
+          h('span', { className: 'qqn-unit', style: { marginRight: 'auto' } }, '今天 ' + diaryTodayDate),
+          h(Button, { disabled: diaryBusy !== '', onClick: () => { void loadDiaryToday() } }, diaryBusy === 'today' ? '读取中…' : '看看今天'),
+          h(Button, { disabled: diaryBusy !== '', onClick: () => { void generateDiary() } }, diaryBusy === 'generate' ? '补写中…' : '补写今天的日记'),
+          h(Button, { disabled: diaryBusy !== '', onClick: () => setDiaryComposeOpen(previous => !previous) }, diaryComposeOpen ? '收起手写' : '写一篇'),
+        ),
+        diaryFeedback,
+        diaryComposeOpen
+          ? h('div', { className: 'qqn-rows', style: { marginBottom: 12 } },
+              h('div', { className: 'qqn-row', style: { flexDirection: 'column', alignItems: 'stretch', gap: 0, padding: '10px 0' } },
+                h('textarea', {
+                  className: 'qqn-input aura-persona-textarea',
+                  rows: 4,
+                  maxLength: 500,
+                  placeholder: '今天想记下什么…（≤500 字）',
+                  value: diaryDraft,
+                  disabled: diaryBusy === 'save',
+                  onChange: event => setDiaryDraft(event.target.value),
+                }),
+                h('div', { className: 'qqn-actions' },
+                  h(Button, { variant: 'primary', disabled: diaryBusy !== '' || !diaryDraft.trim(), onClick: () => { void saveDiaryDraft() } }, diaryBusy === 'save' ? '保存中…' : '保存'),
+                  h(Button, { disabled: diaryBusy !== '', onClick: () => setDiaryComposeOpen(false) }, '取消'),
+                ),
+              ),
+            )
+          : null,
+        diaryTodayCard,
+        diaryLoading && !diaryLoaded ? h('div', { className: 'qqn-loading' }, '正在读取日记…') : null,
+        !diaryLoading && diaryLoaded && diaryEntries.length === 0
+          ? h('div', { className: 'qqn-mood-empty' }, '最近 7 天还没有日记。')
+          : null,
+        diaryList,
+      )
+
       const tabDefs = [
         ['soul', '灵魂'],
         ['emotion', '情绪'],
         ['memory', '记忆'],
+        ['diary', '日记'],
         ['meme', '表情包'],
         ['speak', '主动'],
         ['appearance', '外观'],
@@ -3564,9 +4035,10 @@ ${TRAIL_CSS}
               header,
               pollError ? h('div', { className: 'qqn-error' }, t('error.load') + '：' + pollError) : null,
               tabNav,
-              tab === 'soul' ? h(React.Fragment, null, soulSection, personaSection) : null,
+              tab === 'soul' ? h(React.Fragment, null, soulSection, soulContentSection, soulPreviewSection, growthSection, trailSection, soulActions, blockFeedback('soul')) : null,
               tab === 'emotion' ? h(React.Fragment, null, emotionSection, relationSection) : null,
               tab === 'memory' ? memorySection : null,
+              tab === 'diary' ? diarySection : null,
               tab === 'meme' ? memeSection : null,
               tab === 'speak' ? speakSection : null,
               tab === 'appearance' ? appearanceSection : null,

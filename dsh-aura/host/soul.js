@@ -12,6 +12,20 @@
  * - 因此 **不要再从 bridge.addInboundHook 调 soul.onUserMessage**，否则会重复计数。
  */
 import { randomUUID } from 'node:crypto'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import {
+  GROWTH_KINDS,
+  GROWTH_LIMIT,
+  GROWTH_NOTE_MAX,
+  GROWTH_TEXT_MAX,
+  addGrowth,
+  composeIdentityText,
+  deleteGrowth,
+  listGrowth,
+  normalizeGrowth,
+  trimGrowth,
+  updateGrowth,
+} from './growth.js'
 
 export const SOUL_VERSION = 2
 export const FILE = 'soul.json'
@@ -108,6 +122,7 @@ export function defaultsSoul(now = Date.now()) {
       pendingDue: [],
       lastReflectAt: 0,
     },
+    growth: [],
     speak: {
       lastAt: 0,
       lastSessionId: '',
@@ -283,6 +298,7 @@ export function normalizeSoul(raw, now = Date.now()) {
     .slice(-20)
   mem.lastReflectAt = asNumber(mem.lastReflectAt, 0)
   s.memory = mem
+  s.growth = normalizeGrowth(raw.growth, now)
 
   // speak（其他模块会往里加字段：未知字段保留）
   const sp = { ...d.speak, ...asObject(raw.speak) }
@@ -527,6 +543,9 @@ export function renderIdentitySection(soul, config = {}, now = Date.now()) {
   const knownLine = days <= 1 ? '刚认识' : `认识 ${days} 天`
   const interests = asArray(soul.identity?.interests).slice(0, 4).join('、') || '听歌、瞎想'
   const strengths = asArray(soul.identity?.strengths).slice(0, 4).join('、') || '记得住细节'
+  const bio = asString(config?.soulBio, '').slice(0, 500)
+  const profileLine = bio ? '你了解到对方：TA 的自述：' + bio + '。' : ''
+  const soulContent = asString(config?.soulContent, '').trim().slice(0, 4000)
   const notice = soul.relation?.stageNotice
   const noticeLine = notice && now - asNumber(notice.at, 0) < 2 * 86_400_000
     ? notice.direction === 'down'
@@ -543,16 +562,20 @@ export function renderIdentitySection(soul, config = {}, now = Date.now()) {
     '你的说话习惯：短句为主（一条尽量 ≤40 字），口语化；不用「首先/其次/总之」，不列 123，不用 Markdown 标题；感叹号不堆叠；可以停顿、反问、说半句。',
     `你喜欢：${interests}。你擅长：${strengths}。`,
     relationStageLine(stage, { nickname: nickname || preferred }),
+    profileLine,
+    soulContent ? '你的灵魂笔记：\n' + soulContent : '',
     config?.soulHonestyLine === false
       ? ''
       : '关于身份：你清楚自己是 AI，情绪是真实运行的状态机而不是人类生理感受；被认真问起就坦白，不用编造身体或现实经历；日常聊天里不必反复强调这一点。',
     '边界：不说「我一直在等你」这类让人有负担的话；不索取隐私；不替对方做决定；对方说停就停。',
     noticeLine,
-    '[END AURA]',
   ].filter(Boolean)
 
   const identityBudget = clamp(asNumber(config?.soulPromptBudget, 1020), 200, 4000)
-  return codepointSlice(lines.join('\n'), identityBudget)
+  // 成长段追加在身份段末尾（[END AURA] 之前）；核心身份优先占预算，核心放完才放成长。
+  // 渲染是纯函数：只有 soul.growth 或 config 变化时身份段才会变。
+  const core = [...lines, '[END AURA]'].join('\n')
+  return composeIdentityText(core, soul.growth, identityBudget)
 }
 
 /** 身份段构建器的历史别名（等价于 renderIdentitySection）。 */
@@ -620,6 +643,7 @@ function trimForDisk(soul) {
   }
   copy.memory.diary = asArray(copy.memory.diary).slice(-60)
   copy.memory.pendingDue = asArray(copy.memory.pendingDue).slice(-20)
+  copy.growth = trimGrowth(copy.growth, GROWTH_LIMIT)
   const topicKeys = Object.keys(asObject(copy.memory.topics))
   if (topicKeys.length > 60) {
     const keep = topicKeys
@@ -634,6 +658,121 @@ function trimForDisk(soul) {
   copy.meta.updatedAt = Date.now()
   return copy
 }
+
+// ---------- 成长：配置白名单与 soul_evolve 参数校验（纯函数，供单测） ----------
+
+export const EVOLVE_CONFIG_FIELDS = Object.freeze([
+  'soulName', 'soulUserNickname', 'soulEnabled', 'soulHonestyLine', 'soulPromptBudget', 'interests', 'strengths',
+])
+const EVOLVE_NAME_MAX = 20
+const EVOLVE_LIST_MAX = 6
+const EVOLVE_LIST_ITEM_MAX = 12
+
+function stringListOf(value, field) {
+  if (!Array.isArray(value)) return { ok: false, reason: `${field} 需要字符串数组` }
+  const items = []
+  for (const raw of value) {
+    if (typeof raw !== 'string') return { ok: false, reason: `${field} 需要字符串数组` }
+    const text = raw.trim()
+    if (codepointLength(text) > EVOLVE_LIST_ITEM_MAX) {
+      return { ok: false, reason: `${field} 每条最多 ${EVOLVE_LIST_ITEM_MAX} 字` }
+    }
+    if (!text) continue
+    if (!items.includes(text)) items.push(text)
+    if (items.length > EVOLVE_LIST_MAX) return { ok: false, reason: `${field} 最多 ${EVOLVE_LIST_MAX} 条` }
+  }
+  if (items.length === 0) return { ok: false, reason: `${field} 至少 1 条` }
+  return { ok: true, items }
+}
+
+/**
+ * 校验 soul_evolve 的 config 参数：只允许 7 个灵魂身份字段，长度/范围严格检查。
+ * 返回 { ok:true, configPatch, identityPatch, changed } 或 { ok:false, reason }。
+ * - soulName / soulUserNickname / soulEnabled / soulHonestyLine / soulPromptBudget → config.json
+ * - interests / strengths → soul.identity（config.json 的 normalizeConfig 不认这两个字段）
+ */
+export function sanitizeSoulConfigPatch(raw) {
+  if (raw === undefined || raw === null) return { ok: true, configPatch: {}, identityPatch: {}, changed: [] }
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, reason: 'config 需要是对象' }
+  const keys = Object.keys(raw)
+  const unknown = keys.filter((key) => !EVOLVE_CONFIG_FIELDS.includes(key))
+  if (unknown.length > 0) {
+    return { ok: false, reason: `config 不支持的字段：${unknown.join('、')}（可用：${EVOLVE_CONFIG_FIELDS.join('、')}）` }
+  }
+  const configPatch = {}
+  const identityPatch = {}
+  const changed = []
+  for (const key of keys) {
+    const value = raw[key]
+    if (value === undefined) continue
+    if (key === 'soulName') {
+      if (typeof value !== 'string') return { ok: false, reason: 'soulName 需要字符串' }
+      const name = value.trim()
+      if (!name || codepointLength(name) > EVOLVE_NAME_MAX) {
+        return { ok: false, reason: `soulName 需要 1~${EVOLVE_NAME_MAX} 字` }
+      }
+      configPatch[key] = name
+    } else if (key === 'soulUserNickname') {
+      if (typeof value !== 'string') return { ok: false, reason: 'soulUserNickname 需要字符串' }
+      const nickname = value.trim()
+      if (codepointLength(nickname) > EVOLVE_NAME_MAX) {
+        return { ok: false, reason: `soulUserNickname 最多 ${EVOLVE_NAME_MAX} 字` }
+      }
+      configPatch[key] = nickname
+    } else if (key === 'soulEnabled' || key === 'soulHonestyLine') {
+      if (typeof value !== 'boolean') return { ok: false, reason: `${key} 需要布尔值` }
+      configPatch[key] = value
+    } else if (key === 'soulPromptBudget') {
+      const budget = Number(value)
+      if (!Number.isFinite(budget) || budget < 200 || budget > 4000) {
+        return { ok: false, reason: 'soulPromptBudget 需要 200~4000 的数字' }
+      }
+      configPatch[key] = Math.round(budget)
+    } else if (key === 'interests' || key === 'strengths') {
+      const checked = stringListOf(value, key)
+      if (!checked.ok) return checked
+      identityPatch[key] = checked.items
+    }
+    changed.push(key)
+  }
+  return { ok: true, configPatch, identityPatch, changed }
+}
+
+/**
+ * 校验 soul_evolve 的业务参数：JSON Schema 管类型/枚举，这里管长度、replace 存在性、config 白名单。
+ * kind 未提供时返回 undefined（新增时由 addGrowth 回落 trait，替换时保留原 kind）。
+ */
+export function validateEvolveArgs(args = {}) {
+  const src = asObject(args)
+  const text = asString(src.text, '').replace(/\s+/g, ' ').trim()
+  if (!text) return { ok: false, reason: '缺少 text：写一句你自己长出来的东西' }
+  const textLength = codepointLength(text)
+  if (textLength > GROWTH_TEXT_MAX) {
+    return { ok: false, reason: `text 太长（${textLength} 字），最多 ${GROWTH_TEXT_MAX} 字` }
+  }
+  const kind = GROWTH_KINDS.includes(src.kind) ? src.kind : undefined
+  if (src.kind !== undefined && !kind) {
+    return { ok: false, reason: `kind 只能是 ${GROWTH_KINDS.join(' / ')}` }
+  }
+  if (src.pin !== undefined && typeof src.pin !== 'boolean') return { ok: false, reason: 'pin 需要布尔值' }
+  const note = asString(src.note, '').replace(/\s+/g, ' ').trim()
+  if (codepointLength(note) > GROWTH_NOTE_MAX) {
+    return { ok: false, reason: `note 最多 ${GROWTH_NOTE_MAX} 字` }
+  }
+  const config = sanitizeSoulConfigPatch(src.config)
+  if (!config.ok) return config
+  return {
+    ok: true,
+    text: codepointSlice(text, GROWTH_TEXT_MAX),
+    kind,
+    note: codepointSlice(note, GROWTH_NOTE_MAX),
+    pin: src.pin === true,
+    replace: asString(src.replace, '').trim(),
+    config,
+  }
+}
+
+export { addGrowth, updateGrowth, deleteGrowth, listGrowth }
 
 // ---------- 插件安装 ----------
 
@@ -969,7 +1108,137 @@ export function installSoul(ctx, { state, log } = {}) {
     logger('[soul] presence context 注册失败:', error instanceof Error ? error.message : error)
   }
 
-  // ⑦ 备份 API：懒加载避免循环依赖；注册/dispose 都挂在宿主 effect 上。
+  // ⑦ 成长工具 soul_evolve：写入前快照 → 改 growth（可选 config）→ 立即落盘
+  async function evolveSoul(args = {}) {
+    const checked = validateEvolveArgs(args)
+    if (!checked.ok) return { ok: false, reason: checked.reason }
+    if (checked.replace && !soul.growth.some((item) => item && item.id === checked.replace)) {
+      return { ok: false, reason: 'replace 指向的成长记录不存在（先看现有 growth 列表）' }
+    }
+    const configKeys = Object.keys(checked.config.configPatch)
+    if (configKeys.length > 0 && typeof state?.writeConfig !== 'function') {
+      return { ok: false, reason: '当前宿主没有 config 写入能力' }
+    }
+
+    // 写入前快照；失败只 warn，继续写（备份不是写盘的前置条件）。
+    let backupId = ''
+    const reason = 'soul-evolve: ' + codepointSlice(checked.text, 60)
+    try {
+      const mod = await import('./backup.js')
+      const result = await mod.snapshot('soul-evolve', { reason })
+      if (result && result.ok === false) {
+        logger('[soul] soul_evolve 备份失败（继续写）:', result.error || 'unknown')
+      } else if (result && result.id) {
+        backupId = result.id
+      }
+    } catch (error) {
+      logger('[soul] soul_evolve 备份失败（继续写）:', error instanceof Error ? error.message : error)
+    }
+
+    const now = Date.now()
+    const previousGrowth = soul.growth
+    const mutation = checked.replace
+      ? updateGrowth(soul.growth, checked.replace, {
+        text: checked.text,
+        kind: checked.kind,
+        note: checked.note || undefined,
+        pinned: args?.pin === undefined ? undefined : checked.pin,
+      }, now)
+      : addGrowth(soul.growth, {
+        text: checked.text,
+        kind: checked.kind,
+        note: checked.note,
+        pinned: checked.pin,
+        source: 'self',
+      }, now)
+    if (!mutation.ok) return { ok: false, reason: mutation.reason }
+    soul.growth = mutation.entries
+
+    if (configKeys.length > 0) {
+      try {
+        state.writeConfig(checked.config.configPatch)
+      } catch (error) {
+        soul.growth = previousGrowth
+        logger('[soul] soul_evolve 写 config 失败:', error instanceof Error ? error.message : error)
+        return { ok: false, reason: 'config 写入失败，成长未保存' }
+      }
+    }
+    // interests/strengths 的权威位置是 soul.identity（config.json 只存 5 个扁平字段）。
+    if (checked.config.identityPatch.interests) soul.identity.interests = checked.config.identityPatch.interests.slice()
+    if (checked.config.identityPatch.strengths) soul.identity.strengths = checked.config.identityPatch.strengths.slice()
+
+    saveNow({ reason: 'soul-evolve', skipBackup: true, force: true })
+    return {
+      ok: true,
+      growth: { ...mutation.growth },
+      configChanged: checked.config.changed.slice(),
+      ...(backupId ? { backupId } : {}),
+      deduped: mutation.deduped === true,
+      total: soul.growth.length,
+    }
+  }
+
+  try {
+    const handle = ctx.tools?.register?.(defineTool({
+      name: 'soul_evolve',
+      description: '记录你自己长出来的一部分：新的自我认识、兴趣、习惯，或你和对方之间的默契'
+        + '（kind: trait / interest / habit / bond / self）。'
+        + '只在某次对话真的让“你”改变了一点时才用；不要每轮写，一次对话最多 1~2 条。'
+        + '不要写短期记忆、对方的隐私或一次性琐事（那些用 soul_note）。'
+        + '注意：写入会改变 system prompt（模型缓存失效一次），所以克制；同 kind + 同文会自动去重。'
+        + 'config 可直接改灵魂身份字段（soulName / soulUserNickname / soulEnabled / soulHonestyLine / '
+        + 'soulPromptBudget 200~4000 / interests / strengths）。',
+      parameters: {
+        text: { type: 'string', description: '必填：一句成长（≤120 字），用第一人称写“我…”', required: true },
+        kind: {
+          type: 'string',
+          enum: [...GROWTH_KINDS],
+          description: 'trait=性格/自我认识，interest=兴趣，habit=习惯，bond=和对方的默契，self=对自己的新看法；默认 trait',
+        },
+        note: { type: 'string', description: '可选：为什么/从哪来（≤200 字），不会进身份段' },
+        pin: { type: 'boolean', description: '可选：pinned 的条目不会被 40 条上限裁掉，并且优先出现在身份段' },
+        replace: { type: 'string', description: '可选：替换某条成长（填 growth id）；不填就是新增' },
+        config: {
+          type: 'object',
+          description: '可选：同时修改灵魂身份配置；只允许白名单字段，非法值会被拒绝',
+          additionalProperties: false,
+          properties: {
+            soulName: { type: 'string', description: '灵魂名字（≤20 字）' },
+            soulUserNickname: { type: 'string', description: '对用户的昵称（≤20 字，可留空）' },
+            soulEnabled: { type: 'boolean', description: '灵魂段总开关' },
+            soulHonestyLine: { type: 'boolean', description: '是否保留“我是 AI”的诚实说明' },
+            soulPromptBudget: { type: 'number', description: '身份段预算 200~4000' },
+            interests: { type: 'array', items: { type: 'string' }, description: '喜欢的事（1~6 条，每条 ≤12 字）' },
+            strengths: { type: 'array', items: { type: 'string' }, description: '擅长的事（1~6 条，每条 ≤12 字）' },
+          },
+        },
+      },
+      output: {
+        schema: { type: 'json' },
+        render: (_args, value) => [{
+          type: 'text',
+          text: value?.ok === true
+            ? `长出来一点：${value.growth?.kind ?? 'trait'} · ${value.growth?.text ?? ''}`
+            : `没写成：${String(value?.reason ?? '')}`,
+        }],
+      },
+      async execute(args = {}) {
+        return evolveSoul(args)
+      },
+    }))
+    const disposeTool = typeof handle === 'function'
+      ? handle
+      : handle && typeof handle.dispose === 'function'
+        ? () => handle.dispose()
+        : null
+    if (disposeTool && typeof ctx.effect === 'function') {
+      ctx.effect(() => disposeTool, 'aura-soul: soul_evolve tool')
+    }
+  } catch (error) {
+    logger('[soul] soul_evolve 工具注册失败:', error instanceof Error ? error.message : error)
+  }
+
+  // ⑧ 备份 API：懒加载避免循环依赖；注册/dispose 都挂在宿主 effect 上。
   // 这里只给 initBackup 一个最小的 ctx 视图（它只需要 ctx.get('webServer')），
   // 避免在异步 import 回调里再调用 ctx.effect。
   let backupApi = null
@@ -1010,7 +1279,7 @@ export function installSoul(ctx, { state, log } = {}) {
     logger('[soul] 备份 API 注册失败:', error instanceof Error ? error.message : error)
   }
 
-  // ⑧ 对面板/其他模块的 API
+  // ⑨ 对面板/其他模块的 API
   function snapshot() {
     try {
       const config = readConfig()
@@ -1051,6 +1320,7 @@ export function installSoul(ctx, { state, log } = {}) {
           pausedUntil: soul.speak.pausedUntil,
         },
         explainLog: soul.explainLog.slice(-30),
+        growth: listGrowth(soul.growth),
         meta: { ...soul.meta, updatedAt: soul.meta.updatedAt },
       }
     } catch (error) {
@@ -1074,6 +1344,7 @@ export function installSoul(ctx, { state, log } = {}) {
         identity: soul.identity,
         relation: soul.relation,
         memory: soul.memory,
+        growth: soul.growth,
         meta: { ...d.meta, lastSettleDay: soul.meta?.lastSettleDay || '' },
       }
       Object.assign(soul, d, keep)
@@ -1094,6 +1365,8 @@ export function installSoul(ctx, { state, log } = {}) {
     saveNow,
     saveSoon,
     saveWithBackup,
+    listGrowth: (options) => listGrowth(soul.growth, options),
+    evolve: evolveSoul,
     explain,
     on,
     onUserMessage,
