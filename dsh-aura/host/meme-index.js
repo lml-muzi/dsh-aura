@@ -7,7 +7,8 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 
 const packCache = new Map()
@@ -43,8 +44,11 @@ function expressionConfig() {
 }
 
 /** 内置图库在 dsh-meme 包目录；用户图库在 ~/.dsh/meme-packs。 */
+const auraMemesDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'memes')
+
 function packDirs(packId) {
   const dirs = []
+  dirs.push(join(auraMemesDir, packId))
   const home = join(homedir(), '.dsh', 'meme-packs', packId)
   dirs.push(home)
   const profileDir = process.env.DSH_PROFILE_DIR

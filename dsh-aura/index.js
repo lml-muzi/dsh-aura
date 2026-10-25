@@ -9,6 +9,8 @@ import { QQClient } from './host/qq.js'
 import { ChannelBridge } from './host/bridge.js'
 import { installMedia } from './host/media.js'
 import { installSoul } from './host/soul.js'
+import { initPersona } from './host/persona.js'
+import { initMeme, dispose as disposeMeme, getMemeState } from './host/meme.js'
 import { installEmotion } from './host/emotion.js'
 import { installMemory } from './host/memory.js'
 import { installSpeak } from './host/speak.js'
@@ -77,6 +79,8 @@ export function apply(ctx, config = {}) {
 
   // ---- 灵魂层：soul 是唯一观察 session/event 的地方，emotion/memory 订阅它的事件 ----
   const soul = installSoul(ctx, { state, log })
+  // 人设（收编 dsh-soul）：独立 persona.json，注入人设段并注册 /dsh-aura/persona-api 与 set_persona 工具
+  const persona = initPersona({ ctx, state, log })
   const disposers = []
   safe(() => disposers.push(soul.on('user', payload => {
     safe(() => emotion.onUserMessage?.(payload), 'emotion.onUserMessage')
@@ -107,6 +111,8 @@ export function apply(ctx, config = {}) {
   })
   bridge = new ChannelBridge({ ctx, state, qq, log })
   installMedia(ctx, { bridge, log })
+  // 表情包（收编 dsh-meme）：自己的合并图库 + send_meme/learn_meme + /dsh-aura/memes-api
+  void initMeme({ ctx, state, log, bridge })
 
   // ---- 情绪 / 记忆 / 主动搭话 ----
   const emotion = installEmotion(ctx, { state, soul, bridge, log })
@@ -140,6 +146,8 @@ export function apply(ctx, config = {}) {
     status,
     config: () => state.redactConfig(state.readConfig()),
     soul: () => safe(() => soul.snapshot(), {}),
+    persona: () => safe(() => persona.snapshot(), {}),
+    meme: () => safe(() => getMemeState(), {}),
     speak: () => safe(() => speak.snapshot(), {}),
     memory: () => safe(() => memory.snapshot(), {}),
   })
@@ -167,6 +175,8 @@ export function apply(ctx, config = {}) {
   }
 
   ctx.effect(() => () => {
+    safe(() => persona.dispose?.(), 'dispose persona')
+    safe(() => disposeMeme(), 'dispose meme')
     for (const dispose of disposers) safe(dispose, 'dispose soul listener')
     safe(() => speak.stop?.(), 'speak.stop')
     void stop()

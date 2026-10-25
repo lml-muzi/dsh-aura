@@ -149,6 +149,8 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
             config: redactConfig(state.readConfig()),
             status: service.status(),
             soul: soulPayload(),
+            persona: safeCall(() => service.persona?.(), undefined),
+            meme: safeCall(() => service.meme?.(), undefined),
             proactive: safeCall(() => speak?.snapshot?.(), undefined),
             sessions: Object.values(state.readSessions()),
             bridge: bridge ? bridge.stats() : undefined,

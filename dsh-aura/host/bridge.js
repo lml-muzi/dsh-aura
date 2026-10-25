@@ -488,7 +488,10 @@ export class ChannelBridge {
     const markers = extractMemeMarkers(cleaned)
     if (markers.length) {
       qqText = cleaned.replace(/\[表情[:：]\s*[^\]]+\](?:\(https?:\/\/[^\s)]+\))?/g, '').replace(/[ \t]{2,}/g, ' ').trim()
+      const sentByTool = sessionId ? this.mediaSentAt.get(sessionId) : undefined
+      const skipMarkerMedia = Number.isFinite(sentByTool) && Date.now() - sentByTool < 120000
       for (const marker of markers) {
+        if (skipMarkerMedia) continue
         if (!marker.file) {
           this.log('[qq] 表情标记没有匹配到图库文件:', marker.description)
           continue
@@ -612,6 +615,7 @@ export class ChannelBridge {
     } catch (error) {
       this.log('[qq] 登记出站附件失败:', error instanceof Error ? error.message : error)
     }
+    if (sessionId) this.mediaSentAt.set(sessionId, Date.now())
     return { fileName: name, size: info.size, image }
   }
 
