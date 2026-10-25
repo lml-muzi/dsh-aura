@@ -14,6 +14,94 @@ window.__ModuleLoader__.load({
     const EVERY_MIN = 5
     const EVERY_MAX = 24 * 60
 
+    /** 表情包 Host API（dsh-aura 自有路由，不再依赖已停用的 dsh-meme 前端）。 */
+    const MEME_API = '/dsh-aura/memes-api'
+    const MEME_BASE = '/dsh-aura/memes'
+    /** 人设 Host API（收编 dsh-soul）。 */
+    const PERSONA_API = '/dsh-aura/persona-api'
+    const MEME_TAG_LABELS = {
+      angry: '生气',
+      happy: '开心',
+      sad: '难过',
+      shy: '害羞',
+      confused: '困惑',
+      daily: '日常',
+      surprised: '惊讶',
+      sleep: '睡觉',
+      like: '喜欢',
+      work: '上班',
+      baka: '笨蛋',
+      fool: '傻瓜',
+      color: '彩色',
+      cpu: 'CPU',
+      givemoney: '给钱',
+      meow: '喵喵',
+      morning: '早上好',
+      see: '看看',
+      sigh: '叹气',
+    }
+    const PERSONA_TRAIL_COLOR_DEFAULT = '#679EFE'
+    const PERSONA_STYLES = [
+      ['professional', '专业严谨'],
+      ['casual', '轻松自然'],
+      ['humorous', '幽默风趣'],
+      ['roast', '吐槽犀利'],
+      ['efficient', '高效干练'],
+    ]
+    const PERSONA_TRAITS = [
+      ['default', '默认'],
+      ['more', '更多'],
+      ['less', '更少'],
+    ]
+    const PERSONA_REPLY_LENGTHS = [
+      ['concise', '简短'],
+      ['normal', '适中'],
+      ['detailed', '详细'],
+    ]
+    const PERSONA_LANGUAGES = [
+      ['zh', '简体中文'],
+      ['en', 'English'],
+    ]
+    const PERSONA_TRAIL_SPEEDS = [
+      ['slow', '慢'],
+      ['normal', '中'],
+      ['fast', '快'],
+    ]
+    const PERSONA_TRAIL_WIDTHS = [
+      ['thin', '细'],
+      ['normal', '中'],
+      ['thick', '粗'],
+    ]
+    const PERSONA_SOURCE_LABELS = {
+      web: '网页',
+      tool: '工具',
+      preset: '预设',
+      undo: '撤销',
+      reset: '重置',
+      service: '服务',
+      command: '命令',
+      api: '接口',
+    }
+    const PERSONA_FIELD_LABELS = {
+      enabled: '启用',
+      nickname: '昵称',
+      occupation: '职业',
+      bio: '介绍',
+      style: '回复风格',
+      headingLists: '标题列表',
+      emoji: '表情符号',
+      tables: '表格',
+      replyLength: '回复长度',
+      language: '语言',
+      customInstructions: '自定义指令',
+      trailEnabled: '光轨',
+      trailColor: '光轨颜色',
+      trailSpeed: '光轨速度',
+      trailWidth: '光轨粗细',
+      requireToolConfirmation: '工具确认',
+      historyMaxEntries: '历史上限',
+    }
+
     /** 内置单色 SVG 图标；emoji 走文字渲染。 */
     const ICON_PRESETS = ['aura', 'qq', 'heart', 'cat', 'star', 'moon']
     /** 图标选择网格的完整选项：6 个内置 SVG + emoji。 */
@@ -589,6 +677,54 @@ window.__ModuleLoader__.load({
 .qqn-look-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
 .qqn-event-time,.qqn-log-time{min-width:52px}
 }
+.aura-field-select{width:auto;min-width:120px;padding:0 10px;cursor:pointer}
+.aura-meme-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 12px}
+.aura-meme-search{flex:1 1 180px;width:auto;min-width:140px}
+.aura-meme-select{flex:0 0 auto;width:auto;min-width:104px;padding:0 8px;cursor:pointer}
+.aura-meme-upload{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 12px}
+.aura-meme-upload .qqn-input{flex:1 1 140px;width:auto;min-width:120px}
+.aura-meme-packs{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 12px}
+.aura-meme-label{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;margin-right:2px}
+.aura-meme-chip{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:20px;cursor:pointer;transition:background .15s,border-color .15s,color .15s}
+.aura-meme-chip:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.aura-meme-chip:disabled{cursor:default;opacity:.6}
+.aura-meme-chip-on{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.aura-meme-chip-count{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:18px;font-variant-numeric:tabular-nums}
+.aura-meme-status{min-height:20px;margin:0 0 10px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px}
+.aura-meme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;padding:2px 0 4px}
+.aura-meme-card{display:flex;flex-direction:column;gap:4px;min-width:0;padding:6px;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer;transition:background .15s,border-color .15s}
+.aura-meme-card:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l2)}
+.aura-meme-thumb{display:block;width:100%;height:100px;object-fit:contain;border-radius:8px;background:var(--dsw-specific-sidebar-fill)}
+.aura-meme-caption{font-size:12px;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aura-meme-tag{display:inline-flex;align-items:center;width:fit-content;height:18px;padding:0 6px;border-radius:9px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:18px}
+.aura-meme-editor-backdrop{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(0,0,0,.45)}
+.aura-meme-editor{box-sizing:border-box;display:flex;flex-direction:column;gap:10px;width:min(420px,100%);max-height:calc(100vh - 40px);overflow:auto;padding:16px;border:.5px solid var(--dsw-alias-border-l3);border-radius:16px;background:var(--dsw-alias-bg-base);box-shadow:0 18px 60px rgba(0,0,0,.35)}
+.aura-meme-editor-img{display:block;width:100%;max-height:200px;object-fit:contain;border-radius:10px;background:var(--dsw-specific-sidebar-fill)}
+.aura-meme-field{display:flex;flex-direction:column;gap:4px}
+.aura-meme-field>span{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.aura-meme-field .qqn-input{width:100%}
+.aura-meme-editor-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:2px}
+.aura-persona-textarea{box-sizing:border-box;width:100%;height:auto;min-height:64px;padding:8px 12px;line-height:20px;resize:vertical}
+.aura-persona-inline{display:flex;align-items:center;justify-content:flex-end;gap:8px;width:100%}
+.aura-persona-color{width:44px;height:32px;padding:2px;border:.5px solid var(--dsw-alias-border-l3);border-radius:8px;background:var(--dsw-alias-bg-base);cursor:pointer}
+.aura-persona-presets{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:14px 0}
+.aura-persona-presets .qqn-input{flex:1 1 120px;width:auto;min-width:120px}
+.aura-persona-history{display:flex;flex-direction:column;padding:6px 0}
+.aura-persona-history-row{display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:.5px solid var(--dsw-alias-border-l3)}
+.aura-persona-history-row:last-child{border-bottom:0}
+.aura-persona-history-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.aura-persona-history-meta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
+.aura-persona-history-changes{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.aura-persona-history-row .qqn-button{flex:none;height:28px;padding:0 10px;border-radius:14px;font-size:12px}
+.aura-persona-prompt{max-height:320px;margin:0;padding:12px 14px;overflow:auto;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;background:var(--dsw-specific-sidebar-fill);color:var(--dsw-alias-label-secondary);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere}
+@media (max-width:640px){
+.aura-meme-grid{grid-template-columns:repeat(auto-fill,minmax(96px,1fr))}
+.aura-meme-thumb{height:84px}
+.aura-meme-editor-backdrop{padding:12px}
+.aura-meme-editor{max-height:calc(100vh - 24px)}
+.aura-persona-history-row{flex-direction:column}
+.aura-persona-history-row .qqn-button{align-self:flex-end}
+}
 `
 
     function interpolate(text, params) {
@@ -1017,6 +1153,167 @@ window.__ModuleLoader__.load({
       return cfg
     }
 
+    /* ---------------- 表情包 / 人设：通用小工具 ---------------- */
+    function errorMessage(error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+
+    function memeTagLabel(tag) {
+      const key = String(tag || '')
+      return MEME_TAG_LABELS[key] || key
+    }
+
+    /** 图片地址：优先 Host 回显的 url，否则按 /dsh-aura/memes/<pack>/<relPath> 拼。 */
+    function memeSrc(row) {
+      const source = asObject(row)
+      if (typeof source.url === 'string' && source.url) return source.url
+      const pack = String(source.pack || '')
+      const relPath = String(source.relPath || '')
+      if (!pack || !relPath) return ''
+      const rel = relPath.split('/').map(segment => encodeURIComponent(segment)).join('/')
+      return MEME_BASE + '/' + encodeURIComponent(pack) + '/' + rel
+    }
+
+    /** 同源 JSON 请求；Host 的 {ok:false, error} 统一抛成 Error。 */
+    async function fetchJson(url, body) {
+      const response = await fetch(url, body === undefined
+        ? { method: 'GET' }
+        : {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          })
+      const value = await response.json().catch(() => ({}))
+      if (!response.ok || value.ok === false) {
+        const detail = value.error || (value.errors && Object.values(value.errors)[0]) || ('HTTP ' + response.status)
+        throw new Error(String(detail))
+      }
+      return value
+    }
+
+    function readFileBase64(file) {
+      return new Promise((resolve, reject) => {
+        if (!file || typeof FileReader !== 'function') {
+          reject(new Error('当前环境不支持读取文件'))
+          return
+        }
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result || ''))
+        reader.onerror = () => reject(new Error('读取图片失败'))
+        reader.readAsDataURL(file)
+      })
+    }
+
+    /** 统一的下拉框写法（React.createElement 风格）。 */
+    function selectField(options, value, onChange, label) {
+      return h('select', {
+        className: 'qqn-input aura-field-select',
+        value,
+        'aria-label': label,
+        onChange: event => onChange(event.target.value),
+      }, asArray(options).map(option => {
+        const pair = Array.isArray(option) ? option : [option, option]
+        return h('option', { key: String(pair[0]), value: pair[0] }, pair[1])
+      }))
+    }
+
+    function memeTagOptions(tags, extra) {
+      const values = []
+      for (const item of [...asArray(tags), ...asArray(extra)]) {
+        const text = String(item || '').trim()
+        if (text && !values.includes(text)) values.push(text)
+      }
+      if (values.length === 0) values.push('daily')
+      return values
+    }
+
+    /* ---------------- 人设：表单与展示 ---------------- */
+    function personaText(value, limit) {
+      return typeof value === 'string' ? value.slice(0, limit) : ''
+    }
+
+    function personaOption(value, options, fallback) {
+      const text = String(value || '')
+      return options.some(option => option[0] === text) ? text : fallback
+    }
+
+    function personaColorOf(value) {
+      const text = String(value || '').trim()
+      return /^#[0-9a-fA-F]{6}$/.test(text) ? text.toUpperCase() : PERSONA_TRAIL_COLOR_DEFAULT
+    }
+
+    function buildPersonaForm(config) {
+      const cfg = asObject(config)
+      return {
+        enabled: cfg.enabled !== false,
+        nickname: personaText(cfg.nickname, 50),
+        occupation: personaText(cfg.occupation, 50),
+        bio: personaText(cfg.bio, 500),
+        style: personaOption(cfg.style, PERSONA_STYLES, 'professional'),
+        headingLists: personaOption(cfg.headingLists, PERSONA_TRAITS, 'default'),
+        emoji: personaOption(cfg.emoji, PERSONA_TRAITS, 'default'),
+        tables: personaOption(cfg.tables, PERSONA_TRAITS, 'default'),
+        replyLength: personaOption(cfg.replyLength, PERSONA_REPLY_LENGTHS, 'normal'),
+        language: personaOption(cfg.language, PERSONA_LANGUAGES, 'zh'),
+        customInstructions: personaText(cfg.customInstructions, 2000),
+        trailEnabled: cfg.trailEnabled !== false,
+        trailColor: personaColorOf(cfg.trailColor),
+        trailSpeed: personaOption(cfg.trailSpeed, PERSONA_TRAIL_SPEEDS, 'slow'),
+        trailWidth: personaOption(cfg.trailWidth, PERSONA_TRAIL_WIDTHS, 'thin'),
+      }
+    }
+
+    /** 预设列表：优先 presetList，退回 presets 对象。 */
+    function buildPresetList(snapshot) {
+      const data = asObject(snapshot)
+      if (asArray(data.presetList).length > 0) {
+        return data.presetList.map(item => {
+          const row = asObject(item)
+          const id = String(row.id || row.name || '')
+          return { id, name: String(row.name || row.id || ''), builtin: row.builtin === true }
+        }).filter(item => item.id)
+      }
+      if (Array.isArray(data.presets)) {
+        return data.presets.map(item => {
+          const row = asObject(item)
+          const id = String(row.id || row.name || '')
+          return { id, name: String(row.name || row.id || ''), builtin: row.builtin === true }
+        }).filter(item => item.id)
+      }
+      const presets = asObject(data.presets)
+      return Object.keys(presets).map(id => ({
+        id,
+        name: id,
+        builtin: asObject(presets[id]).builtin === true,
+      }))
+    }
+
+    function personaValueText(value) {
+      if (Array.isArray(value)) return String(value.length) + ' 项'
+      if (value && typeof value === 'object') return '…'
+      if (typeof value === 'boolean') return value ? '开' : '关'
+      if (value === null || value === undefined || value === '') return '空'
+      const text = String(value)
+      return text.length > 16 ? text.slice(0, 16) + '…' : text
+    }
+
+    function personaChangesText(changes) {
+      const source = asObject(changes)
+      const fields = Object.keys(source)
+      if (fields.length === 0) return '无字段变化'
+      const parts = fields.slice(0, 3).map(key => {
+        const item = asObject(source[key])
+        return (PERSONA_FIELD_LABELS[key] || key) + '：' + personaValueText(item.from) + ' → ' + personaValueText(item.to)
+      })
+      if (fields.length > 3) parts.push('等 ' + fields.length + ' 项')
+      return parts.join('；')
+    }
+
+    function personaSourceLabel(source) {
+      const key = String(source || '')
+      return PERSONA_SOURCE_LABELS[key] || key || '未知'
+    }
+
     function Panel(props) {
       const t = makeT(props && props.t)
       const currentLook = useAppearance()
@@ -1043,6 +1340,31 @@ window.__ModuleLoader__.load({
       const [blocks, setBlocks] = React.useState({})
       const [resetArmed, setResetArmed] = React.useState(false)
       const [timelineOpen, setTimelineOpen] = React.useState(false)
+      const [memeRows, setMemeRows] = React.useState([])
+      const [memePacks, setMemePacks] = React.useState([])
+      const [memeTags, setMemeTags] = React.useState([])
+      const [memeLoading, setMemeLoading] = React.useState(false)
+      const [memeLoaded, setMemeLoaded] = React.useState(false)
+      const [memeError, setMemeError] = React.useState('')
+      const [memeNotice, setMemeNotice] = React.useState('')
+      const [memeBusy, setMemeBusy] = React.useState('')
+      const [memeQuery, setMemeQuery] = React.useState('')
+      const [memeTag, setMemeTag] = React.useState('')
+      const [memeSendMode, setMemeSendMode] = React.useState('auto')
+      const [memeUploadName, setMemeUploadName] = React.useState('')
+      const [memeUploadTag, setMemeUploadTag] = React.useState('daily')
+      const [memeEdit, setMemeEdit] = React.useState(null)
+      const [persona, setPersona] = React.useState(null)
+      const [personaLoading, setPersonaLoading] = React.useState(false)
+      const [personaError, setPersonaError] = React.useState('')
+      const [personaNotice, setPersonaNotice] = React.useState('')
+      const [personaBusy, setPersonaBusy] = React.useState('')
+      const [personaForm, setPersonaForm] = React.useState(() => buildPersonaForm({}))
+      const [personaBaseline, setPersonaBaseline] = React.useState(() => buildPersonaForm({}))
+      const [personaPresetId, setPersonaPresetId] = React.useState('')
+      const [personaPresetName, setPersonaPresetName] = React.useState('')
+      const [personaPreviewOpen, setPersonaPreviewOpen] = React.useState(false)
+      const [personaPreview, setPersonaPreview] = React.useState('')
 
       const mounted = React.useRef(true)
       const inflight = React.useRef(false)
@@ -1060,6 +1382,11 @@ window.__ModuleLoader__.load({
       const blocksRef = React.useRef(blocks)
       const blockTimers = React.useRef({})
       const resetTimer = React.useRef(null)
+      const memeTimer = React.useRef(null)
+      const personaTimer = React.useRef(null)
+      const memeFileRef = React.useRef(null)
+      const personaRef = React.useRef(personaForm)
+      const personaBaselineRef = React.useRef(personaBaseline)
 
       React.useEffect(() => {
         lookRef.current = look
@@ -1088,6 +1415,12 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         blocksRef.current = blocks
       }, [blocks])
+      React.useEffect(() => {
+        personaRef.current = personaForm
+      }, [personaForm])
+      React.useEffect(() => {
+        personaBaselineRef.current = personaBaseline
+      }, [personaBaseline])
 
       React.useEffect(() => {
         mounted.current = true
@@ -1108,6 +1441,14 @@ window.__ModuleLoader__.load({
           if (resetTimer.current !== null) {
             clearTimeout(resetTimer.current)
             resetTimer.current = null
+          }
+          if (memeTimer.current !== null) {
+            clearTimeout(memeTimer.current)
+            memeTimer.current = null
+          }
+          if (personaTimer.current !== null) {
+            clearTimeout(personaTimer.current)
+            personaTimer.current = null
           }
         }
       }, [])
@@ -1226,6 +1567,409 @@ window.__ModuleLoader__.load({
           if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
         }
       }, [load])
+
+      /* ---------------- 表情包 / 人设：加载与操作 ---------------- */
+      const flashMeme = React.useCallback(text => {
+        setMemeNotice(text)
+        if (memeTimer.current !== null) clearTimeout(memeTimer.current)
+        memeTimer.current = setTimeout(() => {
+          memeTimer.current = null
+          if (mounted.current) setMemeNotice('')
+        }, 3000)
+      }, [])
+
+      const flashPersona = React.useCallback(text => {
+        setPersonaNotice(text)
+        if (personaTimer.current !== null) clearTimeout(personaTimer.current)
+        personaTimer.current = setTimeout(() => {
+          personaTimer.current = null
+          if (mounted.current) setPersonaNotice('')
+        }, 3000)
+      }, [])
+
+      /** 人设表单同步：默认不覆盖用户正在编辑的草稿。 */
+      const syncPersona = React.useCallback((config, force) => {
+        const next = buildPersonaForm(config)
+        const untouched = draftKey(personaRef.current) === draftKey(personaBaselineRef.current)
+        if (!force && !untouched) return
+        setPersonaForm(next)
+        setPersonaBaseline(next)
+      }, [])
+
+      const loadMemes = React.useCallback(async (query, tag) => {
+        setMemeLoading(true)
+        setMemeError('')
+        try {
+          const params = new URLSearchParams({ action: 'list' })
+          const text = String(query || '').trim()
+          if (text) params.set('query', text)
+          if (tag) params.set('tag', tag)
+          const value = await fetchJson(MEME_API + '?' + params.toString())
+          if (!mounted.current) return
+          setMemeRows(asArray(value.memes))
+          setMemePacks(asArray(value.packs))
+          if (asArray(value.tags).length > 0) setMemeTags(value.tags.map(item => String(item)))
+          if (typeof value.sendMode === 'string') setMemeSendMode(value.sendMode)
+          setMemeLoaded(true)
+        } catch (error) {
+          if (mounted.current) setMemeError(errorMessage(error))
+        } finally {
+          if (mounted.current) setMemeLoading(false)
+        }
+      }, [])
+
+      const loadPersona = React.useCallback(async force => {
+        setPersonaLoading(true)
+        try {
+          const value = await fetchJson(PERSONA_API + '/state')
+          if (!mounted.current) return
+          setPersona(value)
+          setPersonaError('')
+          if (value && value.config) syncPersona(value.config, force === true)
+          const list = buildPresetList(value)
+          setPersonaPresetId(previous => {
+            if (list.some(item => item.id === previous)) return previous
+            return String((value && value.activeId) || '') || (list[0] && list[0].id) || ''
+          })
+        } catch (error) {
+          if (mounted.current) setPersonaError(errorMessage(error))
+        } finally {
+          if (mounted.current) setPersonaLoading(false)
+        }
+      }, [syncPersona])
+
+      React.useEffect(() => {
+        if (tab !== 'meme') return undefined
+        const timer = setTimeout(() => {
+          void loadMemes(memeQuery, memeTag)
+        }, 300)
+        return () => clearTimeout(timer)
+      }, [tab, memeQuery, memeTag, loadMemes])
+
+      React.useEffect(() => {
+        if (tab !== 'persona') return undefined
+        void loadPersona(true)
+        return undefined
+      }, [tab, loadPersona])
+
+      const toggleMemePack = async pack => {
+        const packId = String((pack && pack.id) || '')
+        if (!packId || memeBusy) return
+        setMemeBusy('pack:' + packId)
+        setMemeError('')
+        setMemeNotice('')
+        try {
+          await fetchJson(MEME_API, { action: 'setPack', packId, enabled: !(pack.enabled === true) })
+          setMemePacks(previous => previous.map(item => item.id === packId
+            ? { ...item, enabled: !(item.enabled === true) }
+            : item))
+          flashMeme('图库开关已更新')
+          await loadMemes(memeQuery, memeTag)
+          refreshInlineMemeIndex()
+        } catch (error) {
+          if (mounted.current) setMemeError(errorMessage(error))
+        } finally {
+          if (mounted.current) setMemeBusy('')
+        }
+      }
+
+      const changeMemeSendMode = async mode => {
+        if (memeBusy) return
+        const previous = memeSendMode
+        setMemeBusy('sendMode')
+        setMemeError('')
+        setMemeNotice('')
+        try {
+          const value = await fetchJson(MEME_API, { action: 'setSendMode', mode })
+          if (mounted.current) setMemeSendMode(typeof value.sendMode === 'string' ? value.sendMode : mode)
+          flashMeme('发送方式已更新')
+        } catch (error) {
+          if (mounted.current) {
+            setMemeSendMode(previous)
+            setMemeError(errorMessage(error))
+          }
+        } finally {
+          if (mounted.current) setMemeBusy('')
+        }
+      }
+
+      const uploadMemeFile = async event => {
+        const input = event && event.target
+        const file = input && input.files && input.files[0]
+        if (input) input.value = ''
+        if (!file || memeBusy) return
+        if (file.type && !/^image\//.test(file.type)) {
+          setMemeError('请选择图片文件')
+          return
+        }
+        if (file.size > 8 * 1024 * 1024) {
+          setMemeError('图片不能超过 8MB')
+          return
+        }
+        setMemeBusy('upload')
+        setMemeError('')
+        setMemeNotice('')
+        try {
+          const data = await readFileBase64(file)
+          const name = memeUploadName.trim() || file.name
+          await fetchJson(MEME_API, {
+            action: 'upload',
+            data,
+            name,
+            tag: memeUploadTag || 'daily',
+            caption: memeUploadName.trim(),
+            keywords: '',
+          })
+          setMemeUploadName('')
+          flashMeme('已上传')
+          await loadMemes(memeQuery, memeTag)
+          refreshInlineMemeIndex()
+        } catch (error) {
+          if (mounted.current) setMemeError(errorMessage(error))
+        } finally {
+          if (mounted.current) setMemeBusy('')
+        }
+      }
+
+      const openMemeEditor = row => {
+        const source = asObject(row)
+        setMemeEdit({
+          pack: String(source.pack || ''),
+          relPath: String(source.relPath || ''),
+          src: memeSrc(source),
+          caption: String(source.caption || ''),
+          tag: String(source.tag || 'daily'),
+          keywords: String(source.keywords || ''),
+        })
+      }
+
+      const saveMemeEdit = async () => {
+        if (!memeEdit || memeBusy) return
+        setMemeBusy('update')
+        setMemeError('')
+        setMemeNotice('')
+        try {
+          await fetchJson(MEME_API, {
+            action: 'update',
+            pack: memeEdit.pack,
+            relPath: memeEdit.relPath,
+            tag: memeEdit.tag,
+            caption: memeEdit.caption,
+            keywords: memeEdit.keywords,
+          })
+          setMemeEdit(null)
+          flashMeme('已保存')
+          await loadMemes(memeQuery, memeTag)
+          refreshInlineMemeIndex()
+        } catch (error) {
+          if (mounted.current) setMemeError(errorMessage(error))
+        } finally {
+          if (mounted.current) setMemeBusy('')
+        }
+      }
+
+      const deleteMemeEdit = async () => {
+        if (!memeEdit || memeBusy) return
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm('删除这张表情包？此操作不可恢复。')) return
+        setMemeBusy('delete')
+        setMemeError('')
+        setMemeNotice('')
+        try {
+          await fetchJson(MEME_API, {
+            action: 'delete',
+            pack: memeEdit.pack,
+            relPath: memeEdit.relPath,
+          })
+          setMemeEdit(null)
+          flashMeme('已删除')
+          await loadMemes(memeQuery, memeTag)
+          refreshInlineMemeIndex()
+        } catch (error) {
+          if (mounted.current) setMemeError(errorMessage(error))
+        } finally {
+          if (mounted.current) setMemeBusy('')
+        }
+      }
+
+      /* ---------------- 人设操作 ---------------- */
+      const personaPayload = () => ({
+        enabled: personaForm.enabled === true,
+        nickname: personaForm.nickname.trim(),
+        occupation: personaForm.occupation.trim(),
+        bio: personaForm.bio.trim(),
+        style: personaForm.style,
+        headingLists: personaForm.headingLists,
+        emoji: personaForm.emoji,
+        tables: personaForm.tables,
+        replyLength: personaForm.replyLength,
+        language: personaForm.language,
+        customInstructions: personaForm.customInstructions.trim(),
+        trailEnabled: personaForm.trailEnabled === true,
+        trailColor: personaColorOf(personaForm.trailColor),
+        trailSpeed: personaForm.trailSpeed,
+        trailWidth: personaForm.trailWidth,
+      })
+
+      const applyPersonaConfig = config => {
+        if (!config) return null
+        const next = buildPersonaForm(config)
+        setPersonaForm(next)
+        setPersonaBaseline(next)
+        return config
+      }
+
+      const refreshPersonaPreview = async (config, quiet) => {
+        if (!quiet) {
+          setPersonaBusy('preview')
+          setPersonaError('')
+        }
+        try {
+          const value = await fetchJson(PERSONA_API + '/preview', { config: config || personaPayload() })
+          if (mounted.current) setPersonaPreview(typeof value.prompt === 'string' ? value.prompt : '')
+        } catch (error) {
+          if (mounted.current && !quiet) setPersonaError(errorMessage(error))
+        } finally {
+          if (mounted.current && !quiet) setPersonaBusy('')
+        }
+      }
+
+      const savePersona = async () => {
+        if (personaBusy) return
+        const payload = personaPayload()
+        setPersonaBusy('save')
+        setPersonaError('')
+        setPersonaNotice('')
+        let savedConfig = null
+        try {
+          const value = await fetchJson(PERSONA_API + '/save', { config: payload })
+          if (!mounted.current) return
+          savedConfig = applyPersonaConfig(value && value.config)
+          if (value && Array.isArray(value.changed) && value.changed.length === 0) flashPersona('没有需要保存的改动')
+          else flashPersona('人设已保存')
+          await loadPersona(true)
+        } catch (error) {
+          if (mounted.current) setPersonaError(errorMessage(error))
+        } finally {
+          if (mounted.current) setPersonaBusy('')
+        }
+        if (savedConfig && personaPreviewOpen) void refreshPersonaPreview(savedConfig, true)
+      }
+
+      const resetPersona = async () => {
+        if (personaBusy) return
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm('把人设重置为默认值？自定义指令等字段会清空。')) return
+        setPersonaBusy('reset')
+        setPersonaError('')
+        setPersonaNotice('')
+        let resetConfig = null
+        try {
+          const value = await fetchJson(PERSONA_API + '/reset', {})
+          if (!mounted.current) return
+          resetConfig = applyPersonaConfig(value && value.config)
+          flashPersona('已重置为默认人设')
+          await loadPersona(true)
+        } catch (error) {
+          if (mounted.current) setPersonaError(errorMessage(error))
+        } finally {
+          if (mounted.current) setPersonaBusy('')
+        }
+        if (resetConfig && personaPreviewOpen) void refreshPersonaPreview(resetConfig, true)
+      }
+
+      const applyPersonaPreset = async () => {
+        if (personaBusy || !personaPresetId) return
+        setPersonaBusy('apply')
+        setPersonaError('')
+        setPersonaNotice('')
+        let appliedConfig = null
+        try {
+          const value = await fetchJson(PERSONA_API + '/preset/apply', { id: personaPresetId })
+          if (!mounted.current) return
+          appliedConfig = applyPersonaConfig(value && value.config)
+          flashPersona('预设已应用')
+          await loadPersona(true)
+        } catch (error) {
+          if (mounted.current) setPersonaError(errorMessage(error))
+        } finally {
+          if (mounted.current) setPersonaBusy('')
+        }
+        if (appliedConfig && personaPreviewOpen) void refreshPersonaPreview(appliedConfig, true)
+      }
+
+      const savePersonaPreset = async () => {
+        if (personaBusy) return
+        const name = personaPresetName.trim()
+        if (!name) {
+          setPersonaError('给预设起个名字')
+          return
+        }
+        setPersonaBusy('savePreset')
+        setPersonaError('')
+        setPersonaNotice('')
+        try {
+          // /preset/save 拍的是“已保存配置”的快照；草稿有改动时先落盘，避免另存为拿到旧人设。
+          if (personaDirty) {
+            const saved = await fetchJson(PERSONA_API + '/save', { config: personaPayload() })
+            if (saved && saved.config) applyPersonaConfig(saved.config)
+          }
+          const value = await fetchJson(PERSONA_API + '/preset/save', { name })
+          if (!mounted.current) return
+          if (value && value.saved) setPersonaPresetId(String(value.saved))
+          setPersonaPresetName('')
+          flashPersona('预设已保存')
+          await loadPersona(true)
+        } catch (error) {
+          if (mounted.current) setPersonaError(errorMessage(error))
+        } finally {
+          if (mounted.current) setPersonaBusy('')
+        }
+      }
+
+      const deletePersonaPreset = async () => {
+        if (personaBusy || !personaPresetId) return
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm('删除预设「' + personaPresetId + '」？')) return
+        setPersonaBusy('deletePreset')
+        setPersonaError('')
+        setPersonaNotice('')
+        try {
+          await fetchJson(PERSONA_API + '/preset/delete', { id: personaPresetId })
+          if (!mounted.current) return
+          setPersonaPresetId('')
+          flashPersona('预设已删除')
+          await loadPersona(true)
+        } catch (error) {
+          if (mounted.current) setPersonaError(errorMessage(error))
+        } finally {
+          if (mounted.current) setPersonaBusy('')
+        }
+      }
+
+      const undoPersona = async entry => {
+        const index = Number(entry && entry.index)
+        if (personaBusy || !Number.isInteger(index)) return
+        setPersonaBusy('undo')
+        setPersonaError('')
+        setPersonaNotice('')
+        let undoneConfig = null
+        try {
+          const value = await fetchJson(PERSONA_API + '/history/undo', { index })
+          if (!mounted.current) return
+          undoneConfig = applyPersonaConfig(value && value.config)
+          flashPersona('已撤销')
+          await loadPersona(true)
+        } catch (error) {
+          if (mounted.current) setPersonaError(errorMessage(error))
+        } finally {
+          if (mounted.current) setPersonaBusy('')
+        }
+        if (undoneConfig && personaPreviewOpen) void refreshPersonaPreview(undoneConfig, true)
+      }
+
+      const togglePersonaPreview = () => {
+        const next = !personaPreviewOpen
+        setPersonaPreviewOpen(next)
+        if (next) void refreshPersonaPreview()
+      }
 
       const setField = (key, value) => {
         setForm(prev => ({ ...prev, [key]: value }))
@@ -2207,10 +2951,427 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      /* ---------------- 表情包 tab ---------------- */
+      const memeFiltering = memeQuery.trim() !== '' || memeTag !== ''
+      const memeStatusText = memeError
+        ? ''
+        : (!memeLoaded
+            ? '正在读取表情包…'
+            : (memeLoading
+                ? '正在刷新…'
+                : (memeRows.length === 0
+                    ? (memeFiltering ? '没有匹配的表情包' : '图库还是空的，先上传一张吧')
+                    : '共 ' + memeRows.length + ' 张')))
+      const memeTagChoices = memeTagOptions(memeTags, memeTag ? [memeTag] : [])
+      const memeUploadTagChoices = memeTagOptions(memeTags, memeUploadTag)
+      const memeSection = h(React.Fragment, null,
+        h(Section, {
+          title: '表情包',
+          action: h('span', { className: 'qqn-unit' }, memeRows.length > 0 ? '共 ' + memeRows.length + ' 张' : ''),
+        },
+          h('div', { className: 'aura-meme-toolbar' },
+            h('input', {
+              className: 'qqn-input aura-meme-search',
+              value: memeQuery,
+              placeholder: '搜索描述 / 关键词，回车立即搜',
+              spellCheck: false,
+              'aria-label': '搜索表情包',
+              onChange: event => setMemeQuery(event.target.value),
+              onKeyDown: event => {
+                if (event.key !== 'Enter') return
+                event.preventDefault()
+                void loadMemes(memeQuery, memeTag)
+              },
+            }),
+            h('select', {
+              className: 'qqn-input aura-meme-select',
+              value: memeTag,
+              'aria-label': '按情绪筛选',
+              onChange: event => setMemeTag(event.target.value),
+            },
+              h('option', { value: '' }, '全部情绪'),
+              memeTagChoices.map(tag => h('option', { key: tag, value: tag }, memeTagLabel(tag))),
+            ),
+            h('select', {
+              className: 'qqn-input aura-meme-select',
+              value: memeSendMode,
+              disabled: memeBusy !== '',
+              'aria-label': '发送方式',
+              onChange: event => {
+                const mode = event.target.value
+                setMemeSendMode(mode)
+                void changeMemeSendMode(mode)
+              },
+            },
+              h('option', { value: 'auto' }, '发送：自动'),
+              h('option', { value: 'text' }, '发送：纯文字'),
+              h('option', { value: 'image' }, '发送：图片'),
+            ),
+          ),
+          h('div', { className: 'aura-meme-upload' },
+            h('input', {
+              className: 'qqn-input',
+              value: memeUploadName,
+              placeholder: '上传名字（可选）',
+              maxLength: 40,
+              spellCheck: false,
+              'aria-label': '上传名字',
+              onChange: event => setMemeUploadName(event.target.value),
+            }),
+            h('select', {
+              className: 'qqn-input aura-meme-select',
+              value: memeUploadTag,
+              'aria-label': '上传情绪分类',
+              onChange: event => setMemeUploadTag(event.target.value),
+            }, memeUploadTagChoices.map(tag => h('option', { key: tag, value: tag }, memeTagLabel(tag)))),
+            h(Button, {
+              disabled: memeBusy !== '',
+              onClick: () => {
+                if (memeFileRef.current) memeFileRef.current.click()
+              },
+            }, memeBusy === 'upload' ? '上传中…' : '选择图片上传'),
+            h('input', {
+              type: 'file',
+              accept: 'image/*',
+              ref: memeFileRef,
+              style: { display: 'none' },
+              onChange: event => void uploadMemeFile(event),
+            }),
+          ),
+          memePacks.length > 0
+            ? h('div', { className: 'aura-meme-packs' },
+                h('span', { className: 'aura-meme-label' }, '图库'),
+                memePacks.map(pack => h('button', {
+                  key: String(pack.id || ''),
+                  type: 'button',
+                  className: 'aura-meme-chip' + (pack.enabled === true ? ' aura-meme-chip-on' : ''),
+                  'aria-pressed': pack.enabled === true,
+                  disabled: memeBusy !== '',
+                  onClick: () => void toggleMemePack(pack),
+                },
+                  String(pack.title || pack.name || pack.id || ''),
+                  h('span', { className: 'aura-meme-chip-count' }, String(Number(pack.count) || 0)),
+                )),
+              )
+            : null,
+          memeError
+            ? h('div', { className: 'qqn-feedback qqn-feedback-error', role: 'status', 'aria-live': 'polite' }, memeError)
+            : (memeNotice ? h('div', { className: 'qqn-feedback', role: 'status', 'aria-live': 'polite' }, memeNotice) : null),
+          h('div', { className: 'aura-meme-status' }, memeStatusText),
+          memeRows.length > 0
+            ? h('div', { className: 'aura-meme-grid' }, memeRows.map((row, index) => {
+                const source = asObject(row)
+                const caption = String(source.caption || source.file_name || source.relPath || '')
+                return h('button', {
+                  key: String(source.pack || '') + '/' + String(source.relPath || index),
+                  type: 'button',
+                  className: 'aura-meme-card',
+                  title: caption,
+                  onClick: () => openMemeEditor(source),
+                },
+                  h('img', {
+                    className: 'aura-meme-thumb',
+                    src: memeSrc(source),
+                    alt: caption || '表情包',
+                    loading: 'lazy',
+                    decoding: 'async',
+                  }),
+                  h('span', { className: 'aura-meme-caption' }, caption),
+                  source.tag ? h('span', { className: 'aura-meme-tag' }, memeTagLabel(source.tag)) : null,
+                )
+              }))
+            : null,
+        ),
+        memeEdit
+          ? h('div', {
+              className: 'aura-meme-editor-backdrop',
+              onClick: event => {
+                if (event.target === event.currentTarget) setMemeEdit(null)
+              },
+            },
+              h('div', { className: 'aura-meme-editor', role: 'dialog', 'aria-label': '编辑表情包' },
+                h('img', { className: 'aura-meme-editor-img', src: memeEdit.src, alt: memeEdit.caption || '表情包' }),
+                h('label', { className: 'aura-meme-field' },
+                  h('span', null, '描述'),
+                  h('input', {
+                    className: 'qqn-input',
+                    value: memeEdit.caption,
+                    maxLength: 200,
+                    spellCheck: false,
+                    onChange: event => setMemeEdit(previous => ({ ...previous, caption: event.target.value })),
+                  }),
+                ),
+                h('label', { className: 'aura-meme-field' },
+                  h('span', null, '情绪'),
+                  h('select', {
+                    className: 'qqn-input',
+                    value: memeEdit.tag,
+                    onChange: event => setMemeEdit(previous => ({ ...previous, tag: event.target.value })),
+                  }, memeTagOptions(memeTags, memeEdit.tag).map(tag => h('option', { key: tag, value: tag }, memeTagLabel(tag)))),
+                ),
+                h('label', { className: 'aura-meme-field' },
+                  h('span', null, '关键词'),
+                  h('input', {
+                    className: 'qqn-input',
+                    value: memeEdit.keywords,
+                    maxLength: 200,
+                    spellCheck: false,
+                    onChange: event => setMemeEdit(previous => ({ ...previous, keywords: event.target.value })),
+                  }),
+                ),
+                h('div', { className: 'aura-meme-editor-actions' },
+                  h(Button, {
+                    variant: 'primary',
+                    disabled: memeBusy !== '',
+                    onClick: () => void saveMemeEdit(),
+                  }, memeBusy === 'update' ? '保存中…' : '保存'),
+                  h(Button, {
+                    variant: 'danger',
+                    disabled: memeBusy !== '',
+                    onClick: () => void deleteMemeEdit(),
+                  }, memeBusy === 'delete' ? '删除中…' : '删除'),
+                  h(Button, {
+                    variant: 'quiet',
+                    disabled: memeBusy !== '',
+                    onClick: () => setMemeEdit(null),
+                  }, '关闭'),
+                ),
+              ),
+            )
+          : null,
+      )
+
+      /* ---------------- 人设 tab ---------------- */
+      const personaData = asObject(persona)
+      const personaConfigError = typeof personaData.configError === 'string' ? personaData.configError : ''
+      const personaPresetOptions = buildPresetList(personaData)
+      const personaHistoryRows = Array.isArray(personaData.history) ? personaData.history : []
+      const personaDirty = draftKey(personaForm) !== draftKey(personaBaseline)
+      const personaSelectedPreset = personaPresetOptions.find(item => item.id === personaPresetId) || null
+      const personaFeedback = personaError
+        ? h('div', { className: 'qqn-feedback qqn-feedback-error', role: 'status', 'aria-live': 'polite' }, personaError)
+        : (personaNotice ? h('div', { className: 'qqn-feedback', role: 'status', 'aria-live': 'polite' }, personaNotice) : null)
+      const personaSection = h(React.Fragment, null,
+        h(Section, { title: '人设' },
+          personaConfigError
+            ? h('div', { className: 'qqn-error' }, '人设配置有问题：' + personaConfigError)
+            : null,
+          personaLoading && !persona
+            ? h('div', { className: 'qqn-loading' }, '正在读取人设…')
+            : null,
+          h('div', { className: 'qqn-rows' },
+            h(Row, {
+              label: '启用人设',
+              hint: '关闭后不注入人设提示词',
+              control: h('input', {
+                className: 'qqn-checkbox',
+                type: 'checkbox',
+                checked: personaForm.enabled === true,
+                onChange: event => setPersonaForm(previous => ({ ...previous, enabled: event.target.checked })),
+              }),
+            }),
+            h(Row, {
+              label: '昵称',
+              hint: '她怎么称呼你；留空则用「你」',
+              control: h('input', {
+                className: 'qqn-input',
+                value: personaForm.nickname,
+                maxLength: 50,
+                spellCheck: false,
+                onChange: event => setPersonaForm(previous => ({ ...previous, nickname: event.target.value })),
+              }),
+            }),
+            h(Row, {
+              label: '职业',
+              hint: '用于贴合你的背景，不代表她的身份',
+              control: h('input', {
+                className: 'qqn-input',
+                value: personaForm.occupation,
+                maxLength: 50,
+                spellCheck: false,
+                onChange: event => setPersonaForm(previous => ({ ...previous, occupation: event.target.value })),
+              }),
+            }),
+            h(Row, {
+              label: '介绍',
+              hint: '关于你的补充说明（≤500 字）',
+              control: h('textarea', {
+                className: 'qqn-input aura-persona-textarea',
+                rows: 3,
+                maxLength: 500,
+                value: personaForm.bio,
+                onChange: event => setPersonaForm(previous => ({ ...previous, bio: event.target.value })),
+              }),
+            }),
+            h(Row, {
+              label: '回复风格',
+              hint: '影响语气和用词',
+              control: selectField(PERSONA_STYLES, personaForm.style, value => setPersonaForm(previous => ({ ...previous, style: value })), '回复风格'),
+            }),
+            h(Row, {
+              label: '标题与列表',
+              hint: '更多 = 更爱用标题/列表；更少 = 更多段落',
+              control: selectField(PERSONA_TRAITS, personaForm.headingLists, value => setPersonaForm(previous => ({ ...previous, headingLists: value })), '标题与列表'),
+            }),
+            h(Row, {
+              label: '表情符号',
+              hint: '更多 = 更常用 emoji',
+              control: selectField(PERSONA_TRAITS, personaForm.emoji, value => setPersonaForm(previous => ({ ...previous, emoji: value })), '表情符号'),
+            }),
+            h(Row, {
+              label: '表格',
+              hint: '更多 = 优先用表格整理信息',
+              control: selectField(PERSONA_TRAITS, personaForm.tables, value => setPersonaForm(previous => ({ ...previous, tables: value })), '表格'),
+            }),
+            h(Row, {
+              label: '回复长度',
+              control: selectField(PERSONA_REPLY_LENGTHS, personaForm.replyLength, value => setPersonaForm(previous => ({ ...previous, replyLength: value })), '回复长度'),
+            }),
+            h(Row, {
+              label: '语言',
+              control: selectField(PERSONA_LANGUAGES, personaForm.language, value => setPersonaForm(previous => ({ ...previous, language: value })), '语言'),
+            }),
+            h(Row, {
+              label: '自定义指令',
+              hint: '追加在人设提示词末尾（≤2000 字）',
+              control: h('textarea', {
+                className: 'qqn-input aura-persona-textarea',
+                rows: 4,
+                maxLength: 2000,
+                value: personaForm.customInstructions,
+                onChange: event => setPersonaForm(previous => ({ ...previous, customInstructions: event.target.value })),
+              }),
+            }),
+            h(Row, {
+              label: '光轨动画',
+              hint: '聊天里流动的光轨',
+              control: h('input', {
+                className: 'qqn-checkbox',
+                type: 'checkbox',
+                checked: personaForm.trailEnabled === true,
+                onChange: event => setPersonaForm(previous => ({ ...previous, trailEnabled: event.target.checked })),
+              }),
+            }),
+            h(Row, {
+              label: '光轨颜色',
+              control: h('div', { className: 'aura-persona-inline' },
+                h('input', {
+                  type: 'color',
+                  className: 'aura-persona-color',
+                  value: personaForm.trailColor,
+                  'aria-label': '光轨颜色',
+                  onChange: event => setPersonaForm(previous => ({ ...previous, trailColor: personaColorOf(event.target.value) })),
+                }),
+                h('span', { className: 'qqn-unit' }, personaForm.trailColor),
+              ),
+            }),
+            h(Row, {
+              label: '光轨速度',
+              control: selectField(PERSONA_TRAIL_SPEEDS, personaForm.trailSpeed, value => setPersonaForm(previous => ({ ...previous, trailSpeed: value })), '光轨速度'),
+            }),
+            h(Row, {
+              label: '光轨粗细',
+              control: selectField(PERSONA_TRAIL_WIDTHS, personaForm.trailWidth, value => setPersonaForm(previous => ({ ...previous, trailWidth: value })), '光轨粗细'),
+            }),
+          ),
+          h('div', { className: 'qqn-actions' },
+            h(Button, {
+              variant: 'primary',
+              disabled: personaBusy !== '' || !personaDirty,
+              onClick: () => void savePersona(),
+            }, personaBusy === 'save' ? '保存中…' : '保存人设'),
+            h(Button, {
+              disabled: personaBusy !== '',
+              onClick: () => void resetPersona(),
+            }, personaBusy === 'reset' ? '重置中…' : '重置'),
+          ),
+          personaFeedback,
+        ),
+        h(Section, {
+          title: '预设',
+          action: personaData.activeId ? h('span', null, '当前：' + personaData.activeId) : null,
+        },
+          h('div', { className: 'aura-persona-presets' },
+            personaPresetOptions.length > 0
+              ? h('select', {
+                  className: 'qqn-input',
+                  value: personaPresetId,
+                  'aria-label': '人设预设',
+                  onChange: event => setPersonaPresetId(event.target.value),
+                }, personaPresetOptions.map(item => h('option', { key: item.id, value: item.id }, item.name + (item.builtin ? '（内置）' : ''))))
+              : h('span', { className: 'qqn-unit' }, '没有可用预设'),
+            h(Button, {
+              disabled: personaBusy !== '' || !personaPresetId,
+              onClick: () => void applyPersonaPreset(),
+            }, personaBusy === 'apply' ? '应用中…' : '应用'),
+            h('input', {
+              className: 'qqn-input',
+              value: personaPresetName,
+              placeholder: '新预设名字',
+              maxLength: 40,
+              spellCheck: false,
+              'aria-label': '新预设名字',
+              onChange: event => setPersonaPresetName(event.target.value),
+            }),
+            h(Button, {
+              disabled: personaBusy !== '' || !personaPresetName.trim(),
+              onClick: () => void savePersonaPreset(),
+            }, personaBusy === 'savePreset' ? '保存中…' : '另存为'),
+            h(Button, {
+              variant: 'danger',
+              disabled: personaBusy !== '' || !personaSelectedPreset || personaSelectedPreset.builtin === true,
+              onClick: () => void deletePersonaPreset(),
+            }, personaBusy === 'deletePreset' ? '删除中…' : '删除'),
+          ),
+        ),
+        h(Section, {
+          title: '最近变更',
+          action: h('span', null, personaHistoryRows.length > 0 ? personaHistoryRows.length + ' 条' : ''),
+        },
+          personaHistoryRows.length > 0
+            ? h('div', { className: 'aura-persona-history' }, personaHistoryRows.map(entry => {
+                const row = asObject(entry)
+                const at = timeOf(row.at)
+                const stamp = [formatRelative(at, t), formatClock(at)].filter(Boolean).join(' ') || '—'
+                const meta = [personaSourceLabel(row.source), stamp, row.preset ? '预设：' + row.preset : ''].filter(Boolean).join(' · ')
+                return h('div', { key: 'persona-history-' + String(row.index) + '-' + String(row.at || ''), className: 'aura-persona-history-row' },
+                  h('div', { className: 'aura-persona-history-main' },
+                    h('div', { className: 'aura-persona-history-meta' }, meta),
+                    h('div', { className: 'aura-persona-history-changes' }, personaChangesText(row.changes)),
+                  ),
+                  h(Button, {
+                    disabled: personaBusy !== '',
+                    onClick: () => void undoPersona(row),
+                  }, '撤销到这条之前'),
+                )
+              }))
+            : h('div', { className: 'qqn-mood-empty' }, personaLoading ? '加载中…' : '还没有变更记录'),
+        ),
+        h(Section, {
+          title: '提示词预览',
+          action: h('button', {
+            type: 'button',
+            className: 'qqn-seg-button',
+            'aria-expanded': personaPreviewOpen,
+            onClick: togglePersonaPreview,
+          }, personaPreviewOpen ? '收起' : '展开'),
+        },
+          personaPreviewOpen
+            ? (personaBusy === 'preview' && !personaPreview
+                ? h('div', { className: 'qqn-mood-empty' }, '生成中…')
+                : (personaPreview
+                    ? h('pre', { className: 'aura-persona-prompt' }, personaPreview)
+                    : h('div', { className: 'qqn-mood-empty' }, '当前还没有可预览的提示词')))
+            : h('div', { className: 'qqn-mood-empty' }, '展开后可查看当前表单编译出的提示词'),
+        ),
+      )
+
       const tabDefs = [
         ['soul', '灵魂'],
         ['emotion', '情绪'],
         ['memory', '记忆'],
+        ['meme', '表情包'],
+        ['persona', '人设'],
         ['speak', '主动'],
         ['appearance', '外观'],
         ['connect', '连接'],
@@ -2236,6 +3397,8 @@ window.__ModuleLoader__.load({
               tab === 'soul' ? soulSection : null,
               tab === 'emotion' ? h(React.Fragment, null, emotionSection, relationSection) : null,
               tab === 'memory' ? memorySection : null,
+              tab === 'meme' ? memeSection : null,
+              tab === 'persona' ? personaSection : null,
               tab === 'speak' ? speakSection : null,
               tab === 'appearance' ? appearanceSection : null,
               tab === 'connect' ? h(React.Fragment, null,
@@ -2255,6 +3418,486 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ---------------- 聊天内联 [表情: 描述] 渲染（独立于 dsh-meme） ---------------- */
+    const MEME_INLINE_RE = /\[表情[:：]\s*([^\]]+)\](?:\((https?:\/\/[^\s)]+)\))?/g
+    const MEME_INLINE_TEST = /\[表情[:：]\s*([^\]]+)\](?:\((https?:\/\/[^\s)]+)\))?/
+    /** 聊天内容区探测顺序：DSH 0.2 的消息内容槽 → 老版 flow 标记 → 常见容器。 */
+    const MEME_CHAT_SELECTORS = [
+      '[data-slot="conversation.chat.node"]',
+      '[data-chat-flow-key]',
+      '[data-chat-flow]',
+      '[data-conversation-scroll]',
+      '.dsh-chat',
+    ]
+    const MEME_CHAT_SELECTOR = MEME_CHAT_SELECTORS.join(',')
+    const MEME_INLINE_CSS = `
+.aura-inline-meme{max-height:160px;max-width:100%;border-radius:10px;vertical-align:middle;object-fit:contain;cursor:zoom-in;margin:2px 4px;display:inline-block}
+.aura-meme-zoom{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.78);cursor:zoom-out;box-sizing:border-box}
+.aura-meme-zoom-img{max-width:100%;max-height:100%;border-radius:12px;object-fit:contain;box-shadow:0 18px 60px rgba(0,0,0,.6)}
+`
+    /** 面板里改完图库后，让聊天索引立即重拉。 */
+    const inlineMemeRefreshers = new Set()
+
+    function refreshInlineMemeIndex() {
+      for (const refresh of [...inlineMemeRefreshers]) {
+        try {
+          refresh()
+        } catch (error) {
+          console.warn('[dsh-aura] 聊天表情索引刷新失败：', error)
+        }
+      }
+    }
+
+    function memeFoldCaption(value) {
+      return String(value || '').trim()
+        .replace(/[\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u00ab\u00bb]/g, '"')
+        .replace(/\s+/g, ' ')
+    }
+
+    function memeLooseCaption(value) {
+      return memeFoldCaption(value).replace(/["'\s]/g, '')
+    }
+
+    /** 按中英文标点切词；两字以下太泛，不参与兜底匹配。 */
+    function memeSplitTokens(value) {
+      return memeFoldCaption(value)
+        .split(/[\s,.!?;:、，。！？；：""''()（）\[\]【】《》…·～~\-]+/)
+        .map(token => token.replace(/["']/g, ''))
+        .filter(token => token.length >= 2)
+        .sort((left, right) => right.length - left.length)
+    }
+
+    function memeAddKey(map, key, src) {
+      const raw = String(key || '').trim()
+      if (!raw) return
+      map.set(raw, src)
+      const folded = memeFoldCaption(raw)
+      if (folded) map.set(folded, src)
+      const loose = memeLooseCaption(raw)
+      if (loose) map.set(loose, src)
+    }
+
+    function memeBuildIndex(rows) {
+      const map = new Map()
+      const search = []
+      for (const row of asArray(rows)) {
+        const source = asObject(row)
+        const src = memeSrc(source)
+        if (!src) continue
+        const caption = String(source.caption || '')
+        const fileName = String(source.file_name || '')
+        const keywords = String(source.keywords || '')
+        for (const key of [caption, fileName, keywords, caption.slice(0, 80), caption.slice(0, 100)]) {
+          memeAddKey(map, key, src)
+        }
+        // 关键词常是空格分隔的短词，单独入精确表，像「晕」这种单字也能命中。
+        for (const keyword of keywords.split(/\s+/)) {
+          const text = keyword.trim()
+          if (text) memeAddKey(map, text, src)
+        }
+        const hay = []
+        const parts = []
+        for (const text of [caption, keywords, fileName]) {
+          const folded = memeFoldCaption(text)
+          if (!folded) continue
+          const loose = memeLooseCaption(text)
+          hay.push(folded)
+          if (loose && loose !== folded) hay.push(loose)
+          parts.push(text)
+        }
+        const tokens = [...new Set(memeSplitTokens(parts.join(' ')))]
+        search.push({ hay, tokens, src })
+      }
+      return { map, search }
+    }
+
+    /** 组合匹配：精确（原文/折叠/紧凑）→ 分词在 caption/关键词里双向包含。 */
+    function memeMatchDesc(desc, index) {
+      if (!index) return ''
+      const raw = String(desc || '').trim()
+      const exact = index.map.get(raw) || index.map.get(memeFoldCaption(raw)) || index.map.get(memeLooseCaption(raw))
+      if (exact) return exact
+      const needles = [...new Set(memeSplitTokens(desc).map(memeLooseCaption).filter(Boolean))]
+      let best = ''
+      let bestLength = 0
+      let bestCount = 0
+      for (const row of index.search) {
+        let longest = 0
+        let count = 0
+        for (const needle of needles) {
+          let length = row.hay.some(hay => hay.includes(needle)) ? needle.length : 0
+          for (const token of row.tokens) {
+            const loose = memeLooseCaption(token)
+            if (loose && (needle.includes(loose) || loose.includes(needle))) {
+              length = Math.max(length, Math.min(needle.length, loose.length))
+            }
+          }
+          if (length) {
+            longest = Math.max(longest, length)
+            count++
+          }
+        }
+        if (longest > bestLength || (longest === bestLength && count > bestCount)) {
+          best = row.src
+          bestLength = longest
+          bestCount = count
+        }
+      }
+      return best
+    }
+
+    /**
+     * 创建聊天内联表情渲染器。返回 { start, dispose }：
+     * - 拉一次 /dsh-aura/memes-api?action=list 建本地索引；
+     * - MutationObserver 监听 body，只处理聊天内容区里带标记的文本节点；
+     * - 注入图/隐藏 ghost（保留 textContent 原文）并加 data-aura-meme 防重复；
+     * - dispose 时清 observer、样式、点击放大遮罩和监听。
+     */
+    function createInlineMemeRenderer() {
+      if (typeof document === 'undefined') {
+        return { start() {}, dispose() {} }
+      }
+
+      let styleEl = null
+      let observer = null
+      let disposed = false
+      let index = null
+      let loading = false
+      let attempts = 0
+      let retryAt = 0
+      let warned = false
+      let controller = null
+      let scanTimer = null
+      let zoomBox = null
+      let zoomImage = null
+
+      const report = error => {
+        if (warned) return
+        warned = true
+        console.warn('[dsh-aura] 聊天表情索引加载失败，稍后自动重试：', error && error.message ? error.message : error)
+      }
+
+      const loadIndex = () => {
+        if (disposed || index || loading || Date.now() < retryAt) return
+        loading = true
+        attempts++
+        const ac = typeof AbortController === 'function' ? new AbortController() : null
+        controller = ac
+        const timeout = ac ? setTimeout(() => {
+          try {
+            ac.abort()
+          } catch {
+            // ignore
+          }
+        }, 15000) : 0
+        fetch(MEME_API + '?action=list', ac ? { signal: ac.signal } : undefined)
+          .then(response => {
+            if (!response.ok) throw new Error('HTTP ' + response.status)
+            return response.json()
+          })
+          .then(value => {
+            if (disposed) return
+            if (!value || value.ok === false || !Array.isArray(value.memes)) {
+              throw new Error((value && value.error) || '无效的表情包索引')
+            }
+            index = memeBuildIndex(value.memes)
+            attempts = 0
+            retryAt = 0
+            scheduleScan(0)
+          })
+          .catch(error => {
+            if (disposed) return
+            retryAt = Date.now() + Math.min(30000, 2000 * Math.pow(2, Math.max(0, attempts - 1)))
+            report(error)
+          })
+          .finally(() => {
+            if (timeout) clearTimeout(timeout)
+            if (!disposed) loading = false
+            if (controller === ac) controller = null
+          })
+      }
+
+      const refresh = () => {
+        if (disposed) return
+        if (controller) {
+          try {
+            controller.abort()
+          } catch {
+            // ignore
+          }
+          controller = null
+        }
+        loading = false
+        index = null
+        attempts = 0
+        retryAt = 0
+        loadIndex()
+      }
+
+      const collectScopes = () => {
+        for (const selector of MEME_CHAT_SELECTORS) {
+          let list = []
+          try {
+            list = document.querySelectorAll(selector)
+          } catch {
+            list = []
+          }
+          if (list.length) return list
+        }
+        return []
+      }
+
+      const makeGhost = raw => {
+        const ghost = document.createElement('span')
+        ghost.setAttribute('data-aura-meme', 'ghost')
+        ghost.style.display = 'none'
+        ghost.textContent = raw
+        return ghost
+      }
+
+      const acceptable = node => {
+        const parent = node && node.parentElement
+        if (!parent || !node.isConnected) return false
+        if (!parent.closest(MEME_CHAT_SELECTOR)) return false
+        if (parent.closest('input,textarea,[contenteditable="true"],pre,code,[data-variant="think"],[data-variant="others"],[data-chat-flow-kind="turn-process"]')) return false
+        if (parent.closest('[data-aura-meme="ghost"]')) return false
+        const text = node.nodeValue || ''
+        if (text.indexOf('[') < 0) return false
+        MEME_INLINE_TEST.lastIndex = 0
+        return MEME_INLINE_TEST.test(text)
+      }
+
+      const cleanupMarkers = () => {
+        let list = []
+        try {
+          list = document.querySelectorAll('[data-aura-meme="done"]')
+        } catch {
+          list = []
+        }
+        for (const element of list) {
+          if (element.querySelector('img[data-aura-meme="img"],span[data-aura-meme="ghost"]')) continue
+          element.removeAttribute('data-aura-meme')
+        }
+      }
+
+      const decorateTextNode = node => {
+        const parent = node.parentElement
+        if (!parent) return false
+        const text = node.nodeValue || ''
+        MEME_INLINE_RE.lastIndex = 0
+        const matches = []
+        let match
+        while ((match = MEME_INLINE_RE.exec(text))) matches.push(match)
+        if (matches.length === 0) return false
+        if (!index) {
+          loadIndex()
+          return false
+        }
+        const fragment = document.createDocumentFragment()
+        let last = 0
+        let rendered = 0
+        for (const hit of matches) {
+          if (hit.index > last) fragment.appendChild(document.createTextNode(text.slice(last, hit.index)))
+          const raw = hit[0]
+          const desc = String(hit[1] || '').trim()
+          const external = hit[2] && /^https?:\/\//.test(hit[2]) ? hit[2] : ''
+          const src = external || memeMatchDesc(desc, index)
+          if (src) {
+            const image = document.createElement('img')
+            image.className = 'aura-inline-meme'
+            image.src = src
+            image.alt = desc
+            image.title = desc
+            image.loading = 'lazy'
+            image.decoding = 'async'
+            image.setAttribute('data-aura-meme', 'img')
+            fragment.appendChild(image)
+            fragment.appendChild(makeGhost(raw))
+            rendered++
+          } else {
+            // 匹配不到时只显示描述，方括号藏进 ghost，textContent 仍与原文逐字一致。
+            const at = raw.indexOf(desc)
+            fragment.appendChild(makeGhost(at > 0 ? raw.slice(0, at) : ''))
+            fragment.appendChild(document.createTextNode(desc))
+            fragment.appendChild(makeGhost(at > 0 ? raw.slice(at + desc.length) : ''))
+          }
+          last = hit.index + raw.length
+        }
+        if (last < text.length) fragment.appendChild(document.createTextNode(text.slice(last)))
+        parent.replaceChild(fragment, node)
+        parent.setAttribute('data-aura-meme', 'done')
+        return rendered > 0
+      }
+
+      const scan = () => {
+        if (disposed) return
+        if (!index) {
+          loadIndex()
+          return
+        }
+        cleanupMarkers()
+        for (const scope of collectScopes()) {
+          let walker = null
+          try {
+            walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT)
+          } catch {
+            continue
+          }
+          const nodes = []
+          let current = null
+          while ((current = walker.nextNode())) nodes.push(current)
+          for (const node of nodes) {
+            if (!node.isConnected || !acceptable(node)) continue
+            decorateTextNode(node)
+          }
+        }
+      }
+
+      const scheduleScan = delay => {
+        if (disposed || scanTimer !== null) return
+        scanTimer = setTimeout(() => {
+          scanTimer = null
+          scan()
+        }, typeof delay === 'number' ? delay : 120)
+      }
+
+      const touchesChat = record => {
+        const nodes = []
+        if (record.target) nodes.push(record.target)
+        for (const added of record.addedNodes || []) nodes.push(added)
+        for (const node of nodes) {
+          const element = node.nodeType === 1 ? node : (node.parentElement || null)
+          if (!element) continue
+          try {
+            if (element.closest && element.closest(MEME_CHAT_SELECTOR)) return true
+            if (element.querySelector && element.querySelector(MEME_CHAT_SELECTOR)) return true
+          } catch {
+            // 忽略探测失败
+          }
+        }
+        return false
+      }
+
+      const onMutations = records => {
+        for (const record of records) {
+          if (record.type === 'characterData') {
+            const element = record.target && record.target.parentElement
+            if (element && element.closest && element.closest(MEME_CHAT_SELECTOR)) {
+              scheduleScan()
+              return
+            }
+            continue
+          }
+          if (touchesChat(record)) {
+            scheduleScan()
+            return
+          }
+        }
+      }
+
+      const closeZoom = () => {
+        if (zoomBox) zoomBox.style.display = 'none'
+      }
+
+      const ensureZoom = () => {
+        if (zoomBox) return zoomBox
+        zoomBox = document.createElement('div')
+        zoomBox.className = 'aura-meme-zoom'
+        zoomBox.setAttribute('data-aura-meme', 'zoom')
+        zoomBox.style.display = 'none'
+        zoomImage = document.createElement('img')
+        zoomImage.className = 'aura-meme-zoom-img'
+        zoomImage.alt = ''
+        zoomBox.appendChild(zoomImage)
+        zoomBox.addEventListener('click', event => {
+          if (event.target === zoomBox) closeZoom()
+        })
+        document.body.appendChild(zoomBox)
+        return zoomBox
+      }
+
+      const onClick = event => {
+        const target = event.target
+        if (!target || target.tagName !== 'IMG' || !target.classList) return
+        if (!target.classList.contains('aura-inline-meme')) return
+        event.preventDefault()
+        if (typeof event.stopPropagation === 'function') event.stopPropagation()
+        ensureZoom()
+        zoomImage.src = target.currentSrc || target.src
+        zoomImage.alt = target.alt || ''
+        zoomBox.style.display = 'flex'
+      }
+
+      const onKeyDown = event => {
+        if (event.key === 'Escape') closeZoom()
+      }
+
+      const boot = () => {
+        if (disposed || observer || !document.body) return
+        if (typeof MutationObserver !== 'function') {
+          inlineMemeRefreshers.add(refresh)
+          loadIndex()
+          scheduleScan(0)
+          return
+        }
+        observer = new MutationObserver(onMutations)
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+        inlineMemeRefreshers.add(refresh)
+        loadIndex()
+        scheduleScan(0)
+      }
+
+      const start = () => {
+        if (disposed) return
+        if (!styleEl) {
+          styleEl = document.createElement('style')
+          styleEl.setAttribute('data-plugin', 'dsh-aura')
+          styleEl.textContent = MEME_INLINE_CSS
+          ;(document.head || document.documentElement).appendChild(styleEl)
+        }
+        document.addEventListener('click', onClick, true)
+        document.addEventListener('keydown', onKeyDown, true)
+        if (document.body) boot()
+        else document.addEventListener('DOMContentLoaded', boot, { once: true })
+      }
+
+      const dispose = () => {
+        if (disposed) return
+        disposed = true
+        inlineMemeRefreshers.delete(refresh)
+        if (scanTimer !== null) {
+          clearTimeout(scanTimer)
+          scanTimer = null
+        }
+        if (observer) {
+          try {
+            observer.disconnect()
+          } catch {
+            // ignore
+          }
+          observer = null
+        }
+        if (controller) {
+          try {
+            controller.abort()
+          } catch {
+            // ignore
+          }
+          controller = null
+        }
+        document.removeEventListener('click', onClick, true)
+        document.removeEventListener('keydown', onKeyDown, true)
+        document.removeEventListener('DOMContentLoaded', boot)
+        if (zoomBox && zoomBox.parentNode) zoomBox.parentNode.removeChild(zoomBox)
+        zoomBox = null
+        zoomImage = null
+        if (styleEl && styleEl.parentNode) styleEl.parentNode.removeChild(styleEl)
+        styleEl = null
+      }
+
+      return { start, dispose }
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
@@ -2270,6 +3913,17 @@ window.__ModuleLoader__.load({
               return undefined
             }
           }, 'dsh-aura: panel dictionaries')
+        }
+
+        // 聊天内联 [表情: 描述]：独立渲染器，不依赖 dsh-meme，随插件卸载一起 dispose。
+        if (typeof ctx.effect === 'function') {
+          ctx.effect(() => {
+            const renderer = createInlineMemeRenderer()
+            renderer.start()
+            return () => renderer.dispose()
+          }, 'dsh-aura: inline meme rendering')
+        } else {
+          createInlineMemeRenderer().start()
         }
 
         ctx.slots.inject('main', () => ctx.slots.register({

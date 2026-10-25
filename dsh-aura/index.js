@@ -65,6 +65,11 @@ export function apply(ctx, config = {}) {
           changed = true
         }
       }
+      // 只清 pkgMeta/sources 不够：table 里旧记录 sourceKey 相同会走 early-return，
+      // 继续指向已删除的旧 run 目录。必须连 table 记录一起删掉再 flush。
+      if (modules.table && typeof modules.table.delete === 'function') {
+        if (modules.table.delete('dsh-aura')) changed = true
+      }
       modules.dirty?.add?.('dsh-aura')
       const errors = []
       modules.flush(error => errors.push(error))
