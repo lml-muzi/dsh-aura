@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import { zipStore, unzipStore } from '../host/meme-zip.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginDir = resolve(here, '..')
@@ -271,6 +272,103 @@ async function main() {
     eq('目录穿越 404', traversal.status, 404)
     const encodedTraversal = await call(imageRoute, { method: 'GET', url: IMAGES + '/testpack/%2e%2e/%2e%2e/host/web.js' })
     eq('编码穿越 404', encodedTraversal.status, 404)
+  }
+
+  section('图库 ZIP 导出 / 导入')
+  {
+    // 纯函数 roundtrip：中文路径 + 空文件
+    const packed = zipStore([
+      { name: 'index.db', data: Buffer.from('db-bytes') },
+      { name: 'memes/happy/猫.png', data: PNG },
+      { name: 'empty.txt', data: Buffer.alloc(0) },
+    ])
+    ok('zipStore 产出 local header', packed.length > 22 && packed.readUInt32LE(0) === 0x04034b50)
+    const unpacked = unzipStore(packed)
+    eq('unzipStore roundtrip 条目数', unpacked.size, 3)
+    ok('roundtrip 保留中文路径与字节', Buffer.compare(unpacked.get('memes/happy/猫.png'), PNG) === 0)
+    ok('roundtrip 保留空文件', unpacked.get('empty.txt').length === 0)
+
+    const missing = await call(apiRoute, { method: 'GET', url: API + '?action=export&pack=no-such-pack' })
+    eq('导出不存在的图库 400', missing.status, 400)
+    const empty = await call(apiRoute, { method: 'GET', url: API + '?action=export&pack=aura' })
+    eq('导出空图库 400', empty.status, 400)
+
+    const exported = await call(apiRoute, { method: 'GET', url: API + '?action=export&pack=testpack' })
+    eq('导出 testpack 200', exported.status, 200)
+    eq('导出 Content-Type 是 ZIP', exported.headers['Content-Type'], 'application/zip')
+    ok('导出 Content-Disposition 带日期', /\d{4}-\d{2}-\d{2}/.test(String(exported.headers['Content-Disposition'] || '')))
+    const entries = unzipStore(exported.body)
+    ok('导出含 index.db / manifest.json / 图片',
+      entries.has('index.db') && entries.has('manifest.json') && entries.has('memes/happy/test.png'))
+    ok('导出图片字节一致', Buffer.compare(entries.get('memes/happy/test.png'), PNG) === 0)
+
+    // 本进程的 DSH_MEME_HOME 已是隔离临时目录；导入会落到它下面并自动启用。
+    const imported = await call(apiRoute, {
+      method: 'POST',
+      url: API,
+      body: JSON.stringify({ action: 'import', data: exported.body.toString('base64'), name: 'testpack' }),
+    })
+    eq('导入返回 200', imported.status, 200)
+    const importedPack = imported.json.pack
+    const installed = join(packsRoot, String(importedPack?.id || ''))
+    ok('导入落到临时图库目录（index.db + 图片）',
+      existsSync(join(installed, 'index.db')) && existsSync(join(installed, 'memes', 'happy', 'test.png')))
+    eq('导入 pack.count = 1', importedPack.count, 1)
+    ok('导入后出现在 store.packs()', handle.store.packs().some(item => item.id === importedPack.id))
+    ok('导入后自动启用', handle.store.packs().find(item => item.id === importedPack.id)?.enabled === true)
+    ok('响应 enabled 含新图库', imported.json.enabled.includes(importedPack.id))
+    eq('enabledPacks 写进隔离 home 的设置',
+      JSON.parse(readFileSync(join(home, '.dsh', 'dsh-expression.json'), 'utf8')).enabledPacks.includes(importedPack.id), true)
+
+    // 同名图库再导一次：自动加 -imported-<n>
+    const collision = await call(apiRoute, {
+      method: 'POST',
+      url: API,
+      body: JSON.stringify({ action: 'import', data: exported.body.toString('base64'), name: 'testpack' }),
+    })
+    eq('同名图库导入 200', collision.status, 200)
+    eq('同名图库自动加 -imported-2', collision.json.pack.id, 'testpack-imported-2')
+    ok('同名导入也写进 enabledPacks', collision.json.enabled.includes('testpack-imported-2'))
+
+    // 路径穿越 / 绝对路径 / 无 index.db 都必须拒绝
+    const dbBytes = entries.get('index.db')
+    const manifestBytes = Buffer.from(JSON.stringify({ id: 'evil-pack', name: 'evil' }))
+    const traversalZip = zipStore([
+      { name: 'index.db', data: dbBytes },
+      { name: 'manifest.json', data: manifestBytes },
+      { name: '../evil.png', data: PNG },
+    ])
+    const traversal = await call(apiRoute, {
+      method: 'POST',
+      url: API,
+      body: JSON.stringify({ action: 'import', data: traversalZip.toString('base64') }),
+    })
+    eq('路径穿越 ZIP 被拒（400）', traversal.status, 400)
+    ok('拒绝原因提到路径', /路径/.test(String(traversal.json.error || '')))
+    ok('穿越文件没有落到图库目录外', !existsSync(join(packsRoot, 'evil.png')) && !existsSync(join(packsRoot, 'evil-pack')))
+
+    const absoluteZip = zipStore([
+      { name: 'index.db', data: dbBytes },
+      { name: '/abs-evil.png', data: PNG },
+    ])
+    const absolute = await call(apiRoute, {
+      method: 'POST',
+      url: API,
+      body: JSON.stringify({ action: 'import', data: absoluteZip.toString('base64'), name: 'abs-evil' }),
+    })
+    eq('绝对路径 ZIP 被拒（400）', absolute.status, 400)
+
+    const noDbZip = zipStore([
+      { name: 'manifest.json', data: manifestBytes },
+      { name: 'memes/happy/x.png', data: PNG },
+    ])
+    const noDb = await call(apiRoute, {
+      method: 'POST',
+      url: API,
+      body: JSON.stringify({ action: 'import', data: noDbZip.toString('base64'), name: 'no-db' }),
+    })
+    eq('没有 index.db 的 ZIP 被拒（400）', noDb.status, 400)
+    ok('无 index.db 的图库目录没有落地', !existsSync(join(packsRoot, 'no-db')))
   }
 
   section('发送方式 / setPack')

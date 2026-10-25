@@ -1385,6 +1385,7 @@ window.__ModuleLoader__.load({
       const memeTimer = React.useRef(null)
       const personaTimer = React.useRef(null)
       const memeFileRef = React.useRef(null)
+      const memeImportRef = React.useRef(null)
       const personaRef = React.useRef(personaForm)
       const personaBaselineRef = React.useRef(personaBaseline)
 
@@ -1722,6 +1723,72 @@ window.__ModuleLoader__.load({
           })
           setMemeUploadName('')
           flashMeme('已上传')
+          await loadMemes(memeQuery, memeTag)
+          refreshInlineMemeIndex()
+        } catch (error) {
+          if (mounted.current) setMemeError(errorMessage(error))
+        } finally {
+          if (mounted.current) setMemeBusy('')
+        }
+      }
+
+      /** 导出图库 ZIP：页面没有单独的 pack 筛选，优先导出第一个启用的图库。 */
+      const exportMemePack = async () => {
+        if (memeBusy) return
+        const pack = memePacks.find(item => item.enabled === true) || memePacks[0]
+        const packId = String((pack && pack.id) || '')
+        if (!packId) {
+          setMemeError('还没有可导出的图库')
+          return
+        }
+        setMemeBusy('export')
+        setMemeError('')
+        setMemeNotice('')
+        try {
+          const response = await fetch(MEME_API + '?action=export&pack=' + encodeURIComponent(packId))
+          if (!response.ok) {
+            const value = await response.json().catch(() => ({}))
+            throw new Error(String(value.error || ('HTTP ' + response.status)))
+          }
+          const blob = await response.blob()
+          const stamp = new Date().toISOString().slice(0, 10)
+          const url = URL.createObjectURL(blob)
+          const link = document.createElement('a')
+          link.href = url
+          link.download = 'dsh-aura-pack-' + packId + '-' + stamp + '.zip'
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+          setTimeout(() => URL.revokeObjectURL(url), 60000)
+          flashMeme('已导出「' + String(pack.name || packId) + '」的 ZIP')
+        } catch (error) {
+          if (mounted.current) setMemeError(errorMessage(error))
+        } finally {
+          if (mounted.current) setMemeBusy('')
+        }
+      }
+
+      /** 导入图库 ZIP：读成 base64 → POST import → 重拉列表。 */
+      const importMemeFile = async event => {
+        const input = event && event.target
+        const file = input && input.files && input.files[0]
+        if (input) input.value = ''
+        if (!file || memeBusy) return
+        if (file.size > 100 * 1024 * 1024) {
+          setMemeError('压缩包不能超过 100MB')
+          return
+        }
+        setMemeBusy('import')
+        setMemeError('')
+        setMemeNotice('')
+        try {
+          const dataUrl = await readFileBase64(file)
+          const comma = dataUrl.indexOf(',')
+          const data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
+          const name = String(file.name || '').replace(/\.zip$/i, '')
+          const value = await fetchJson(MEME_API, { action: 'import', data, name })
+          if (asArray(value.packs).length > 0) setMemePacks(value.packs)
+          flashMeme(String(value.message || '已导入'))
           await loadMemes(memeQuery, memeTag)
           refreshInlineMemeIndex()
         } catch (error) {
@@ -3007,6 +3074,25 @@ window.__ModuleLoader__.load({
               h('option', { value: 'text' }, '发送：纯文字'),
               h('option', { value: 'image' }, '发送：图片'),
             ),
+            h(Button, {
+              disabled: memeBusy !== '' || memePacks.length === 0,
+              title: '导出第一个启用的图库（ZIP）',
+              onClick: () => void exportMemePack(),
+            }, memeBusy === 'export' ? '导出中…' : '导出'),
+            h(Button, {
+              disabled: memeBusy !== '',
+              title: '导入图库 ZIP',
+              onClick: () => {
+                if (memeImportRef.current) memeImportRef.current.click()
+              },
+            }, memeBusy === 'import' ? '导入中…' : '导入'),
+            h('input', {
+              type: 'file',
+              accept: '.zip,application/zip',
+              ref: memeImportRef,
+              style: { display: 'none' },
+              onChange: event => void importMemeFile(event),
+            }),
           ),
           h('div', { className: 'aura-meme-upload' },
             h('input', {

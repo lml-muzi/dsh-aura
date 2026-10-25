@@ -11,7 +11,8 @@
  *
  * 路由（只接受本机回环 + 同源）：
  *   GET  /dsh-aura/memes-api?action=list|packs|tags|state&pack=&tag=&query=
- *   POST /dsh-aura/memes-api  {action:'upload'|'update'|'delete'|'setPack'|'setSendMode', ...}
+ *   GET  /dsh-aura/memes-api?action=export&pack=<id>   图库 ZIP（application/zip）
+ *   POST /dsh-aura/memes-api  {action:'upload'|'update'|'delete'|'setPack'|'setSendMode'|'import', ...}
  *   GET  /dsh-aura/memes/<pack>/<relPath...>
  *
  * 工具：send_meme（挑候选/发图说明）、learn_meme（收录图片）。
@@ -20,7 +21,7 @@
  * node:sqlite 在旧版 Node（22.x）需要 --experimental-sqlite；本机 Node 25 可直接用
  * （只会打印 ExperimentalWarning）。不新增任何 npm 依赖。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, rmSync, statSync } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -39,12 +40,16 @@ import {
   SEND_MODES,
   normalizeSendMode,
 } from './meme-store.js'
+import { zipStore, unzipStore } from './meme-zip.js'
 
 const PREFIX = '/dsh-aura/memes'
 const API_PREFIX = '/dsh-aura/memes-api'
 const DEFAULT_UPLOAD_PACK = 'aura'
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
-const MAX_BODY_BYTES = 32 * 1024 * 1024
+/** 图库 ZIP 导入上限：压缩包本身（不是 base64 文本）不超过 100MB。 */
+const MAX_IMPORT_BYTES = 100 * 1024 * 1024
+// ZIP 走 base64 传输（体积 +1/3），所以请求体上限要比图库包上限宽一档。
+const MAX_BODY_BYTES = Math.ceil(MAX_IMPORT_BYTES * 4 / 3) + 1024 * 1024
 
 const MIME = {
   jpg: 'image/jpeg',
@@ -653,6 +658,144 @@ export async function initMeme({ ctx, state, log, bridge } = {}) {
     return { sendMode: mode }
   }
 
+  /* ---------------- 图库 ZIP 导出 / 导入 ---------------- */
+
+  /** 图库 id 清洗：manifest.id / 文件名 → 目录名（与 ensurePack 的规则一致）。 */
+  const slugId = value => String(value ?? '').trim().toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+
+  /** ZIP 条目名不安全的原因；空串表示安全。拒绝绝对路径、盘符、反斜杠与 ..。 */
+  const unsafeEntryName = name => {
+    const raw = String(name || '')
+    if (!raw) return '空条目名'
+    if (raw.includes('\0')) return '含 NUL'
+    if (raw.includes('\\')) return '含反斜杠'
+    if (raw.startsWith('/')) return '绝对路径'
+    if (/^[a-zA-Z]:/.test(raw)) return '带盘符的路径'
+    if (raw.split('/').some(part => part === '..')) return '含 .. 路径段'
+    return ''
+  }
+
+  /** 按 index.db 的行收集一个图库的 ZIP 内容：index.db + manifest.json（存在时）+ 索引图片。 */
+  const buildPackZip = pack => {
+    const root = resolve(pack.path)
+    const dbPath = join(root, 'index.db')
+    let rows
+    try {
+      const db = new DatabaseSync(dbPath)
+      try {
+        // index.db 可能是 WAL 模式，先把 WAL 里的改动并回主库，导出才完整。
+        try { db.exec('PRAGMA wal_checkpoint(FULL)') } catch { /* 只读或无 WAL */ }
+        rows = db.prepare('SELECT path FROM memes').all().map(row => String(row.path || ''))
+      } finally {
+        try { db.close() } catch { /* 已关闭 */ }
+      }
+    } catch (error) {
+      throw new Error('图库索引不可读: ' + (error instanceof Error ? error.message : String(error)))
+    }
+    const files = [{ name: 'index.db', data: readFileSync(dbPath) }]
+    const manifestPath = join(root, 'manifest.json')
+    if (existsSync(manifestPath)) files.push({ name: 'manifest.json', data: readFileSync(manifestPath) })
+    let images = 0
+    for (const rowPath of rows) {
+      const rel = normalizeRel(rowPath)
+      if (!rel) continue
+      const full = resolve(root, rel)
+      if (full === root || !full.startsWith(root + sep)) continue
+      try {
+        if (!statSync(full).isFile()) continue
+        files.push({ name: rel, data: readFileSync(full) })
+        images += 1
+      } catch { /* 索引里有、盘上已经没有的行直接跳过 */ }
+    }
+    if (images === 0) throw new Error('空图库，没有可导出的图片')
+    return zipStore(files)
+  }
+
+  /** 解包 + 校验 + 落盘到 ~/.dsh/meme-packs/<id>，并自动写 enabledPacks。 */
+  const importPack = body => {
+    let raw = String(body?.data ?? body?.dataBase64 ?? '')
+    const comma = raw.indexOf(',')
+    if (/^data:/i.test(raw) && comma >= 0) raw = raw.slice(comma + 1)
+    raw = raw.replace(/\s+/g, '')
+    if (!raw) throw new Error('缺少 ZIP 数据')
+    if (raw.length > Math.ceil(MAX_IMPORT_BYTES * 4 / 3) + 8) throw new Error('压缩包过大(≤100MB)')
+    const buf = Buffer.from(raw, 'base64')
+    if (!buf.length) throw new Error('ZIP 数据为空或不是合法 base64')
+    if (buf.length > MAX_IMPORT_BYTES) throw new Error('压缩包过大(≤100MB)')
+    let entries
+    try {
+      entries = unzipStore(buf)
+    } catch (error) {
+      throw new Error('解包失败: ' + (error instanceof Error ? error.message : String(error)))
+    }
+    for (const name of entries.keys()) {
+      const reason = unsafeEntryName(name)
+      if (reason) throw new Error('ZIP 条目路径不安全(' + reason + '): ' + name)
+    }
+    if (!entries.has('index.db')) throw new Error('ZIP 里没有 index.db，不是表情包图库')
+    let manifest = {}
+    const manifestRaw = entries.get('manifest.json')
+    if (manifestRaw && manifestRaw.length > 0) {
+      try {
+        manifest = JSON.parse(manifestRaw.toString('utf8'))
+      } catch {
+        throw new Error('manifest.json 不是合法 JSON')
+      }
+    }
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('manifest.json 结构不对')
+    const baseId = slugId(manifest.id) || slugId(body?.name) || 'meme-pack'
+    const root = resolve(packsDirNow())
+    mkdirSync(root, { recursive: true })
+    // 同名图库已存在就往后排：<id>-imported-1、-imported-2 …
+    let id = baseId
+    let n = 0
+    while (existsSync(join(root, id))) {
+      n += 1
+      id = baseId + '-imported-' + n
+    }
+    const target = resolve(join(root, id))
+    if (target === root || !target.startsWith(root + sep)) throw new Error('图库目录越界')
+    const stage = resolve(join(root, '.' + id + '.tmp-' + process.pid + '-' + Date.now().toString(36)))
+    if (stage === root || !stage.startsWith(root + sep)) throw new Error('临时目录越界')
+    let count = 0
+    try {
+      mkdirSync(stage, { recursive: true })
+      for (const [name, data] of entries) {
+        if (!name || name.endsWith('/')) continue
+        const full = resolve(stage, name)
+        if (full === stage || !full.startsWith(stage + sep)) throw new Error('ZIP 条目路径越界: ' + name)
+        mkdirSync(dirname(full), { recursive: true })
+        writeFileSync(full, data)
+      }
+      let db
+      try {
+        db = new DatabaseSync(join(stage, 'index.db'), { readOnly: true })
+      } catch {
+        throw new Error('index.db 无法打开')
+      }
+      try {
+        count = Number(db.prepare('SELECT COUNT(*) AS n FROM memes').get().n) || 0
+      } catch {
+        throw new Error('index.db 里没有可读的 memes 表')
+      } finally {
+        try { db.close() } catch { /* 已关闭 */ }
+      }
+      if (count === 0) throw new Error('空图库，没有可导入的图片')
+      renameSync(stage, target)
+    } catch (error) {
+      try { rmSync(stage, { recursive: true, force: true }) } catch { /* 清理失败不影响原报错 */ }
+      throw error
+    }
+    const packsBefore = listPacks()
+    const enabledBefore = enabledPackIds(readSettingsFile(), packsBefore, activePackId(packsBefore))
+    const enabled = [...new Set([...enabledBefore, id])]
+    writeSettings({ enabledPacks: enabled })
+    const packs = packPayload(listPacks(), enabled)
+    const pack = packs.find(item => item.id === id) || null
+    return { pack, packs, enabled, count }
+  }
+
   const getState = () => {
     const packs = store.packs()
     const enabled = packs.filter(pack => pack.enabled).map(pack => pack.id)
@@ -679,6 +822,25 @@ export async function initMeme({ ctx, state, log, bridge } = {}) {
         }
         if (action === 'state') {
           return json(res, 200, { ok: true, ...getState() })
+        }
+        if (action === 'export') {
+          const wanted = String(url.searchParams.get('pack') || '').trim()
+          const pack = wanted ? packById(wanted) : packById(activePackId())
+          if (!pack) {
+            return json(res, 400, { ok: false, error: wanted ? '图库不存在: ' + wanted : '没有可导出的图库' })
+          }
+          // 二进制响应：不走 json()，直接写 zip 字节。
+          const zip = buildPackZip(pack)
+          const stamp = new Date().toISOString().slice(0, 10)
+          const safeName = String(pack.id).replace(/[^a-zA-Z0-9._-]+/g, '_') || 'pack'
+          res.writeHead(200, {
+            'Content-Type': 'application/zip',
+            'Content-Length': String(zip.byteLength),
+            'Content-Disposition': 'attachment; filename="dsh-aura-pack-' + safeName + '-' + stamp + '.zip"',
+            'Cache-Control': 'no-store',
+          })
+          res.end(zip)
+          return
         }
         if (action !== 'list') {
           return json(res, 400, { ok: false, error: '未知 action: ' + action })
@@ -719,6 +881,16 @@ export async function initMeme({ ctx, state, log, bridge } = {}) {
       }
       if (action === 'setSendMode') {
         return json(res, 200, { ok: true, ...setSendMode(body), message: '发送方式已更新，下一条消息生效' })
+      }
+      if (action === 'import') {
+        const imported = importPack(body)
+        return json(res, 200, {
+          ok: true,
+          pack: imported.pack,
+          packs: imported.packs,
+          enabled: imported.enabled,
+          message: '已导入「' + (imported.pack?.name || imported.pack?.id || '图库') + '」，共 ' + imported.count + ' 张',
+        })
       }
       return json(res, 400, { ok: false, error: '未知 action: ' + action })
     } catch (error) {

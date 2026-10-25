@@ -181,6 +181,7 @@ export class ChannelBridge {
     this.lastEventAt = 0
     this.lastAssistantAt = 0
     this.lastActiveByKey = new Map()
+    this.mediaSentAt = new Map() // sessionId -> 最近一次工具发图时间（避免 marker 重复发）
     // hooks 集合（取代单槽 onInbound，避免多个模块互相覆盖）
     this.inboundHooks = new Set()
     this.outboundHooks = new Set()
