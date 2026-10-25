@@ -208,25 +208,24 @@ await test('返回 { dispose, getConfig, setConfig, snapshot, compilePrompt }', 
   assert.equal(instance.compilePrompt().length, 0)
 })
 
-await test('system prompt 注入段 order=25 且与编译器同源', () => {
+await test('system prompt 注入段 order=25 已停用（并入灵魂自由内容）', () => {
   assert.equal(captured.sections.length, 1)
   const section = captured.sections[0]
   assert.equal(section.name, 'aura:persona')
   assert.equal(section.order, 25)
   assert.equal(section.interpolate, false)
-  assert.equal(section.text(), persona.compilePersonaPrompt(persona.getConfig()))
+  // 旧风格注入已停用：section 永远为空，编译器仍供 /preview 使用。
+  assert.equal(section.text(), '')
+  assert.ok(persona.compilePersonaPrompt({ ...persona.getConfig(), enabled: true }).length > 0)
 })
 
-await test('soulEnabled=false 时 section 文本为空，灵魂恢复后重新注入', async () => {
+await test('section 停用后无论灵魂开关都不注入', async () => {
   const enabled = await persona.setConfig({ enabled: true })
   assert.equal(enabled.ok, true)
-  assert.ok(persona.compilePersonaPrompt(persona.getConfig()).length > 0)
   soulState.soulEnabled = false
   assert.equal(captured.sections[0].text(), '')
-  // 编译器本身不受灵魂开关影响（/preview 仍可预览）。
-  assert.ok(persona.compilePersonaPrompt(persona.getConfig()).length > 0)
   soulState.soulEnabled = true
-  assert.ok(captured.sections[0].text().length > 0)
+  assert.equal(captured.sections[0].text(), '')
   await persona.setConfig({ enabled: false })
 })
 
