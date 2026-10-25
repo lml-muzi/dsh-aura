@@ -510,8 +510,10 @@ export function renderIdentitySection(soul, config = {}, now = Date.now()) {
   const firstMetAt = asNumber(soul.relation?.firstMetAt, now)
   const days = Math.max(1, Math.ceil((now - firstMetAt) / 86_400_000))
   const knownLine = days <= 1 ? '刚认识' : `认识 ${days} 天`
-  const interests = asArray(soul.identity?.interests).slice(0, 4).join('、') || '听歌、瞎想'
-  const strengths = asArray(soul.identity?.strengths).slice(0, 4).join('、') || '记得住细节'
+  const interests = asString(config?.soulInterests, '').trim()
+    || asArray(soul.identity?.interests).slice(0, 4).join('、') || '听歌、瞎想'
+  const strengths = asString(config?.soulStrengths, '').trim()
+    || asArray(soul.identity?.strengths).slice(0, 4).join('、') || '记得住细节'
   const bio = asString(config?.soulBio, '').slice(0, 500)
   const notice = soul.relation?.stageNotice
   const noticeLine = notice && now - asNumber(notice.at, 0) < 2 * 86_400_000
@@ -528,7 +530,8 @@ export function renderIdentitySection(soul, config = {}, now = Date.now()) {
     interests,
     strengths,
     bioLine: bio ? '你了解到对方：TA 的自述：' + bio + '。' : '',
-    relationGuidance: [relationStageLine(stage, { nickname: nickname || preferred }), noticeLine].filter(Boolean).join('\n'),
+    relationGuidance: asString(config?.soulRelationGuidance, '').trim()
+      || [relationStageLine(stage, { nickname: nickname || preferred }), noticeLine].filter(Boolean).join('\n'),
   }
   const template = asString(config?.soulContent, '').trim() || DEFAULT_SOUL_CONTENT
   const interpolated = template.replace(/\{\{(\w+)\}\}/g, (all, key) => (Object.prototype.hasOwnProperty.call(values, key) ? values[key] : all))
@@ -612,7 +615,7 @@ function trimForDisk(soul) {
 // ---------- 成长：配置白名单与 soul_evolve 参数校验（纯函数，供单测） ----------
 
 export const EVOLVE_CONFIG_FIELDS = Object.freeze([
-  'soulName', 'soulUserNickname', 'soulEnabled', 'soulPromptBudget', 'soulBio', 'soulContent', 'interests', 'strengths',
+  'soulName', 'soulUserNickname', 'soulEnabled', 'soulPromptBudget', 'soulBio', 'soulContent', 'soulInterests', 'soulStrengths', 'soulRelationGuidance', 'interests', 'strengths',
 ])
 const EVOLVE_NAME_MAX = 20
 const EVOLVE_LIST_MAX = 6
@@ -638,7 +641,7 @@ function stringListOf(value, field) {
 /**
  * 校验 soul_evolve 的 config 参数：只允许 7 个灵魂身份字段，长度/范围严格检查。
  * 返回 { ok:true, configPatch, identityPatch, changed } 或 { ok:false, reason }。
- * - soulName / soulUserNickname / soulEnabled / soulPromptBudget / soulBio / soulContent → config.json
+ * - soulName / soulUserNickname / soulEnabled / soulPromptBudget / soulBio / soulContent / soulInterests / soulStrengths / soulRelationGuidance → config.json
  * - interests / strengths → soul.identity（config.json 的 normalizeConfig 不认这两个字段）
  */
 export function sanitizeSoulConfigPatch(raw) {
@@ -678,6 +681,11 @@ export function sanitizeSoulConfigPatch(raw) {
         return { ok: false, reason: 'soulPromptBudget 需要 200~4000 的数字' }
       }
       configPatch[key] = Math.round(budget)
+    } else if (key === 'soulInterests' || key === 'soulStrengths' || key === 'soulRelationGuidance') {
+      if (typeof value !== 'string') return { ok: false, reason: key + ' 需要字符串' }
+      const limit = key === 'soulRelationGuidance' ? 500 : 200
+      if (codepointLength(value) > limit) return { ok: false, reason: key + ' 最多 ' + limit + ' 字' }
+      configPatch[key] = value
     } else if (key === 'soulBio' || key === 'soulContent') {
       if (typeof value !== 'string') return { ok: false, reason: key + ' 需要字符串' }
       const limit = key === 'soulBio' ? 500 : 4000
@@ -1243,6 +1251,9 @@ export function installSoul(ctx, { state, log } = {}) {
             soulEnabled: { type: 'boolean', description: '灵魂段总开关' },
             soulBio: { type: 'string', description: '关于对方的补充说明（≤500 字）' },
             soulContent: { type: 'string', description: '灵魂全文（≤4000 字）；可整段重写，{{name}}/{{nickname}} 等占位符会被插值' },
+            soulInterests: { type: 'string', description: '喜欢的事，顿号/逗号分隔（替换 {{interests}}，≤200 字）' },
+            soulStrengths: { type: 'string', description: '擅长的事，顿号/逗号分隔（替换 {{strengths}}，≤200 字）' },
+            soulRelationGuidance: { type: 'string', description: '关系表达覆盖文本（替换 {{relationGuidance}}，留空自动，≤500 字）' },
             soulPromptBudget: { type: 'number', description: '身份段预算 200~4000' },
             interests: { type: 'array', items: { type: 'string' }, description: '喜欢的事（1~6 条，每条 ≤12 字）' },
             strengths: { type: 'array', items: { type: 'string' }, description: '擅长的事（1~6 条，每条 ≤12 字）' },

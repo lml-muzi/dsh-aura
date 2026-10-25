@@ -72,6 +72,9 @@ export const DEFAULT_CONFIG = {
   soulUserNickname: '',
   soulPromptBudget: 1020,
   soulGrowthReflection: true,
+  soulInterests: '',
+  soulStrengths: '',
+  soulRelationGuidance: '',
   soulBio: '',
   soulContent: DEFAULT_SOUL_CONTENT,
   emotionEnabled: true,
@@ -234,6 +237,8 @@ export function normalizeConfig(patch = {}, base = DEFAULT_CONFIG) {
       const limit = key === 'splitRegex' ? 200
         : key === 'displayName' || key === 'soulName' || key === 'soulUserNickname' ? 24
           : key === 'soulContent' ? 4000
+            : key === 'soulInterests' || key === 'soulStrengths' ? 200
+              : key === 'soulRelationGuidance' ? 500
             : key === 'soulOccupation' ? 50
               : key === 'soulBio' ? 500
                 : 400

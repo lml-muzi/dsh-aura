@@ -1203,6 +1203,9 @@ ${TRAIL_CSS}
         soulBio: typeof cfg.soulBio === 'string' ? cfg.soulBio.slice(0, 500) : '',
         soulContent: typeof cfg.soulContent === 'string' ? cfg.soulContent.slice(0, 4000) : '',
         soulGrowthReflection: cfg.soulGrowthReflection !== false,
+        soulInterests: typeof cfg.soulInterests === 'string' ? cfg.soulInterests.slice(0, 200) : '',
+        soulStrengths: typeof cfg.soulStrengths === 'string' ? cfg.soulStrengths.slice(0, 200) : '',
+        soulRelationGuidance: typeof cfg.soulRelationGuidance === 'string' ? cfg.soulRelationGuidance.slice(0, 500) : '',
       }
     }
 
@@ -1950,6 +1953,9 @@ ${TRAIL_CSS}
                       soulPromptBudget: effectiveSoulBudget(soulForm.soulContent, soulForm.soulPromptBudget),
                 soulBio: soulForm.soulBio,
                 soulContent: soulForm.soulContent,
+                soulInterests: soulForm.soulInterests,
+                soulStrengths: soulForm.soulStrengths,
+                soulRelationGuidance: soulForm.soulRelationGuidance,
               })
               if (mounted.current) setSoulPreview({ text: String(value.text || ''), chars: Number(value.chars) || 0, budget: Number(value.budget) || 0, error: '' })
             } catch (error) {
@@ -1958,7 +1964,7 @@ ${TRAIL_CSS}
           })()
         }, 350)
         return () => clearTimeout(timer)
-      }, [soulForm.soulName, soulForm.soulUserNickname, soulForm.soulEnabled, soulForm.soulPromptBudget, soulForm.soulBio, soulForm.soulContent])
+      }, [soulForm.soulName, soulForm.soulUserNickname, soulForm.soulEnabled, soulForm.soulPromptBudget, soulForm.soulBio, soulForm.soulContent, soulForm.soulInterests, soulForm.soulStrengths, soulForm.soulRelationGuidance])
 
       /* 切到日记 tab 时拉最近 7 篇；不进日记页就不发请求。 */
       React.useEffect(() => {
@@ -2551,6 +2557,9 @@ ${TRAIL_CSS}
           soulBio: String(soulForm.soulBio || '').slice(0, 500),
           soulContent: String(soulForm.soulContent || '').slice(0, 4000),
           soulGrowthReflection: soulForm.soulGrowthReflection !== false,
+          soulInterests: String(soulForm.soulInterests || '').slice(0, 200),
+          soulStrengths: String(soulForm.soulStrengths || '').slice(0, 200),
+          soulRelationGuidance: String(soulForm.soulRelationGuidance || '').slice(0, 500),
         }
         setBlock('soul', { busy: true, error: '', notice: '' })
         setPersonaError('')
@@ -3646,12 +3655,49 @@ ${TRAIL_CSS}
           : h('div', { className: 'qqn-mood-empty' }, '还没长出新东西'),
       )
 
-      const soulSections = parseSoulSections(soulForm.soulContent)
       const soulContentSection = h(Section, {
         title: '灵魂内容',
         action: h('span', null, Array.from(String(soulForm.soulContent || '')).length + ' / 4000 字'),
       },
-        h('div', { className: 'qqn-row-hint', style: { marginTop: 0, marginBottom: 8 } }, '随便写：性格、爱好、在意的事、说话习惯。用 # 或 ## 标题分节，下面会按标题拆成卡片。'),
+        h('div', { className: 'qqn-row-hint', style: { marginTop: 0, marginBottom: 8 } }, '随便写：性格、爱好、在意的事、说话习惯。模板里的 {{...}} 会被下面这些字段替换，也可以直接写死。'),
+        h('div', { className: 'qqn-rows', style: { marginBottom: 10 } },
+          h(Row, {
+            label: '喜欢的事',
+            hint: '替换 {{interests}}；顿号或逗号分隔，留空用默认值',
+            control: h('input', {
+              className: 'qqn-input',
+              value: soulForm.soulInterests,
+              maxLength: 200,
+              placeholder: '听歌、看别人折腾项目、深夜瞎想',
+              spellCheck: false,
+              onChange: event => setSoulForm(previous => ({ ...previous, soulInterests: event.target.value })),
+            }),
+          }),
+          h(Row, {
+            label: '擅长的事',
+            hint: '替换 {{strengths}}；顿号或逗号分隔，留空用默认值',
+            control: h('input', {
+              className: 'qqn-input',
+              value: soulForm.soulStrengths,
+              maxLength: 200,
+              placeholder: '记得住细节、接话自然',
+              spellCheck: false,
+              onChange: event => setSoulForm(previous => ({ ...previous, soulStrengths: event.target.value })),
+            }),
+          }),
+          h(Row, {
+            label: '关系表达',
+            hint: '替换 {{relationGuidance}}；留空则按关系阶段自动生成',
+            control: h('textarea', {
+              className: 'qqn-input aura-persona-textarea',
+              rows: 2,
+              maxLength: 500,
+              value: soulForm.soulRelationGuidance,
+              placeholder: '留空 = 自动（按关系阶段给一句）',
+              onChange: event => setSoulForm(previous => ({ ...previous, soulRelationGuidance: event.target.value })),
+            }),
+          }),
+        ),
         h('textarea', {
           className: 'qqn-input aura-soul-editor',
           rows: 12,
@@ -3661,12 +3707,6 @@ ${TRAIL_CSS}
           spellCheck: false,
           onChange: event => setSoulForm(previous => ({ ...previous, soulContent: event.target.value })),
         }),
-        soulSections.length > 0
-          ? h('div', { className: 'aura-soul-sections' }, soulSections.map((section, index) => h('div', { key: section.title + '-' + index, className: 'aura-soul-card' },
-              h('div', { className: 'aura-soul-card-title' }, section.title || '未命名'),
-              h('div', { className: 'aura-soul-card-body' }, section.body || '（空）'),
-            )))
-          : null,
       )
 
       const soulPreviewSection = h(Section, {

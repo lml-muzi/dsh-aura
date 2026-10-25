@@ -165,7 +165,7 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
             const body = await readBody(req)
             const patch = body && typeof body === 'object' && !Array.isArray(body) ? body : {}
             cfg = { ...cfg }
-            for (const key of ['soulName', 'soulUserNickname', 'soulEnabled', 'soulHonestyLine', 'soulPromptBudget', 'soulBio', 'soulContent']) {
+            for (const key of ['soulName', 'soulUserNickname', 'soulEnabled', 'soulPromptBudget', 'soulBio', 'soulContent', 'soulInterests', 'soulStrengths', 'soulRelationGuidance']) {
               if (Object.prototype.hasOwnProperty.call(patch, key)) cfg[key] = patch[key]
             }
           }
