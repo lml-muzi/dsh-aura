@@ -45,7 +45,7 @@ export function backupsDir() {
 }
 
 /** 参与备份的文件；不存在就跳过。顺序即 manifest.files 顺序。 */
-export const BACKUP_FILES = Object.freeze(['soul.json', 'persona.json', 'config.json', 'diary.json', 'memory.json'])
+export const BACKUP_FILES = Object.freeze(['soul.json', 'life.json', 'persona.json', 'config.json', 'diary.json', 'memory.json'])
 
 /** 默认保留最近 30 份，超出删最旧。 */
 export const RETAIN_LAST = 30

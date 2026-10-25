@@ -9,6 +9,7 @@ import { QQClient } from './host/qq.js'
 import { ChannelBridge } from './host/bridge.js'
 import { installMedia } from './host/media.js'
 import { installSoul } from './host/soul.js'
+import { initLife } from './host/life.js'
 import { initPersona } from './host/persona.js'
 import { initMeme, dispose as disposeMeme, getMemeState } from './host/meme.js'
 import { createDiary } from './host/diary.js'
@@ -84,7 +85,11 @@ export function apply(ctx, config = {}) {
   }
 
   // ---- 灵魂层：soul 是唯一观察 session/event 的地方，emotion/memory 订阅它的事件 ----
-  const soul = installSoul(ctx, { state, log })
+  // life 在 soul 之后创建；soul 只通过 getter 懒读生活状态（presence 文案），不反向依赖 life 模块。
+  let life
+  const soul = installSoul(ctx, { state, log, getLife: () => life?.get?.() ?? life })
+  // 生活层：她自己的作息（life.json + soul_life 工具 + 60s 定时器 + /dsh-aura/life-api）
+  life = initLife({ ctx, state, soul, log })
   // 人设（收编 dsh-soul）：独立 persona.json，注入人设段并注册 /dsh-aura/persona-api 与 set_persona 工具
   const persona = initPersona({ ctx, state, log })
   const disposers = []
@@ -123,7 +128,7 @@ export function apply(ctx, config = {}) {
   // ---- 情绪 / 记忆 / 主动搭话 ----
   const emotion = installEmotion(ctx, { state, soul, bridge, log })
   const memory = installMemory(ctx, { state, soul, log })
-  const speak = installSpeak(ctx, { state, soul, emotion, memory, bridge, log })
+  const speak = installSpeak(ctx, { state, soul, emotion, memory, bridge, life, log })
   // 日记：独立 diary.json，不是记忆；自动注册 soul_diary 工具与 /dsh-aura/diary-api
   const diary = createDiary({ home: state.stateDir(), getSoul: () => soul.get(), getMemoryStore: () => memory.store, getConfig: () => state.readConfig(), log, ctx })
   safe(() => bridge.setTextFilter((text, options) => speak.checkProactiveText?.(text, options)), 'bridge.setTextFilter')
@@ -154,6 +159,7 @@ export function apply(ctx, config = {}) {
     status,
     config: () => state.redactConfig(state.readConfig()),
     soul: () => safe(() => soul.snapshot(), {}),
+    life: () => safe(() => life.snapshot(), {}),
     persona: () => safe(() => persona.snapshot(), {}),
     meme: () => safe(() => getMemeState(), {}),
     speak: () => safe(() => speak.snapshot(), {}),
@@ -189,6 +195,7 @@ export function apply(ctx, config = {}) {
     safe(() => diary.dispose?.(), 'dispose diary')
     for (const dispose of disposers) safe(dispose, 'dispose soul listener')
     safe(() => speak.stop?.(), 'speak.stop')
+    safe(() => life.dispose?.(), 'dispose life')
     void stop()
     void bridge.dispose()
     safe(() => soul.saveNow?.(), 'soul.saveNow')

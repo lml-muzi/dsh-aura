@@ -42,6 +42,7 @@
  *   - 可选测试参数（不要写进配置）：random, now, retryDelayMs, tickMs。
  */
 import { randomUUID } from 'node:crypto'
+import { describeLife } from './life.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const MINUTE_MS = 60 * 1000
@@ -52,6 +53,10 @@ const SCHEDULE_TITLE = 'Aura 想主动说句话'
 const DEFAULT_TICK_MS = 60 * 1000
 const PENDING_TIMEOUT_MS = 10 * MINUTE_MS
 const THOUGHT_TTL_MS = 12 * 60 * 60 * 1000
+/** 醒来后那一次高优先级主动的固定命中线（仍需掷骰，不强制发）。 */
+const WAKE_OVERRIDE_LINE = 80
+/** 「刚醒」只对最近 6 小时内有过互动的人开一次口。 */
+const WAKE_RECENT_MS = 6 * 60 * 60 * 1000
 
 /** 模型可以拒绝开口（比硬发一句尴尬话好）；bridge 出站前也应过滤。 */
 const SKIP_MARKERS = new Set(['<skip>', '[skip]', '（跳过）', '(跳过)', 'skip'])
@@ -113,6 +118,7 @@ const TRIGGER_LABEL = {
   due: '想起约定的日子',
   ritual: '早晚的仪式感',
   return: '好久没聊',
+  wake: '刚醒来',
   manual: '自己想起来',
 }
 
@@ -306,6 +312,21 @@ export function emotionUnsuitable(emotion = {}) {
 }
 
 /**
+ * 生活状态对主动搭话的倍率：睡着完全不发；忙/玩减弱；休息略增；外出稍减；醒着不变。
+ * 她不说话不是「没兴趣」，是正在过自己的生活。
+ */
+export function lifeFactorOf(state) {
+  switch (String(state || '')) {
+    case 'sleep': return 0
+    case 'work':
+    case 'play': return 0.4
+    case 'rest': return 1.2
+    case 'out': return 0.6
+    default: return 1
+  }
+}
+
+/**
  * D.3.1 命中线公式（顺序按设计：先乘因子，再加加成）。
  * factor：触发源倍率（impulse 1.5 / return 1.3）；overrideLine：due 70 / ritual 55。
  */
@@ -326,8 +347,10 @@ export function computeHitLine(parts = {}) {
 /** D.10 面板要能一眼看懂「为什么这次没开口」。 */
 export function formatFormula(parts = {}) {
   const line = round1(parts.line ?? 0)
+  const lifeFactor = num(parts.lifeFactor, 1)
   if (parts.overrideLine !== null && parts.overrideLine !== undefined) {
-    return `${line} = ${TRIGGER_LABEL[parts.trigger] || '触发源'}固定命中线 ${round1(parts.overrideLine)}`
+    return `${line} = ${TRIGGER_LABEL[parts.trigger] || '触发源'}固定命中线 ${round1(parts.overrideLine)}` +
+      (lifeFactor === 1 ? '' : ` × 生活 ${round1(lifeFactor)}`)
   }
   const pieces = [
     `${DAYPART_LABEL[parts.daypart] || '时段'} ${round1(parts.baseLine ?? 0)}`,
@@ -337,6 +360,7 @@ export function formatFormula(parts = {}) {
   if (num(parts.busyFactor, 1) !== 1) pieces.push(`忙 ${round1(parts.busyFactor)}`)
   pieces.push(`未回复 ${round1(parts.unanswered ?? 1)}`)
   if (num(parts.triggerFactor, 1) !== 1) pieces.push(`${TRIGGER_LABEL[parts.trigger] || '触发'} ${round1(parts.triggerFactor)}`)
+  if (lifeFactor !== 1) pieces.push(`生活 ${round1(lifeFactor)}${parts.life ? `（${parts.life}）` : ''}`)
   return `${line} = ${pieces.join(' × ')} + 冲动 ${round1(parts.impulse ?? 0)} + 没中加成 ${round1(parts.missBonusPart ?? 0)}`
 }
 
@@ -556,11 +580,13 @@ export function buildIntentBody(input = {}) {
     maxChars = 60,
     trigger = 'idle',
     sticker = false,
+    lifeText = '',
   } = input
   const lines = [
     `【主动念头】${intentLineFor(act, topic)}`,
     `【由头】对方已经 ${Math.max(0, Math.round(num(idleMinutes, 0)))} 分钟没说话了；现在是 ${formatClock(now)}；你们的关系是「${STAGE_LABEL[stage] || stage}」。` +
       `（这次是你${TRIGGER_LABEL[trigger] || '想开口'}，不是对方找你。）`,
+    lifeText ? `【此刻】你现在：${lifeText}。（自然带一句就好，不用解释自己的生活安排。）` : '',
     `【要求】说 1~2 句、15~${Math.max(15, Math.round(num(maxChars, 60)))} 个字，口语化；别像客服，别解释这条提醒；`,
     '       如果想起之前说过的话题，先确认对方现在状态合不合适再提；',
     '       不要用「一直在等你」「你不理我」「算了当我没说」这类带压力或自责的说法。',
@@ -623,7 +649,7 @@ export function isSkipText(text) {
 // ---------------------------------------------------------------------------
 
 export function installSpeak(ctx, deps = {}) {
-  const { state, soul, emotion, memory, bridge } = deps || {}
+  const { state, soul, emotion, memory, bridge, life } = deps || {}
   const log = typeof deps?.log === 'function' ? deps.log : () => {}
   const random = typeof deps?.random === 'function' ? deps.random : Math.random
   const nowDate = typeof deps?.now === 'function' ? deps.now : () => new Date()
@@ -676,6 +702,33 @@ export function installSpeak(ctx, deps = {}) {
     }
     if (!fallbackData) fallbackData = { v: 2, relation: {}, memory: { events: [], topics: {}, pendingDue: [] }, emotion: {}, speak: { ...DEFAULT_SPEAK_STATE }, explainLog: [] }
     return fallbackData
+  }
+
+  /** 生活状态只读快照；没有 life（依赖没注入/还没装载）时返回 null，行为保持原样。 */
+  function lifeSnapshot() {
+    try {
+      if (!life) return null
+      const source = typeof life.get === 'function'
+        ? life.get()
+        : typeof life.snapshot === 'function'
+          ? life.snapshot()
+          : life
+      return source && typeof source === 'object' ? source : null
+    } catch (error) {
+      logOnce('life', '[speak] 读取生活状态失败:', errorMessage(error))
+      return null
+    }
+  }
+
+  /** 主动消息 prompt 里的「你现在：…」；醒着时不注入，避免每句都在报状态。 */
+  function lifePromptText() {
+    const source = lifeSnapshot()
+    if (!source || !source.state || source.state === 'awake') return ''
+    try {
+      return describeLife(source, nowMs())
+    } catch {
+      return ''
+    }
   }
 
   function speakState() {
@@ -812,6 +865,10 @@ export function installSpeak(ctx, deps = {}) {
       maxChars: clamp(raw.speakMaxChars ?? SPEAK_DEFAULTS.maxChars, 10, 200),
       quietStart: normalizeHHMM(raw.quietStart, SPEAK_DEFAULTS.quietStart),
       quietEnd: normalizeHHMM(raw.quietEnd, SPEAK_DEFAULTS.quietEnd),
+      // 睡着时是否硬门控（weight 恒为 0，这里只是省掉一次无意义掷骰并给出原因）
+      lifeQuietSleep: raw.lifeQuietSleep !== false,
+      // 醒来后要不要试着主动说一句（false 只关掉这个 hook，不影响普通主动搭话）
+      lifeWakeGreeting: raw.lifeWakeGreeting !== false,
     }
   }
 
@@ -1122,6 +1179,7 @@ export function installSpeak(ctx, deps = {}) {
       maxChars: config.maxChars,
       trigger: triggerInfo.trigger,
       sticker,
+      lifeText: lifePromptText(),
     }
     return {
       act,
@@ -1563,7 +1621,11 @@ export function installSpeak(ctx, deps = {}) {
       trigger: triggerInfo?.trigger || 'idle',
       overrideLine: triggerInfo?.overrideLine ?? null,
     }
-    parts.line = computeHitLine(parts)
+    const lifeNow = lifeSnapshot()
+    parts.life = lifeNow?.state || ''
+    parts.lifeFactor = lifeNow ? lifeFactorOf(lifeNow.state) : 1
+    // 生活状态乘在最后：due/ritual 的固定命中线也照样被「睡着」压成 0。
+    parts.line = clamp(computeHitLine(parts) * num(parts.lifeFactor, 1), 0, 100)
     return parts
   }
 
@@ -1588,6 +1650,7 @@ export function installSpeak(ctx, deps = {}) {
   async function tick(options = {}) {
     if (disposed) return { done: 'disposed' }
     const manual = options?.trigger === 'manual' || options?.manual === true
+    const wakeTrigger = options?.trigger === 'wake'
     const config = readSpeakConfig()
     const now = nowMs()
     const date = nowDate()
@@ -1595,6 +1658,7 @@ export function installSpeak(ctx, deps = {}) {
     const stateRef = speakState()
     const data = getData()
     const emotionSnapshot = readEmotion()
+    const lifeNow = lifeSnapshot()
 
     // 清理超时未确认的主动投递（认为已送达，不惩罚）
     for (const [sessionId, entry] of pending) {
@@ -1613,10 +1677,17 @@ export function installSpeak(ctx, deps = {}) {
     if (!manual && inQuietHours(config, date)) return { done: 'quiet', line: null }
     if (!manual && num(stateRef.pausedUntil, 0) > now) return { done: 'paused' }
     if (!manual && num(stateRef.suppressUntil, 0) > now) return { done: 'suppressed' }
+    // 睡着了就完全不发；她自己的生活优先于主动搭话。
+    if (!manual && lifeNow && lifeNow.state === 'sleep' && config.lifeQuietSleep !== false) {
+      return { done: 'life-sleep', life: 'sleep' }
+    }
     if (!manual) {
-      const cooldownMs = config.cooldownMinutes * MINUTE_MS
-      if (cooldownMs > 0 && num(stateRef.lastAt, 0) && now - num(stateRef.lastAt, 0) < cooldownMs) {
-        return { done: 'cooldown', nextAt: num(stateRef.lastAt, 0) + cooldownMs }
+      // 「刚醒来」是高优先级：跳过冷却与 idle 间隔，但日上限仍然算数
+      if (!wakeTrigger) {
+        const cooldownMs = config.cooldownMinutes * MINUTE_MS
+        if (cooldownMs > 0 && num(stateRef.lastAt, 0) && now - num(stateRef.lastAt, 0) < cooldownMs) {
+          return { done: 'cooldown', nextAt: num(stateRef.lastAt, 0) + cooldownMs }
+        }
       }
       if (todayCountOf(stateRef, now) >= config.dailyCap) return { done: 'daily-cap', todayCount: stateRef.todayCount }
     }
@@ -1630,6 +1701,9 @@ export function installSpeak(ctx, deps = {}) {
     let triggerInfo
     if (manual) {
       triggerInfo = { trigger: 'manual', factor: 1, overrideLine: null }
+    } else if (wakeTrigger) {
+      // 睡醒/忙完后的第一次开口：命中线抬高，但仍掷骰，不强制发
+      triggerInfo = { trigger: 'wake', factor: 1, overrideLine: WAKE_OVERRIDE_LINE }
     } else {
       triggerInfo = pickTrigger(now, config, picked, data, stateRef)
       if (!triggerInfo) {
@@ -1802,6 +1876,28 @@ export function installSpeak(ctx, deps = {}) {
     return { ok: true, text: value }
   }
 
+  /**
+   * 醒来后叫一次主动搭话（life.on('wake') 会调它）。
+   * 不是强制发：静默/暂停/日上限/最近没聊过都会挡；命中仍然要掷骰。
+   */
+  async function notifyWake(options = {}) {
+    if (disposed) return { done: 'disposed' }
+    const config = readSpeakConfig()
+    if (!config.enabled) return { done: 'off' }
+    if (config.lifeWakeGreeting === false) return { done: 'off-disabled' }
+    const now = nowMs()
+    if (inQuietHours(config, nowDate())) return { done: 'quiet' }
+    const stateRef = speakState()
+    if (num(stateRef.pausedUntil, 0) > now) return { done: 'paused' }
+    if (num(stateRef.suppressUntil, 0) > now) return { done: 'suppressed' }
+    if (todayCountOf(stateRef, now) >= config.dailyCap) return { done: 'daily-cap', todayCount: stateRef.todayCount }
+    const picked = pickTarget(now, config)
+    if (!picked || !picked.chat) return { done: picked?.reason || 'no-target' }
+    const lastUserAt = lastUserAtOf(stateRef, getData(), picked.chat)
+    if (!lastUserAt || now - lastUserAt > WAKE_RECENT_MS) return { done: 'no-recent' }
+    return tick({ trigger: 'wake', lifeFrom: options?.from || '' })
+  }
+
   // --- prompt context（order 60，仅命中轮且会话匹配） --------------------
 
   function currentIntentText(sessionId) {
@@ -1951,6 +2047,21 @@ export function installSpeak(ctx, deps = {}) {
   }
 
   try {
+    if (life && typeof life.on === 'function') {
+      disposers.push(safeDispose(life.on('wake', payload => {
+        if (disposed) return
+        // 只是半夜中途醒了一下又接着睡，不算「醒来」，别去打扰人
+        if (!payload || payload.resumed === true) return
+        void notifyWake({ from: payload.from || '' }).catch(error => {
+          logOnce('wake', '[speak] 醒来主动失败:', errorMessage(error))
+        })
+      })))
+    }
+  } catch (error) {
+    logOnce('wake-hook', '[speak] 订阅 life.wake 失败:', errorMessage(error))
+  }
+
+  try {
     if (ctx?.systemPrompt && typeof ctx.systemPrompt.context === 'function') {
       ctx.systemPrompt.context({
         name: 'aura:intent',
@@ -2010,6 +2121,7 @@ export function installSpeak(ctx, deps = {}) {
     currentIntent,
     checkProactiveText,
     notifyProactiveResult,
+    notifyWake,
     stop,
     /** 纯函数也挂到 API 上，方便 web.js/面板直接算展示值 */
     helpers: { computeHitLine, formatFormula, inQuietHours, daypartOf, pickBaseLine, stageFactor, timingFactor, unansweredFactor, impulseBonus },

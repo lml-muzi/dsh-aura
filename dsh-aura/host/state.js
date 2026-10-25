@@ -67,6 +67,7 @@ export const DEFAULT_CONFIG = {
   splitEnabled: true,
   splitRegex: '\\n{2,}',
   maxMessages: 4,
+  steerEnabled: true,
   channelImpl: 'sdk', // sdk | legacy
 
   // ---- 灵魂身份 ----
@@ -132,6 +133,11 @@ export const DEFAULT_CONFIG = {
   speakWakeMode: 'auto', // auto | followup | schedule
   speakMaxChars: 60,
 
+  // ---- 生活层（host/life.js：life.json；tick 固定 60s）----
+  lifeRandom: false, // 随机生活默认关：只有她主动 plan 才换状态
+  lifeQuietSleep: true, // 睡着时硬门控主动搭话（0 权重之外的快速返回）
+  lifeWakeGreeting: true, // 醒来后允许 speak 尝试一次高优先级主动（仍要过静默/日上限/掷骰）
+
   // ---- 兼容旧字段 ----
   proactiveEnabled: false,
   proactiveEveryMinutes: 90,
@@ -185,6 +191,7 @@ const BOOL_FIELDS = new Set([
   'emotionGuardOnNegative', 'memoryEnabled', 'memoryAutoCompact', 'memoryDiaryEnabled',
   'memoryImmediate', 'memorySessionDigest', 'diaryAuto',
   'speakEnabled', 'speakDryRun', 'speakStickerEnabled', 'proactiveEnabled',
+  'lifeRandom', 'lifeQuietSleep', 'lifeWakeGreeting',
 ])
 
 const TIME_FIELDS = new Set(['quietStart', 'quietEnd'])

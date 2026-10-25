@@ -376,6 +376,10 @@ export class ChannelBridge {
       const context = this.contexts.get(key)
       if (context) context.sessionId = binding.sessionId
       const requestId = `qq-${randomUUID()}`
+      const bridgeConfig = this.state.readConfig()
+      const steerEnabled = bridgeConfig.steerEnabled !== false
+      const running = binding.agent?.status === 'running'
+      const steer = steerEnabled && running && typeof binding.agent?.steer === 'function'
       let accepted = false
       // 有图片时走 Host 的 prompt 附件通道：图片以 image content part 进入上下文，
       // Host 负责校验/归一化/持久化（和 im-connect、dsh-im 的做法一致），而不是丢一个路径给模型。
@@ -388,7 +392,7 @@ export class ChannelBridge {
           if (caption) content.push({ type: 'text', text: caption })
           content.push(...incoming.images)
           try {
-            await controller.prompt({ requestId, sessionId: binding.sessionId, mode: 'queue', content }, AbortSignal.timeout(30_000))
+            await controller.prompt({ requestId, sessionId: binding.sessionId, mode: steer ? 'steer' : 'queue', content }, AbortSignal.timeout(30_000))
             accepted = true
           } catch (error) {
             const reason = error?.details?.reason
@@ -437,8 +441,19 @@ export class ChannelBridge {
           content: [{ type: 'text', text }],
           source: { kind: 'user', rpcId: requestId },
         }
-        // followup 可能同步抛错或返回 rejected promise：不 await + catch 会变成 unhandled rejection
-        await binding.agent.followup(message)
+        // 正在回复时插队：steer 会插到当前回合的下一个 step，而不是排到下一轮。
+        if (steer) {
+          try {
+            binding.agent.steer(message)
+            this.log(`[qq] 插队消息已进入当前回合 ${chat.key}`)
+          } catch (error) {
+            this.log('[qq] 插队失败，改为排队:', error instanceof Error ? error.message : error)
+            await binding.agent.followup(message)
+          }
+        } else {
+          // followup 可能同步抛错或返回 rejected promise：不 await + catch 会变成 unhandled rejection
+          await binding.agent.followup(message)
+        }
       }
       this.touchRecord({ key, kind, chatId })
       this.log(`[qq] 入站 ${kind}/${chatId} → ${binding.sessionId}`)

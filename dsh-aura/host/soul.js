@@ -14,6 +14,7 @@
 import { randomUUID } from 'node:crypto'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEFAULT_SOUL_CONTENT } from './state.js'
+import { describeLife } from './life.js'
 import {
   GROWTH_KINDS,
   GROWTH_LIMIT,
@@ -553,8 +554,12 @@ export function presenceActivity(now = Date.now()) {
   return '准备睡了，但还醒着'
 }
 
-/** 临场段（context order 50）。 */
-export function renderPresenceContext(soul, config = {}, now = Date.now()) {
+/**
+ * 临场段（context order 50）。
+ * life 是 host/life.js 的只读生活状态：有就渲染「正在玩，预计自然醒」，
+ * 没有（或字段不合法）就退回原来的按钟点猜。
+ */
+export function renderPresenceContext(soul, config = {}, now = Date.now(), life = null) {
   if (config?.soulEnabled === false) return ''
   const d = new Date(now)
   const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
@@ -571,7 +576,9 @@ export function renderPresenceContext(soul, config = {}, now = Date.now()) {
       ? '（你们最近有点疏远——如果合适，可以温和一点，不用刻意解释。）'
       : `（你们的关系刚进入「${stageLabel(stage)}」——如果想表达，自然地带一句就好，不必刻意。）`
     : ''
-  const text = [`（现在是${weekdayOf(now)} ${time}；你${presenceActivity(now)}；${formatAway(soul.relation?.lastUserAt, now)}）`,
+  const lifeLine = describeLife(life, now)
+  const activityLine = lifeLine || presenceActivity(now)
+  const text = [`（现在是${weekdayOf(now)} ${time}；你${activityLine}；${formatAway(soul.relation?.lastUserAt, now)}）`,
     `（关系：${stageLabel(stage)}，${known}。）`, relationLine, noticeLine].filter(Boolean).join('\n')
   return codepointSlice(text, PRESENCE_BUDGET)
 }
@@ -819,7 +826,7 @@ export { addGrowth, updateGrowth, deleteGrowth, listGrowth }
 
 // ---------- 插件安装 ----------
 
-export function installSoul(ctx, { state, log } = {}) {
+export function installSoul(ctx, { state, log, getLife } = {}) {
   const logger = typeof log === 'function' ? log : (...args) => console.log('[dsh-aura]', ...args)
   const localDefaults = {
     soulEnabled: true,
@@ -844,6 +851,23 @@ export function installSoul(ctx, { state, log } = {}) {
       return typeof state?.readJson === 'function' ? state.readJson(name, fallback) : fallback
     } catch {
       return fallback
+    }
+  }
+  // 生活状态由 host/life.js 拥有；这里只通过 getter 懒读，避免 soul ↔ life 循环依赖。
+  // 没有 life（或还没挂上）时返回 null，presence 回退到按钟点猜。
+  const readLife = () => {
+    try {
+      if (typeof getLife !== 'function') return null
+      const value = getLife()
+      if (!value || typeof value !== 'object') return null
+      // 允许直接传 initLife 实例（有 get()）或裸 life 对象
+      if (typeof value.get === 'function') {
+        const raw = value.get()
+        return raw && typeof raw === 'object' ? raw : null
+      }
+      return value
+    } catch {
+      return null
     }
   }
 
@@ -1220,7 +1244,7 @@ export function installSoul(ctx, { state, log } = {}) {
       order: 50,
       text: () => {
         try {
-          return renderPresenceContext(soul, readConfig())
+          return renderPresenceContext(soul, readConfig(), Date.now(), readLife())
         } catch (error) {
           logger('[soul] presence context 渲染失败:', error instanceof Error ? error.message : error)
           return ''
@@ -1533,7 +1557,7 @@ export function installSoul(ctx, { state, log } = {}) {
     onAssistantMessage,
     onTurnEnd,
     renderIdentitySection: (now) => renderIdentitySection(soul, readConfig(), now),
-    renderPresenceContext: (now) => renderPresenceContext(soul, readConfig(), now),
+    renderPresenceContext: (now) => renderPresenceContext(soul, readConfig(), now, readLife()),
     settlement: (now) => settleRelation(soul, readConfig(), now),
     addRelationScore: (delta, now) => addRelationScore(soul, readConfig(), delta, now),
     relation: () => ({
