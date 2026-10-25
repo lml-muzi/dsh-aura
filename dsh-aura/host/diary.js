@@ -31,6 +31,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createMemoryStore } from './memory-store.js'
 
 export const DIARY_VERSION = 1
 export const DIARY_FILE = 'diary.json'
@@ -181,8 +182,16 @@ function eventAt(event) {
   return 0
 }
 
-function eventsForDay(soul, date) {
-  const events = soul && soul.memory && Array.isArray(soul.memory.events) ? soul.memory.events : []
+function eventsOfSource(source) {
+  if (!source || typeof source !== 'object') return []
+  if (Array.isArray(source.events)) return source.events
+  if (source.memory && Array.isArray(source.memory.events)) return source.memory.events
+  return []
+}
+
+/** source 可以是裸 memory（memory.json 读出）、soul，或带 memory 的壳。 */
+function eventsForDay(source, date) {
+  const events = eventsOfSource(source)
   return events
     .map((event) => ({ event, at: eventAt(event) }))
     .filter((item) => item.at > 0 && localDayKey(item.at) === date)
@@ -286,10 +295,10 @@ function composeRuleSummary(soul, config, events) {
  * 无事件时返回 null。
  * @returns {{summary:string, highlights:string[]}|null}
  */
-export function renderRuleDiary({ date, soul, config } = {}) {
+export function renderRuleDiary({ date, soul, config, memory } = {}) {
   if (!isDateKey(date)) return null
   const day = String(date)
-  const events = eventsForDay(soul, day)
+  const events = eventsForDay(memory || soul, day)
   if (events.length === 0) return null
 
   const topics = topicsOf(events)
@@ -314,12 +323,12 @@ export function renderRuleDiary({ date, soul, config } = {}) {
  * 给 LLM 的日记 prompt（中文、第一人称、私人日记、≤200 字）。
  * 只负责拼 prompt，不发请求。
  */
-export function buildDiaryPrompt({ date, soul, config } = {}) {
+export function buildDiaryPrompt({ date, soul, config, memory } = {}) {
   const day = String(date ?? '')
   const who = whoOf(soul, config)
   const name = nameOf(soul, config)
   const mood = moodFromSoul(soul)
-  const events = eventsForDay(soul, day)
+  const events = eventsForDay(memory || soul, day)
   const relation = soul && soul.relation && typeof soul.relation === 'object' ? soul.relation : {}
   const stage = STAGE_TEXT[relation.stage] || '说不清'
   const score = Number.isFinite(Number(relation.score)) ? Number(relation.score) : 0
@@ -512,8 +521,8 @@ async function invokeLlm(client, prompt, { system, config }) {
   throw new Error('没有可用的 LLM 接口')
 }
 
-async function generateWithLlm({ date, soul, config, client, log }) {
-  const prompt = buildDiaryPrompt({ date, soul, config })
+async function generateWithLlm({ date, soul, memory, config, client, log }) {
+  const prompt = buildDiaryPrompt({ date, soul, memory, config })
   const system = `你是${nameOf(soul, config)}，正在写自己的私人日记。只输出 JSON，不要解释。`
   const raw = await invokeLlm(client, prompt, { system, config })
   const parsed = parseDiaryOutput(raw)
@@ -716,12 +725,13 @@ export function createDiaryTool(diary, { log } = {}) {
  * @param {object} options
  * @param {string} [options.home] dsh-aura 数据目录（diary.json 所在目录）；省略时用 $DSH_HOME/dsh-aura
  * @param {Function} [options.getSoul] 返回当前 soul 原始对象（不是快照）
+ * @param {Function|object} [options.getMemoryStore] 记忆存句柄（read()）或 store 实例；优先于 soul.memory
  * @param {Function} [options.getConfig] 返回当前配置
  * @param {Function|object} [options.llm] 可选 LLM；函数 (prompt, ctx) => string，或带 generate/complete/stream 的对象
  * @param {Function} [options.log] warn 日志
  * @param {object} [options.ctx] 可选 Cordis ctx；传入时自动注册 soul_diary 工具和 HTTP 路由
  */
-export function createDiary({ home, getSoul, getConfig, llm, log, ctx } = {}) {
+export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log, ctx } = {}) {
   const warn = (...args) => {
     try {
       if (typeof log === 'function') log(...args)
@@ -752,6 +762,45 @@ export function createDiary({ home, getSoul, getConfig, llm, log, ctx } = {}) {
       warn('[diary] 读取配置失败（用默认值）:', messageOf(error))
       return {}
     }
+  }
+
+  // 记忆已迁到独立 memory.json：优先用注入的 getMemoryStore；没注入时只读打开同目录 store；
+  // memory.json 还不存在（迁移前）则回退 soul.memory，保证旧部署照常能写日记。
+  let internalMemoryStore = null
+  const memoryStoreOf = () => {
+    try {
+      const injected = typeof getMemoryStore === 'function' ? getMemoryStore() : getMemoryStore
+      if (injected) return injected
+    } catch (error) {
+      warn('[diary] 读取 getMemoryStore 失败（回退 soul.memory）:', messageOf(error))
+    }
+    if (internalMemoryStore === null) {
+      try {
+        internalMemoryStore = createMemoryStore({ home: dir, log: warn })
+      } catch (error) {
+        warn('[diary] 打开 memory.json 失败（回退 soul.memory）:', messageOf(error))
+        internalMemoryStore = false
+      }
+    }
+    return internalMemoryStore || null
+  }
+
+  const readMemory = () => {
+    const store = memoryStoreOf()
+    if (store && typeof store.read === 'function') {
+      try {
+        if (typeof store.exists !== 'function' || store.exists()) {
+          const memory = store.read()
+          if (memory && Array.isArray(memory.events)) return memory
+        }
+      } catch (error) {
+        warn('[diary] 读取 memory.json 失败（回退 soul.memory）:', messageOf(error))
+      }
+    } else if (store && Array.isArray(store.events)) {
+      return store
+    }
+    const soul = readSoul()
+    return soul && soul.memory && typeof soul.memory === 'object' ? soul.memory : { events: [] }
   }
 
   const readStore = () => {
@@ -865,6 +914,7 @@ export function createDiary({ home, getSoul, getConfig, llm, log, ctx } = {}) {
 
     const soul = readSoul()
     const config = readConfig()
+    const memory = readMemory()
     const mode = options && options.mode === 'llm' ? 'llm' : 'rule'
     let content = null
     let via = 'rule'
@@ -872,7 +922,7 @@ export function createDiary({ home, getSoul, getConfig, llm, log, ctx } = {}) {
     if (mode === 'llm') {
       if (llm) {
         try {
-          content = await generateWithLlm({ date, soul, config, client: llm, log: warn })
+          content = await generateWithLlm({ date, soul, memory, config, client: llm, log: warn })
           via = 'llm'
         } catch (error) {
           warn('[diary] LLM 生成失败，回退规则:', messageOf(error))
@@ -883,7 +933,7 @@ export function createDiary({ home, getSoul, getConfig, llm, log, ctx } = {}) {
     }
 
     if (!content) {
-      content = renderRuleDiary({ date, soul, config })
+      content = renderRuleDiary({ date, soul, memory, config })
       via = 'rule'
     }
     if (!content || !content.summary) {

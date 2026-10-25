@@ -3,7 +3,11 @@
  *
  * 设计依据：docs/aura-soul-design.md 的 C（记忆）、E.4（context order 40）、E.5.2/E.5.3（soul_note/soul_recall）。
  *
- * 状态所有权：记忆数据存在 soul.get().memory 里，由 soul.js 统一落盘。
+ * 状态所有权：
+ * - 短期记忆已和灵魂分离，存在独立 memory.json（host/memory-store.js）。本模块是唯一读写方。
+ * - soul.json 只保留身份/关系/情绪/成长；soul.memory 只在首次升级时作为迁移来源出现一次。
+ * - renderMemoryContext 优先接收 store；旧调用传 soul 对象也兼容（读 soul.memory）。
+ *
  * 成本策略：默认**规则反思**（零 token）；只有用户显式打开 memoryReflectionLlm 且宿主有可用模型时才走 LLM 反思，
  * 且失败自动回退规则。绝不为每轮对话起一次模型调用。
  */
@@ -14,13 +18,26 @@ import {
   codepointLength,
   isSoulSession,
 } from './soul.js'
+import {
+  MEMORY_FILE,
+  createMemoryStore,
+  emptyMemory,
+  hasMemoryContent,
+} from './memory-store.js'
 
 export const SUMMARY_MAX = 80
+/** 记忆上下文总预算（≤220；原 180，保持更紧的现状）。 */
 export const MEMORY_CONTEXT_BUDGET = 180
-export const NOTE_MAX_CHARS = 120
-export const NOTE_MAX = 20
+export const MEMORY_CONTEXT_BUDGET_MAX = 220
+export const NOTE_MAX_CHARS = 80
+export const NOTE_MAX = 30
 export const EVENT_MAX = 40
 export const TOPIC_MAX = 60
+/** 短期 ring 里只把最近 2 条事件放进 context。 */
+export const EVENT_CONTEXT_RECENT = 2
+/** 事件超过 30 条时触发压实；每次把最旧 10 条汇总成 notes。 */
+export const EVENT_COMPACT_THRESHOLD = 30
+export const EVENT_COMPACT_BATCH = 10
 
 /** 话题词表（够用即可，不引入分词依赖）。 */
 export const TOPIC_VOCAB = [
@@ -205,12 +222,52 @@ function recencyBonus(at, now) {
   return 0
 }
 
-/** 关键词召回笔记（纯函数，不写状态）。 */
-export function recallNotes(soul, query, options = {}) {
+export function emptyMemoryView() {
+  return emptyMemory()
+}
+
+/** 统一取记忆：store / soul 句柄 / 裸 soul / 裸 memory 都兼容。 */
+export function memoryOf(source) {
+  if (!source || typeof source !== 'object') return emptyMemoryView()
+  if (typeof source.read === 'function') {
+    try {
+      const memory = source.read()
+      return memory && typeof memory === 'object' ? memory : emptyMemoryView()
+    } catch {
+      return emptyMemoryView()
+    }
+  }
+  if (typeof source.get === 'function') {
+    try {
+      return asObject(source.get()?.memory)
+    } catch {
+      return emptyMemoryView()
+    }
+  }
+  if (source.memory && typeof source.memory === 'object') return source.memory
+  if (source.events || source.notes || source.topics) return source
+  return emptyMemoryView()
+}
+
+function soulOf(source) {
+  if (!source || typeof source !== 'object') return null
+  if (typeof source.get === 'function') {
+    try {
+      return source.get()
+    } catch {
+      return null
+    }
+  }
+  if (source.speak || source.relation || source.emotion) return source
+  return null
+}
+
+/** 关键词召回笔记（纯函数，不写状态）。source 可以是 store / soul / memory。 */
+export function recallNotes(source, query, options = {}) {
   const now = asNumber(options.now, Date.now())
   const limit = clamp(asNumber(options.limit, 3), 1, 8)
   const category = options.category
-  const memory = soul?.memory ?? {}
+  const memory = memoryOf(source)
   const pool = []
   for (const key of ['user', 'us', 'self']) {
     if (category && category !== key) continue
@@ -240,8 +297,9 @@ export function recallNotes(soul, query, options = {}) {
 }
 
 /** 召回最近事件（纯函数）。 */
-export function recallEvents(soul, query, limit = 2, now = Date.now()) {
-  const events = asArray(soul?.memory?.events)
+export function recallEvents(source, query, limit = 2, now = Date.now()) {
+  const memory = memoryOf(source)
+  const events = asArray(memory.events)
   const queryGrams = bigrams(String(query ?? ''))
   const scored = []
   for (const event of events) {
@@ -258,8 +316,16 @@ export function recallEvents(soul, query, limit = 2, now = Date.now()) {
   return scored.slice(0, Math.max(0, limit)).map(({ event }) => event)
 }
 
-function recentTopics(soul, limit = 3, now = Date.now()) {
-  const topics = asObject(soul?.memory?.topics)
+/** 短期 ring 的最近 N 条事件（按写入顺序，不按关键词）。 */
+export function recentEvents(source, limit = EVENT_CONTEXT_RECENT) {
+  const memory = memoryOf(source)
+  const n = Math.max(0, Math.round(asNumber(limit, EVENT_CONTEXT_RECENT)))
+  return n > 0 ? asArray(memory.events).slice(-n) : []
+}
+
+function recentTopics(source, limit = 3, now = Date.now()) {
+  const memory = memoryOf(source)
+  const topics = asObject(memory.topics)
   return Object.entries(topics)
     .map(([key, value]) => ({ key, lastAt: asNumber(value?.lastAt, 0), count: asNumber(value?.count, 1) }))
     .filter((item) => now - item.lastAt < 14 * 86_400_000)
@@ -267,23 +333,27 @@ function recentTopics(soul, limit = 3, now = Date.now()) {
     .slice(0, limit)
 }
 
-/** 记忆上下文段（context order 40）。默认 ≤180 字；没有可说的就返回空串。 */
-export function renderMemoryContext(soul, config = {}, options = {}) {
+/**
+ * 记忆上下文段（context order 40）。
+ * source 优先是 memoryStore（read()），也兼容旧 soul 对象/句柄。
+ * 预算 ≤220（当前 180）；只放最近 2 条事件 + 检索 top 3 笔记。
+ */
+export function renderMemoryContext(source, config = {}, options = {}) {
   if (config?.soulEnabled === false) return ''
   const now = asNumber(options.now, Date.now())
+  const soul = options.soul || soulOf(source)
   const query = String(options.lastUserText ?? soul?.relation?.lastUserText ?? '')
   const limit = clamp(asNumber(config?.memoryRecallLimit, 3), 1, 3)
   const parts = []
 
-  const notes = recallNotes(soul, query, { limit, now })
+  const notes = recallNotes(source, query, { limit, now })
   if (notes.length > 0) {
-    const line = notes.map((note) => note.text).join('；')
-    parts.push(`（关于对方/你们，你记得：${line}）`)
-  } else {
-    const events = recallEvents(soul, query, 2, now)
-    if (events.length > 0) {
-      parts.push(`（最近：${events.map((event) => event.summary).join('；')}）`)
-    }
+    parts.push(`（关于对方/你们，你记得：${notes.map((note) => note.text).join('；')}）`)
+  }
+
+  const recent = recentEvents(source, EVENT_CONTEXT_RECENT)
+  if (recent.length > 0) {
+    parts.push(`（最近：${recent.map((event) => event.summary).join('；')}）`)
   }
 
   const pendingThought = soul?.speak?.pendingThought
@@ -292,12 +362,82 @@ export function renderMemoryContext(soul, config = {}, options = {}) {
     if (thought) parts.push(`（你上次想说但没说出口的念头：${thought.slice(0, 80)}）`)
   }
 
-  const topics = recentTopics(soul, 3, now)
+  const topics = recentTopics(source, 3, now)
   if (topics.length > 0 && parts.join('').length < 120) {
     parts.push(`（最近聊过：${topics.map((item) => item.key).join('、')}）`)
   }
 
-  return codepointSlice(parts.join(''), MEMORY_CONTEXT_BUDGET)
+  const budget = Math.min(MEMORY_CONTEXT_BUDGET_MAX, Math.max(0, MEMORY_CONTEXT_BUDGET))
+  return codepointSlice(parts.join(''), budget)
+}
+
+// ---------- 压实：最旧事件 → notes ----------
+
+const DISCLOSURE_RE = /(我叫|叫我|我喜欢|我讨厌|我不喜欢|我养了|我生日|我最近|我在做|我在忙|我明天|我下周|我周末|答应|说好|约好)/
+
+function noteFromEvent(event) {
+  const summary = String(event?.summary ?? '').trim()
+  if (!summary) return null
+  const topics = asArray(event?.topics).map((topic) => String(topic).slice(0, 8)).filter(Boolean).slice(0, 3)
+  if (event.kind === 'milestone') {
+    return { category: 'us', text: codepointSlice(`你们：${summary}`, NOTE_MAX_CHARS), importance: 0.75 }
+  }
+  if (event.kind === 'proactive') {
+    return { category: 'self', text: codepointSlice(`我主动开口：${summary}`, NOTE_MAX_CHARS), importance: 0.5 }
+  }
+  const userMatch = /用户说「([\s\S]*?)」/.exec(summary)
+  const userText = String(userMatch?.[1] ?? '').trim()
+  if (userText && DISCLOSURE_RE.test(userText)) {
+    return { category: 'user', text: codepointSlice(userText, NOTE_MAX_CHARS), importance: 0.65 }
+  }
+  if (topics.length > 0) {
+    return { category: 'us', text: `聊过${topics.join('、')}`, importance: 0.45 }
+  }
+  if (userText) return { category: 'us', text: codepointSlice(`聊过：${userText}`, NOTE_MAX_CHARS), importance: 0.4 }
+  return { category: 'us', text: codepointSlice(summary, NOTE_MAX_CHARS), importance: 0.4 }
+}
+
+/**
+ * 把最旧的一批事件按 topic/反思规则汇总成 notes，并从 events 删除。
+ * 默认只在事件超过 threshold(30) 时触发；force=true 时按 count 强制压实。
+ * @returns {{compacted:number, notesAdded:number, eventsLeft:number}}
+ */
+export function compactEvents(memory, options = {}) {
+  if (!memory || typeof memory !== 'object') {
+    return { compacted: 0, notesAdded: 0, eventsLeft: 0 }
+  }
+  const events = asArray(memory.events)
+  const threshold = Math.max(1, Math.round(asNumber(options.threshold, EVENT_COMPACT_THRESHOLD)))
+  const force = options.force === true
+  if (!force && events.length <= threshold) {
+    return { compacted: 0, notesAdded: 0, eventsLeft: events.length }
+  }
+  const count = Math.max(1, Math.min(events.length, Math.round(asNumber(options.count, EVENT_COMPACT_BATCH))))
+  const oldest = events.slice(0, count)
+  memory.events = events.slice(count)
+  if (!memory.notes || typeof memory.notes !== 'object') memory.notes = { user: [], us: [], self: [] }
+  for (const key of ['user', 'us', 'self']) {
+    if (!Array.isArray(memory.notes[key])) memory.notes[key] = []
+  }
+  const maxNotes = clamp(asNumber(options.maxNotes, NOTE_MAX), 5, NOTE_MAX)
+  let notesAdded = 0
+  for (const event of oldest) {
+    const candidate = noteFromEvent(event)
+    if (!candidate) continue
+    const made = makeNote(
+      candidate.category,
+      codepointSlice(candidate.text, NOTE_MAX_CHARS),
+      candidate.importance,
+      asNumber(event?.at, Date.now()),
+    )
+    if (!made) continue
+    const result = mergeNote(memory.notes[candidate.category], made, maxNotes)
+    if (!result.merged) notesAdded += 1
+  }
+  for (const key of ['user', 'us', 'self']) {
+    memory.notes[key] = asArray(memory.notes[key]).slice(-maxNotes)
+  }
+  return { compacted: oldest.length, notesAdded, eventsLeft: memory.events.length }
 }
 
 // ---------- 反思 ----------
@@ -444,22 +584,67 @@ export function parseReflectionOutput(out) {
 
 // ---------- 安装 ----------
 
-export function installMemory(ctx, { state, soul, log } = {}) {
+/**
+ * 安装记忆层。兼容两种调用：
+ *   installMemory(ctx, { state, soul, log })   // index.js 现有写法
+ *   installMemory({ ctx, state, soul, log })    // 新写法
+ */
+export function installMemory(ctxOrOptions, maybeOptions = {}) {
+  let ctx
+  let options
+  // 不能直接探 ctxOrOptions.ctx：旧调用第一个参数就是 Cordis ctx 代理，
+  // 读不存在的属性会触发 "cannot get property ctx without inject" 而让整插件装不上。
+  if (maybeOptions && typeof maybeOptions === 'object' && ('state' in maybeOptions || 'soul' in maybeOptions)) {
+    ctx = ctxOrOptions
+    options = maybeOptions || {}
+  } else if (ctxOrOptions && typeof ctxOrOptions === 'object' && ctxOrOptions !== null
+    && Object.prototype.hasOwnProperty.call(ctxOrOptions, 'ctx')) {
+    ctx = ctxOrOptions.ctx
+    options = ctxOrOptions
+  } else {
+    ctx = ctxOrOptions
+    options = maybeOptions || {}
+  }
+  const { state, soul, log } = options
   const logger = typeof log === 'function' ? log : (...args) => console.log('[dsh-aura]', ...args)
+  const disabledApi = {
+    snapshot: () => ({}),
+    renderContext: () => '',
+    recall: () => [],
+    pendingDue: () => [],
+    note: () => ({ ok: false }),
+    reflect: async () => ({ ok: false }),
+    compact: () => ({ compacted: 0, notesAdded: 0, eventsLeft: 0 }),
+    onUserMessage: () => {},
+    onAssistantMessage: () => {},
+    onTurnEnd: () => {},
+    clear: () => ({ ok: false }),
+    store: null,
+    memoryStore: null,
+  }
   if (!soul || typeof soul.get !== 'function') {
     logger('[soul] memory 未收到 soul 容器，本模块跳过安装')
-    return {
-      snapshot: () => ({}),
-      renderContext: () => '',
-      recall: () => [],
-      pendingDue: () => [],
-      note: () => ({ ok: false }),
-      reflect: async () => ({ ok: false }),
-      onUserMessage: () => {},
-      onAssistantMessage: () => {},
-      onTurnEnd: () => {},
-    }
+    return disabledApi
   }
+
+  const readSoul = () => soul.get()
+  const home = (() => {
+    try {
+      return typeof state?.stateDir === 'function' ? state.stateDir() : undefined
+    } catch {
+      return undefined
+    }
+  })()
+  let store
+  try {
+    store = createMemoryStore({ home, log: logger })
+  } catch (error) {
+    logger('[soul] memory.json 存储初始化失败:', error instanceof Error ? error.message : error)
+    return disabledApi
+  }
+
+  const readMemory = () => store.read()
+
   const localDefaults = {
     soulEnabled: true,
     emotionScope: 'qq',
@@ -481,7 +666,41 @@ export function installMemory(ctx, { state, soul, log } = {}) {
     }
     return { ...localDefaults, ...(raw && typeof raw === 'object' ? raw : {}) }
   }
-  const readSoul = () => soul.get()
+
+  // ⓪ 首次升级：soul.memory → memory.json（只发生一次，失败不阻塞启动）
+  try {
+    let legacy = asObject(readSoul()?.memory)
+    if (!hasMemoryContent(legacy) && typeof state?.readJson === 'function') {
+      try {
+        const rawSoul = state.readJson('soul.json', null)
+        if (hasMemoryContent(rawSoul?.memory)) legacy = rawSoul.memory
+      } catch {
+        /* ignore */
+      }
+    }
+    if (hasMemoryContent(legacy)) {
+      const migration = store.migrateFromSoul({
+        memory: legacy,
+        clearMemory: () => {
+          const current = readSoul()
+          if (current && typeof current === 'object') current.memory = {}
+          try {
+            soul.saveNow?.({ reason: 'memory-migrate', skipBackup: true, force: true })
+          } catch (error) {
+            logger('[soul] 迁移后清理 soul.json 失败:', error instanceof Error ? error.message : error)
+          }
+        },
+      })
+      if (migration && migration.migrated) {
+        logger(`[soul] 短期记忆已迁到 memory.json：${migration.events} 事件 / ${migration.notes} 笔记 / ${migration.topics} 话题`)
+      } else if (migration && migration.reason === 'exists') {
+        logger('[soul] memory.json 已存在，已清理 soul.json 里的旧 memory')
+      }
+    }
+  } catch (error) {
+    logger('[soul] 记忆迁移失败（继续使用 memory.json）:', error instanceof Error ? error.message : error)
+  }
+
   let pending = null
   let reflectBuffer = []
   let reflecting = false
@@ -499,7 +718,7 @@ export function installMemory(ctx, { state, soul, log } = {}) {
           const sessionId = String(assembly?.agent?.session?.id ?? assembly?.agent?.session?.header?.id ?? '')
           if (assembly && !assembly.agent && config.emotionScope !== 'all') return ''
           if (!isSoulSession(config, sessionId)) return ''
-          return renderMemoryContext(readSoul(), config)
+          return renderMemoryContext(store, config, { soul: readSoul() })
         } catch (error) {
           logger('[soul] memory context 渲染失败:', error instanceof Error ? error.message : error)
           return ''
@@ -510,40 +729,55 @@ export function installMemory(ctx, { state, soul, log } = {}) {
     logger('[soul] memory context 注册失败:', error instanceof Error ? error.message : error)
   }
 
-  // ② 事件流 / 话题索引写入
+  // ② 事件流 / 话题索引写入（只写 memory.json）
   function pushEvent(event) {
-    const current = readSoul()
-    const config = readConfig()
-    // 去重：同一事件（同 kind + 摘要 + 会话）在 1.5 秒内重复出现，多半是
-    // session/event 在 agent resume/replay 时被再次投递；不要重复记账。
-    const last = current.memory.events[current.memory.events.length - 1]
-    if (last
-      && last.kind === event.kind
-      && last.summary === event.summary
-      && String(last.sessionId ?? '') === String(event.sessionId ?? '')
-      && Math.abs(Number(last.at ?? 0) - Number(event.at ?? 0)) < 1500) {
-      return last
+    try {
+      const config = readConfig()
+      let stored = event
+      store.update((memory) => {
+        const events = asArray(memory.events)
+        // 去重：同一事件（同 kind + 摘要 + 会话）在 1.5 秒内重复出现，多半是
+        // session/event 在 agent resume/replay 时被再次投递；不要重复记账。
+        const last = events[events.length - 1]
+        if (last
+          && last.kind === event.kind
+          && last.summary === event.summary
+          && String(last.sessionId ?? '') === String(event.sessionId ?? '')
+          && Math.abs(Number(last.at ?? 0) - Number(event.at ?? 0)) < 1500) {
+          stored = last
+          return memory
+        }
+        events.push(event)
+        memory.events = trimEvents(events, clamp(asNumber(config.memoryMaxEvents, EVENT_MAX), 5, EVENT_MAX))
+        if (!memory.topics || typeof memory.topics !== 'object') memory.topics = {}
+        for (const topic of asArray(event.topics)) {
+          const key = String(topic).slice(0, 8)
+          if (!key) continue
+          const entry = asObject(memory.topics[key])
+          memory.topics[key] = { lastAt: event.at, count: asNumber(entry.count, 0) + 1 }
+        }
+        const keys = Object.keys(memory.topics)
+        if (keys.length > TOPIC_MAX) {
+          const keep = keys
+            .sort((a, b) => asNumber(memory.topics[b]?.lastAt, 0) - asNumber(memory.topics[a]?.lastAt, 0))
+            .slice(0, TOPIC_MAX)
+          memory.topics = Object.fromEntries(keep.map((key) => [key, memory.topics[key]]))
+        }
+        // ring 超阈值时顺手压实最旧 10 条，避免事件无限涨。
+        if (memory.events.length > EVENT_COMPACT_THRESHOLD) {
+          compactEvents(memory, { threshold: EVENT_COMPACT_THRESHOLD })
+        }
+        return memory
+      })
+      return stored
+    } catch (error) {
+      logger('[soul] memory 事件写入失败:', error instanceof Error ? error.message : error)
+      return event
     }
-    current.memory.events.push(event)
-    current.memory.events = trimEvents(current.memory.events, clamp(asNumber(config.memoryMaxEvents, EVENT_MAX), 5, 200))
-    for (const topic of asArray(event.topics)) {
-      const key = String(topic).slice(0, 8)
-      if (!key) continue
-      const entry = asObject(current.memory.topics[key])
-      current.memory.topics[key] = { lastAt: event.at, count: asNumber(entry.count, 0) + 1 }
-    }
-    const keys = Object.keys(current.memory.topics)
-    if (keys.length > TOPIC_MAX) {
-      const keep = keys
-        .sort((a, b) => asNumber(current.memory.topics[b]?.lastAt, 0) - asNumber(current.memory.topics[a]?.lastAt, 0))
-        .slice(0, TOPIC_MAX)
-      current.memory.topics = Object.fromEntries(keep.map((key) => [key, current.memory.topics[key]]))
-    }
-    soul.saveSoon()
-    return event
   }
 
   function makeEvent({ kind, summary, topics, salience, sessionId, at, source }) {
+    const current = readSoul()
     return {
       id: newId('evt'),
       at: asNumber(at, Date.now()),
@@ -552,8 +786,8 @@ export function installMemory(ctx, { state, soul, log } = {}) {
       salience: clamp(asNumber(salience, 0.3), 0, 1),
       topics: asArray(topics).map((topic) => String(topic).slice(0, 8)).filter(Boolean).slice(0, 4),
       mood: {
-        label: readSoul()?.emotion?.transient?.label ?? '',
-        valence: Number(readSoul()?.emotion?.transient?.valence) || 0,
+        label: current?.emotion?.transient?.label ?? '',
+        valence: Number(current?.emotion?.transient?.valence) || 0,
       },
       source: source || 'rule',
       sessionId: String(sessionId ?? ''),
@@ -610,7 +844,7 @@ export function installMemory(ctx, { state, soul, log } = {}) {
       pending = null
       const now = asNumber(payload.at, turn.at) || Date.now()
       const current = readSoul()
-      const intensity = Number(current.emotion?.transient?.intensity) || 0
+      const intensity = Number(current?.emotion?.transient?.intensity) || 0
       const topics = topicKeys(`${turn.userText}\n${turn.assistantText}`)
       pushEvent(makeEvent({
         kind: 'chat',
@@ -628,6 +862,15 @@ export function installMemory(ctx, { state, soul, log } = {}) {
       const immediate = SELF_DISCLOSURE_RE.test(turn.userText) || CONFLICT_RE.test(turn.userText) || MAKE_UP_RE.test(turn.userText)
       if (reflectBuffer.length >= every || immediate) {
         void reflect({ reason: immediate ? 'immediate' : 'every-n' })
+      }
+      // turnEnd 后再尝试一次压实（pushEvent 里已按阈值处理，这里幂等）。
+      try {
+        store.update((memory) => {
+          compactEvents(memory, { threshold: EVENT_COMPACT_THRESHOLD })
+          return memory
+        })
+      } catch (error) {
+        logger('[soul] 记忆压实失败:', error instanceof Error ? error.message : error)
       }
     } catch (error) {
       logger('[soul] memory onTurnEnd 失败:', error instanceof Error ? error.message : error)
@@ -647,50 +890,72 @@ export function installMemory(ctx, { state, soul, log } = {}) {
         at: asNumber(payload.at, Date.now()),
         source: 'relation',
       }))
-      soul.saveSoon()
     } catch (error) {
       logger('[soul] memory onStage 失败:', error instanceof Error ? error.message : error)
     }
   }
 
-  // ⑤ 反思应用（规则或 LLM）
+  // ⑤ 反思应用（规则或 LLM）：notes/topics/reflection → memory.json；关系/称呼/表达 → soul
   function applyReflection(result, source) {
     if (!result) return { ok: false }
-    const current = readSoul()
     const config = readConfig()
     const now = Date.now()
-    const maxNotes = clamp(asNumber(config.memoryMaxNotes, NOTE_MAX), 5, 50)
-    for (const note of asArray(result.newNotes)) {
-      if (!note || !note.text) continue
-      const list = current.memory.notes[note.category] ?? current.memory.notes.user
-      mergeNote(list, note, maxNotes)
-      if (note.dueAt) {
-        current.memory.pendingDue.push({ id: newId('due'), noteId: note.id, at: note.dueAt, text: note.text })
-        current.memory.pendingDue = current.memory.pendingDue.slice(-20)
+    const maxNotes = clamp(asNumber(config.memoryMaxNotes, NOTE_MAX), 5, NOTE_MAX)
+    let notesApplied = 0
+    try {
+      store.update((memory) => {
+        if (!memory.notes || typeof memory.notes !== 'object') memory.notes = { user: [], us: [], self: [] }
+        for (const key of ['user', 'us', 'self']) {
+          if (!Array.isArray(memory.notes[key])) memory.notes[key] = []
+        }
+        if (!memory.reflection || typeof memory.reflection !== 'object') memory.reflection = {}
+        for (const note of asArray(result.newNotes)) {
+          if (!note || !note.text) continue
+          const category = ['user', 'us', 'self'].includes(note.category) ? note.category : 'user'
+          mergeNote(memory.notes[category], note, maxNotes)
+          notesApplied += 1
+          if (note.dueAt) {
+            const pendingDue = asArray(memory.reflection.pendingDue)
+            pendingDue.push({ id: newId('due'), noteId: note.id, at: note.dueAt, text: note.text })
+            memory.reflection.pendingDue = pendingDue.slice(-20)
+          }
+        }
+        if (!memory.topics || typeof memory.topics !== 'object') memory.topics = {}
+        for (const topic of asArray(result.topics)) {
+          const key = String(topic).slice(0, 8)
+          if (!key) continue
+          const entry = asObject(memory.topics[key])
+          memory.topics[key] = { lastAt: now, count: asNumber(entry.count, 0) + 1 }
+        }
+        if (result.userState) memory.reflection.userState = { label: result.userState, at: now }
+        memory.reflection.lastReflectAt = now
+        memory.reflection.lastSource = String(source || 'rule').slice(0, 12)
+        return memory
+      })
+    } catch (error) {
+      logger('[soul] 反思写入 memory.json 失败:', error instanceof Error ? error.message : error)
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+
+    const current = readSoul()
+    if (current && typeof current === 'object') {
+      if (result.relationDelta) {
+        const change = soul.addRelationScore(result.relationDelta, now)
+        if (change.changed) logger(`[soul] 反思推动关系 ${change.from} → ${change.to}`)
       }
-    }
-    for (const topic of asArray(result.topics)) {
-      const key = String(topic).slice(0, 8)
-      if (!key) continue
-      const entry = asObject(current.memory.topics[key])
-      current.memory.topics[key] = { lastAt: now, count: asNumber(entry.count, 0) + 1 }
-    }
-    if (result.relationDelta) {
-      const change = soul.addRelationScore(result.relationDelta, now)
-      if (change.changed) logger(`[soul] 反思推动关系 ${change.from} → ${change.to}`)
-    }
-    if (result.addressPreferred) current.identity.address.userPreferred = String(result.addressPreferred).slice(0, 20)
-    if (result.userState) current.memory.userState = { label: result.userState, at: now }
-    if (result.closer) {
-      current.speak.suppressUntil = Math.max(asNumber(current.speak.suppressUntil, 0), now + 12 * 3_600_000)
+      if (result.addressPreferred && current.identity?.address) {
+        current.identity.address.userPreferred = String(result.addressPreferred).slice(0, 20)
+      }
+      if (result.closer && current.speak) {
+        current.speak.suppressUntil = Math.max(asNumber(current.speak.suppressUntil, 0), now + 12 * 3_600_000)
+      }
+      if (current.meta && typeof current.meta === 'object') current.meta.lastConsolidateAt = now
     }
     if (result.milestone) {
       pushEvent(makeEvent({ kind: 'milestone', summary: result.milestone, topics: result.topics, salience: 0.9, at: now, source }))
     }
-    current.memory.lastReflectAt = now
-    current.meta.lastConsolidateAt = now
     soul.saveSoon()
-    return { ok: true, notes: asArray(result.newNotes).length, relationDelta: result.relationDelta }
+    return { ok: true, notes: notesApplied, relationDelta: result.relationDelta }
   }
 
   function resolveReflectionModel(config) {
@@ -719,14 +984,15 @@ export function installMemory(ctx, { state, soul, log } = {}) {
     const model = resolveReflectionModel(config)
     if (!model) return null
     const current = readSoul()
+    const memory = readMemory()
     const existingNotes = []
     for (const key of ['user', 'us', 'self']) {
-      for (const note of asArray(current.memory.notes[key])) existingNotes.push(note)
+      for (const note of asArray(memory.notes?.[key])) existingNotes.push(note)
     }
     const prompt = buildReflectionPrompt({
       turns,
-      emotion: current.emotion,
-      relation: current.relation,
+      emotion: current?.emotion,
+      relation: current?.relation,
       existingNotes: existingNotes.slice(-8),
     })
     let out = ''
@@ -769,9 +1035,16 @@ export function installMemory(ctx, { state, soul, log } = {}) {
       const applied = applyReflection(result, source)
       if (result.summary) {
         // 反思摘要并进最近一条事件（避免重复事件膨胀）
-        const current = readSoul()
-        const lastEvent = current.memory.events[current.memory.events.length - 1]
-        if (lastEvent && !lastEvent.summary) lastEvent.summary = result.summary
+        try {
+          store.update((memory) => {
+            const events = asArray(memory.events)
+            const lastEvent = events[events.length - 1]
+            if (lastEvent && !lastEvent.summary) lastEvent.summary = result.summary
+            return memory
+          })
+        } catch {
+          /* ignore */
+        }
       }
       reflectBuffer = []
       soul.saveSoon()
@@ -805,6 +1078,11 @@ export function installMemory(ctx, { state, soul, log } = {}) {
             /* noop */
           }
         }
+        try {
+          store.dispose()
+        } catch {
+          /* noop */
+        }
       }, 'aura-memory: soul listeners')
     } catch {
       /* ignore */
@@ -816,20 +1094,28 @@ export function installMemory(ctx, { state, soul, log } = {}) {
     try {
       const clean = String(text ?? '').trim()
       if (!clean) return { ok: false, reason: '文本为空' }
-      const current = readSoul()
       const config = readConfig()
-      const maxNotes = clamp(asNumber(config.memoryMaxNotes, NOTE_MAX), 5, 50)
+      const maxNotes = clamp(asNumber(config.memoryMaxNotes, NOTE_MAX), 5, NOTE_MAX)
       const key = ['user', 'us', 'self'].includes(category) ? category : 'user'
       const made = makeNote(key, clean, clamp(asNumber(importance, 0.6), 0, 1), Date.now(), dueAt)
       if (!made) return { ok: false, reason: '文本为空' }
-      const merged = mergeNote(current.memory.notes[key], made, maxNotes)
-      if (made.dueAt) {
-        current.memory.pendingDue.push({ id: newId('due'), noteId: made.id, at: made.dueAt, text: made.text })
-        current.memory.pendingDue = current.memory.pendingDue.slice(-20)
-      }
-      current.memory.lastReflectAt = Date.now()
-      soul.saveSoon()
-      return { ok: true, merged: merged.merged, note: merged.note ?? made, count: current.memory.notes[key].length }
+      let merged = { merged: false, note: made }
+      let count = 0
+      store.update((memory) => {
+        if (!memory.notes || typeof memory.notes !== 'object') memory.notes = { user: [], us: [], self: [] }
+        if (!Array.isArray(memory.notes[key])) memory.notes[key] = []
+        if (!memory.reflection || typeof memory.reflection !== 'object') memory.reflection = {}
+        merged = mergeNote(memory.notes[key], made, maxNotes)
+        if (made.dueAt) {
+          const pendingDue = asArray(memory.reflection.pendingDue)
+          pendingDue.push({ id: newId('due'), noteId: made.id, at: made.dueAt, text: made.text })
+          memory.reflection.pendingDue = pendingDue.slice(-20)
+        }
+        memory.reflection.lastReflectAt = Date.now()
+        count = memory.notes[key].length
+        return memory
+      })
+      return { ok: true, merged: merged.merged, note: merged.note ?? made, count }
     } catch (error) {
       logger('[soul] soul_note 失败:', error instanceof Error ? error.message : error)
       return { ok: false, reason: error instanceof Error ? error.message : String(error) }
@@ -840,8 +1126,9 @@ export function installMemory(ctx, { state, soul, log } = {}) {
     try {
       const now = Date.now()
       const limit = clamp(asNumber(options.limit, 5), 1, 8)
-      const notes = recallNotes(readSoul(), query, { now, category: options.category, limit })
-      const events = recallEvents(readSoul(), query, limit, now)
+      const memory = readMemory()
+      const notes = recallNotes(memory, query, { now, category: options.category, limit })
+      const events = recallEvents(memory, query, limit, now)
       const items = [
         ...notes.map((item) => ({ kind: 'note', category: item.category, text: item.text, at: item.updatedAt })),
         ...events.map((item) => ({ kind: 'event', category: item.kind, text: item.summary, at: item.at })),
@@ -858,10 +1145,10 @@ export function installMemory(ctx, { state, soul, log } = {}) {
     ctx.tools?.register?.(defineTool({
       name: 'soul_note',
       description: '把值得长期记住的东西写进你的记忆。category：user=关于对方的事实/偏好/边界，'
-        + 'us=你们之间的约定和共同经历，self=你对自己的认识。text ≤120 字；重复的会自动合并。',
+        + 'us=你们之间的约定和共同经历，self=你对自己的认识。text ≤80 字；重复的会自动合并。',
       parameters: {
         category: { type: 'string', description: 'user | us | self', required: true },
-        text: { type: 'string', description: '≤120 字，一句话', required: true },
+        text: { type: 'string', description: '≤80 字，一句话', required: true },
         importance: { type: 'number', description: '0..1，越重要越不容易被淘汰' },
         dueAt: { type: 'string', description: '可选：到时要问的约定，填 ISO 时间（如"面试是明天"）' },
       },
@@ -907,16 +1194,17 @@ export function installMemory(ctx, { state, soul, log } = {}) {
   // ⑧ API
   function snapshot() {
     try {
-      const current = readSoul()
-      const notes = current.memory.notes
+      const memory = readMemory()
+      const stats = store.stats()
+      const notes = memory.notes
       const counts = { user: asArray(notes.user).length, us: asArray(notes.us).length, self: asArray(notes.self).length }
       return {
-        eventCount: asArray(current.memory.events).length,
+        eventCount: asArray(memory.events).length,
         notes: counts,
-        topics: Object.keys(asObject(current.memory.topics)).length,
-        pendingDue: asArray(current.memory.pendingDue).length,
-        lastReflectAt: current.memory.lastReflectAt || 0,
-        recent: asArray(current.memory.events).slice(-5).map((event) => ({
+        topics: Object.keys(asObject(memory.topics)).length,
+        pendingDue: asArray(memory.reflection?.pendingDue).length,
+        lastReflectAt: memory.reflection?.lastReflectAt || 0,
+        recent: asArray(memory.events).slice(-5).map((event) => ({
           at: event.at,
           kind: event.kind,
           summary: event.summary,
@@ -927,8 +1215,9 @@ export function installMemory(ctx, { state, soul, log } = {}) {
           ...asArray(notes.us).slice(-3),
           ...asArray(notes.self).slice(-3),
         ].map((item) => ({ id: item.id, category: item.category, text: item.text, importance: item.importance, updatedAt: item.updatedAt })),
-        userState: current.memory.userState ?? null,
+        userState: memory.reflection?.userState ?? null,
         reflectionLlm: readConfig().memoryReflectionLlm === true,
+        store: stats,
       }
     } catch (error) {
       logger('[soul] memory snapshot 失败:', error instanceof Error ? error.message : error)
@@ -938,17 +1227,9 @@ export function installMemory(ctx, { state, soul, log } = {}) {
 
   function clear() {
     try {
-      const current = readSoul()
-      current.memory.events = []
-      current.memory.notes = { user: [], us: [], self: [] }
-      current.memory.topics = {}
-      current.memory.pendingDue = []
-      current.memory.diary = []
-      current.memory.lastReflectAt = 0
-      current.memory.userState = null
+      store.write(emptyMemory())
       reflectBuffer = []
-      soul.saveSoon()
-      logger('[soul] 记忆已清空（事件/笔记/话题/待办）')
+      logger('[soul] 记忆已清空（memory.json 的事件/笔记/话题/待办）')
       return { ok: true }
     } catch (error) {
       logger('[soul] 清空记忆失败:', error instanceof Error ? error.message : error)
@@ -956,12 +1237,25 @@ export function installMemory(ctx, { state, soul, log } = {}) {
     }
   }
 
+  function compact(force = true) {
+    try {
+      let result = { compacted: 0, notesAdded: 0, eventsLeft: 0 }
+      store.update((memory) => {
+        result = compactEvents(memory, { force: force === true, threshold: EVENT_COMPACT_THRESHOLD })
+        return memory
+      })
+      return result
+    } catch (error) {
+      logger('[soul] 记忆压实失败:', error instanceof Error ? error.message : error)
+      return { compacted: 0, notesAdded: 0, eventsLeft: 0 }
+    }
+  }
+
   function pendingDue(now = Date.now()) {
     try {
-      const list = asArray(readSoul().memory.pendingDue)
+      return asArray(readMemory().reflection?.pendingDue)
         .filter((item) => item && asNumber(item.at, 0) > 0 && asNumber(item.at, 0) <= now)
         .sort((a, b) => asNumber(a.at, 0) - asNumber(b.at, 0))
-      return list
     } catch {
       return []
     }
@@ -970,21 +1264,30 @@ export function installMemory(ctx, { state, soul, log } = {}) {
   function consumeDue(now = Date.now()) {
     const due = pendingDue(now)
     try {
-      const current = readSoul()
       const dueIds = new Set(due.map((item) => item.id))
-      current.memory.pendingDue = asArray(current.memory.pendingDue).filter((item) => !dueIds.has(item.id))
-      soul.saveSoon()
+      store.update((memory) => {
+        if (!memory.reflection || typeof memory.reflection !== 'object') memory.reflection = {}
+        memory.reflection.pendingDue = asArray(memory.reflection.pendingDue).filter((item) => !dueIds.has(item.id))
+        return memory
+      })
     } catch {
       /* ignore */
     }
     return due
   }
 
-  return {
+  const api = {
+    file: store.file,
+    store,
+    memoryStore: store,
     snapshot,
-    renderContext: (now) => {
+    renderContext: (now, options = {}) => {
       try {
-        return renderMemoryContext(readSoul(), readConfig(), { now: asNumber(now, Date.now()) })
+        return renderMemoryContext(store, readConfig(), {
+          now: asNumber(now, Date.now()),
+          soul: readSoul(),
+          ...(options && typeof options === 'object' ? options : {}),
+        })
       } catch {
         return ''
       }
@@ -992,6 +1295,7 @@ export function installMemory(ctx, { state, soul, log } = {}) {
     recall,
     note,
     reflect,
+    compact,
     pendingDue,
     consumeDue,
     clear,
@@ -999,6 +1303,18 @@ export function installMemory(ctx, { state, soul, log } = {}) {
     onUserMessage,
     onAssistantMessage,
     onTurnEnd,
-    constants: { TOPIC_VOCAB, SUMMARY_MAX, MEMORY_CONTEXT_BUDGET },
+    constants: {
+      TOPIC_VOCAB,
+      SUMMARY_MAX,
+      MEMORY_CONTEXT_BUDGET,
+      MEMORY_CONTEXT_BUDGET_MAX,
+      NOTE_MAX,
+      NOTE_MAX_CHARS,
+      EVENT_MAX,
+      EVENT_COMPACT_THRESHOLD,
+      EVENT_COMPACT_BATCH,
+      MEMORY_FILE,
+    },
   }
+  return api
 }

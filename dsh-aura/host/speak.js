@@ -652,7 +652,12 @@ export function installSpeak(ctx, deps = {}) {
       try {
         if (typeof soul.get === 'function') {
           const candidate = soul.get()
-          if (candidate && typeof candidate === 'object') return candidate
+          if (candidate && typeof candidate === 'object') {
+            // 短期记忆已搬到 memory.json：把 store 内容并进只读视图，话题去重/翻旧账继续可用
+            let memoryData = null
+            try { memoryData = memory?.store?.read?.() } catch { memoryData = null }
+            return memoryData ? { ...candidate, memory: memoryData } : candidate
+          }
         }
       } catch (error) {
         logOnce('soul-get', '[speak] soul.get() 失败:', errorMessage(error))

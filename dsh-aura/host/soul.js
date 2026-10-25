@@ -114,14 +114,7 @@ export function defaultsSoul(now = Date.now()) {
       lastRecheckTurn: -999,
       source: 'rule',
     },
-    memory: {
-      events: [],
-      notes: { user: [], us: [], self: [] },
-      topics: {},
-      diary: [],
-      pendingDue: [],
-      lastReflectAt: 0,
-    },
+    memory: emptyMemoryState(),
     growth: [],
     speak: {
       lastAt: 0,
@@ -245,59 +238,9 @@ export function normalizeSoul(raw, now = Date.now()) {
   emo.source = asString(emo.source, 'rule').slice(0, 12) || 'rule'
   s.emotion = emo
 
-  // memory
-  const mem = { ...d.memory, ...asObject(raw.memory) }
-  mem.events = asArray(mem.events)
-    .filter((e) => e && typeof e === 'object' && typeof e.summary === 'string' && e.summary.trim())
-    .map((e) => ({
-      id: asId(e.id),
-      at: asNumber(e.at, now),
-      kind: ['chat', 'proactive', 'milestone', 'diary', 'note'].includes(e.kind) ? e.kind : 'chat',
-      summary: codepointSlice(e.summary.trim(), 80),
-      salience: clamp(asNumber(e.salience, 0.3), 0, 1),
-      topics: asArray(e.topics).map((x) => String(x).slice(0, 8)).filter(Boolean).slice(0, 4),
-      mood: { label: asString(e.mood?.label, '').slice(0, 4), valence: clamp(asNumber(e.mood?.valence, 0), -1, 1) },
-      source: asString(e.source, 'rule').slice(0, 12),
-      sessionId: asString(e.sessionId, ''),
-    }))
-    .slice(-40)
-  const notes = {}
-  for (const key of ['user', 'us', 'self']) {
-    notes[key] = asArray(mem.notes?.[key])
-      .filter((n) => n && typeof n === 'object' && typeof n.text === 'string' && n.text.trim())
-      .map((n) => ({
-        id: asId(n.id),
-        category: key,
-        text: codepointSlice(n.text.trim(), 120),
-        importance: clamp(asNumber(n.importance, 0.5), 0, 1),
-        createdAt: asNumber(n.createdAt, now),
-        updatedAt: asNumber(n.updatedAt, now),
-        hits: Math.max(0, Math.round(asNumber(n.hits, 0))),
-        dueAt: asNumber(n.dueAt, 0) || 0,
-      }))
-      .slice(-20)
-  }
-  mem.notes = notes
-  const topics = {}
-  let topicCount = 0
-  for (const [key, value] of Object.entries(asObject(mem.topics))) {
-    const k = String(key).trim().slice(0, 12)
-    if (!k || topicCount >= 60) continue
-    const lastAt = asNumber(value?.lastAt, value, 0) || 0
-    topics[k] = { lastAt, count: Math.max(1, Math.round(asNumber(value?.count, 1))) }
-    topicCount += 1
-  }
-  mem.topics = topics
-  mem.diary = asArray(mem.diary)
-    .filter((x) => x && typeof x === 'object' && typeof x.text === 'string')
-    .map((x) => ({ day: asString(x.day, '').slice(0, 10), at: asNumber(x.at, now), text: codepointSlice(x.text, 320) }))
-    .slice(-60)
-  mem.pendingDue = asArray(mem.pendingDue)
-    .filter((x) => x && typeof x === 'object' && asNumber(x.at, 0) > 0)
-    .map((x) => ({ id: asId(x.id), noteId: asString(x.noteId, ''), at: asNumber(x.at, 0), text: codepointSlice(asString(x.text, ''), 120) }))
-    .slice(-20)
-  mem.lastReflectAt = asNumber(mem.lastReflectAt, 0)
-  s.memory = mem
+  // memory 已拆到独立 memory.json（host/memory-store.js）：soul 不再归一化/保存短期记忆。
+  // 旧文件里的 memory 由 installSoul 捕获一次，交给 installMemory 迁移。
+  s.memory = emptyMemoryState()
   s.growth = normalizeGrowth(raw.growth, now)
 
   // speak（其他模块会往里加字段：未知字段保留）
@@ -318,6 +261,21 @@ export function normalizeSoul(raw, now = Date.now()) {
   s.meta = { ...d.meta, ...asObject(raw.meta) }
   s.meta.updatedAt = asNumber(s.meta.updatedAt, now)
   return s
+}
+
+/** soul 内不再持有短期记忆；这里只留空壳，兼容面板/旧调用方。 */
+export function emptyMemoryState() {
+  return { events: [], notes: { user: [], us: [], self: [] }, topics: {}, pendingDue: [], lastReflectAt: 0 }
+}
+
+/** 旧 soul.memory 是否有值得迁移到 memory.json 的内容。 */
+function hasMemoryData(memory) {
+  if (!memory || typeof memory !== 'object') return false
+  if (asArray(memory.events).length > 0) return true
+  for (const key of ['user', 'us', 'self']) {
+    if (asArray(memory.notes?.[key]).length > 0) return true
+  }
+  return Object.keys(asObject(memory.topics)).length > 0
 }
 
 /** 旧 emotion.json（0~10 分制）→ soul v2。 */
@@ -637,20 +595,9 @@ function trimForDisk(soul) {
     }
   })()
   copy.v = SOUL_VERSION
-  copy.memory.events = asArray(copy.memory.events).slice(-40)
-  for (const key of ['user', 'us', 'self']) {
-    copy.memory.notes[key] = asArray(copy.memory.notes[key]).slice(-20)
-  }
-  copy.memory.diary = asArray(copy.memory.diary).slice(-60)
-  copy.memory.pendingDue = asArray(copy.memory.pendingDue).slice(-20)
+  // 短期记忆在独立 memory.json；soul.json 永不写 memory。
+  delete copy.memory
   copy.growth = trimGrowth(copy.growth, GROWTH_LIMIT)
-  const topicKeys = Object.keys(asObject(copy.memory.topics))
-  if (topicKeys.length > 60) {
-    const keep = topicKeys
-      .sort((a, b) => asNumber(copy.memory.topics[b]?.lastAt, 0) - asNumber(copy.memory.topics[a]?.lastAt, 0))
-      .slice(0, 60)
-    copy.memory.topics = Object.fromEntries(keep.map((k) => [k, copy.memory.topics[k]]))
-  }
   copy.speak.log = asArray(copy.speak.log).slice(-60)
   copy.speak.recentTexts = asArray(copy.speak.recentTexts).slice(-10)
   copy.relation.milestones = asArray(copy.relation.milestones).slice(-20)
@@ -809,6 +756,8 @@ export function installSoul(ctx, { state, log } = {}) {
   let loaded = readJson(FILE, null)
   let soul
   let migrated = false
+  // 旧 soul.memory 只在这里保留一次，供 installMemory 迁移；落盘时会被 trimForDisk 删掉。
+  let legacyMemory = loaded && typeof loaded === 'object' ? asObject(loaded.memory) : null
   if (loaded && typeof loaded === 'object') {
     if (loaded.v === SOUL_VERSION) {
       soul = normalizeSoul(loaded)
@@ -823,6 +772,7 @@ export function installSoul(ctx, { state, log } = {}) {
   } else {
     const legacy = readJson('emotion.json', null)
     soul = migrateLegacyEmotion(legacy)
+    legacyMemory = asObject(soul.memory)
     migrated = true
     const oldProactive = readJson('proactive.json', null)
     if (oldProactive && typeof oldProactive === 'object') {
@@ -832,13 +782,17 @@ export function installSoul(ctx, { state, log } = {}) {
     logger(`[soul] 首次启动：${legacy ? '已从 emotion.json 迁移' : '使用默认灵魂状态'}`)
   }
 
+  // 旧 soul.memory 先留在内存里交给 installMemory 迁移；没有内容时保持空壳。
+  soul.memory = hasMemoryData(legacyMemory) ? legacyMemory : emptyMemoryState()
+  if (hasMemoryData(legacyMemory)) logger('[soul] 检测到旧 soul.memory，等待迁移到 memory.json')
+
   // ② 一次性日结 + 启动日志
   try {
     settleRelation(soul, readConfig())
   } catch (error) {
     logger('[soul] 启动结算失败:', error instanceof Error ? error.message : error)
   }
-  logger(`[soul] restored: ${soul.relation.stage} score=${soul.relation.score.toFixed(1)} turns=${soul.relation.turns} events=${soul.memory.events.length}`)
+  logger(`[soul] restored: ${soul.relation.stage} score=${soul.relation.score.toFixed(1)} turns=${soul.relation.turns} legacyMemory=${hasMemoryData(legacyMemory) ? asArray(legacyMemory.events).length : 0}`)
 
   // ③ 落盘（防抖 + 卸载时 flush）
   // 写 soul.json 之前先尽力做一次版本快照：失败只 warn，绝不阻塞保存。
@@ -1338,18 +1292,17 @@ export function installSoul(ctx, { state, log } = {}) {
         return { ok: true, scope }
       }
       const d = defaultsSoul()
-      // 保留：认识时间、身份自述、关系、记忆（"重置灵魂"只清情绪与主动状态）
+      // 保留：认识时间、身份自述、关系（"重置灵魂"只清情绪与主动状态；记忆在 memory.json 单独保留）
       const keep = {
         v: SOUL_VERSION,
         identity: soul.identity,
         relation: soul.relation,
-        memory: soul.memory,
         growth: soul.growth,
         meta: { ...d.meta, lastSettleDay: soul.meta?.lastSettleDay || '' },
       }
       Object.assign(soul, d, keep)
       saveNow({ reason: 'reset', force: true })
-      logger('[soul] 已重置情绪与主动状态（保留关系与记忆）')
+      logger('[soul] 已重置情绪与主动状态（保留关系；记忆在 memory.json 单独保留）')
       return { ok: true, scope }
     } catch (error) {
       logger('[soul] reset 失败:', error instanceof Error ? error.message : error)

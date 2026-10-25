@@ -125,7 +125,7 @@ export function apply(ctx, config = {}) {
   const memory = installMemory(ctx, { state, soul, log })
   const speak = installSpeak(ctx, { state, soul, emotion, memory, bridge, log })
   // 日记：独立 diary.json，不是记忆；自动注册 soul_diary 工具与 /dsh-aura/diary-api
-  const diary = createDiary({ home: state.stateDir(), getSoul: () => soul.get(), getConfig: () => state.readConfig(), log, ctx })
+  const diary = createDiary({ home: state.stateDir(), getSoul: () => soul.get(), getMemoryStore: () => memory.store, getConfig: () => state.readConfig(), log, ctx })
   safe(() => bridge.setTextFilter((text, options) => speak.checkProactiveText?.(text, options)), 'bridge.setTextFilter')
 
   let starting = null

@@ -105,7 +105,7 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
     if (!snap) return undefined
     const emotionSnap = safeCall(() => emotion?.snapshot?.(), undefined) || snap.emotion
     const speakSnap = safeCall(() => speak?.snapshot?.(), undefined) || snap.speak
-    const rawMemory = safeCall(() => soul.get?.()?.memory, undefined) || {}
+    const rawMemory = safeCall(() => memory?.store?.read?.(), undefined) || safeCall(() => soul.get?.()?.memory, undefined) || {}
     const memorySnap = safeCall(() => memory?.snapshot?.(), undefined) || {}
     const notes = rawMemory.notes && typeof rawMemory.notes === 'object' ? rawMemory.notes : {}
     const pickNotes = (list) => (Array.isArray(list) ? list.slice(-10) : [])

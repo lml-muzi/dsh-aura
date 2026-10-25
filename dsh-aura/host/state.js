@@ -133,7 +133,7 @@ const INT_RANGES = {
   emotionDecayArousalMinutes: [5, 1440],
   emotionDecayEnergyHours: [1, 72],
   emotionRecheckEvery: [0, 100],
-  memoryMaxEvents: [5, 200],
+  memoryMaxEvents: [5, 40],
   memoryMaxNotes: [5, 200],
   memoryReflectionEvery: [1, 50],
   memoryRecallLimit: [1, 10],
