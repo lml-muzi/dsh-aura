@@ -1110,8 +1110,19 @@ export function initLife(options = {}) {
     logger('[life] soul_life 工具注册失败:', errorText(error))
   }
 
-  // HTTP 路由
+  // HTTP 路由（面板「生活」页）：GET ?action=… / POST {action:…}，prefix 前缀注册。
+  // 响应统一带 {ok, life, history}；旧的路径式 /status /list /plan 仍然兼容。
   function webRegistration() {
+    const snapshotOf = () => lifeSnapshot(life, nowFn())
+    const KNOWN_ACTIONS = new Set(['status', 'list', 'plan', 'wake', 'cancel'])
+    const LEGACY_GET = { '/': 'status', '/status': 'status', '/list': 'list' }
+    const LEGACY_POST = { '/plan': 'plan', '/wake': 'wake', '/cancel': 'cancel' }
+
+    /** 成功响应：life 是完整快照，history 是最近 5 条；顶层铺开字段兼容旧面板。 */
+    const replyLife = (res, snapshot) => {
+      json(res, 200, { ok: true, life: snapshot, history: snapshot.history, ...snapshot })
+    }
+
     return {
       kind: 'prefix',
       path: LIFE_API_PREFIX,
@@ -1120,34 +1131,74 @@ export function initLife(options = {}) {
           json(res, 403, { ok: false, error: 'forbidden' })
           return
         }
+        const method = String(req.method || 'GET').toUpperCase()
         const url = new URL(String(req.url || '/'), 'http://localhost')
         const route = url.pathname.replace(/^\/dsh-aura\/life-api/, '') || '/'
         try {
-          if (req.method === 'GET' && (route === '' || route === '/' || route === '/status')) {
-            json(res, 200, status())
+          if (method === 'GET') {
+            const action = url.searchParams.get('action') || LEGACY_GET[route] || ''
+            if (!action) {
+              json(res, 400, { ok: false, error: '未知 action（status / list / plan / wake / cancel）' })
+              return
+            }
+            if (!KNOWN_ACTIONS.has(action)) {
+              json(res, 400, { ok: false, error: `未知 action：${action}` })
+              return
+            }
+            if (action === 'status') {
+              replyLife(res, snapshotOf())
+              return
+            }
+            if (action === 'list') {
+              const limitText = url.searchParams.get('limit')
+              let limit = 20
+              if (limitText !== null && limitText.trim() !== '') {
+                const parsed = Number(limitText)
+                if (!Number.isInteger(parsed) || parsed < 1 || parsed > HISTORY_LIMIT) {
+                  json(res, 400, { ok: false, error: `limit 需要 1~${HISTORY_LIMIT} 的整数` })
+                  return
+                }
+                limit = parsed
+              }
+              json(res, 200, { ok: true, history: list(limit) })
+              return
+            }
+            json(res, 405, { ok: false, error: 'method not allowed', allow: 'POST' })
             return
           }
-          if (req.method === 'GET' && route === '/list') {
-            json(res, 200, { ok: true, history: list(20) })
-            return
-          }
-          if (req.method === 'POST' && route === '/plan') {
+          if (method === 'POST') {
             const body = await readBody(req)
-            const result = plan(body)
-            json(res, result.ok ? 200 : 400, result.ok ? { ok: true, ...lifeSnapshot(life, nowFn()) } : { ok: false, error: result.reason })
+            const action = str(body.action).trim() || LEGACY_POST[route] || ''
+            if (!action) {
+              json(res, 400, { ok: false, error: '未知 action（plan / wake / cancel）' })
+              return
+            }
+            if (!KNOWN_ACTIONS.has(action)) {
+              json(res, 400, { ok: false, error: `未知 action：${action}` })
+              return
+            }
+            if (action === 'status' || action === 'list') {
+              json(res, 405, { ok: false, error: 'method not allowed', allow: 'GET' })
+              return
+            }
+            if (action === 'plan') {
+              const result = plan(body)
+              if (!result.ok) {
+                json(res, 400, { ok: false, error: result.reason || '参数不合法' })
+                return
+              }
+              replyLife(res, snapshotOf())
+              return
+            }
+            const result = action === 'wake' ? wake({ source: 'user' }) : cancel()
+            if (!result.ok) {
+              json(res, 400, { ok: false, error: result.reason || '操作失败' })
+              return
+            }
+            replyLife(res, snapshotOf())
             return
           }
-          if (req.method === 'POST' && route === '/wake') {
-            const result = wake({ source: 'user' })
-            json(res, result.ok ? 200 : 400, result.ok ? { ok: true, ...lifeSnapshot(life, nowFn()) } : { ok: false, error: result.reason })
-            return
-          }
-          if (req.method === 'POST' && route === '/cancel') {
-            const result = cancel()
-            json(res, result.ok ? 200 : 400, result.ok ? { ok: true, ...lifeSnapshot(life, nowFn()) } : { ok: false, error: result.reason })
-            return
-          }
-          json(res, 404, { ok: false, error: 'not found' })
+          json(res, 405, { ok: false, error: 'method not allowed', allow: 'GET, POST' })
         } catch (error) {
           const message = errorText(error)
           json(res, message === 'invalid json' || message === 'body too large' ? 400 : 500, { ok: false, error: message })

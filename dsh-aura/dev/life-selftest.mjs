@@ -881,6 +881,85 @@ await test('生活层 wake 事件 → speak.notifyWake（dry-run 走完一次 wa
   life.dispose()
 })
 
+await test('initLife HTTP：?action= 路由表 / 参数校验 / 405 / fence', async () => {
+  const dir = join(root, 'life-http')
+  const timers = fakeTimers()
+  let now = T0
+  const { ctx, routes } = makeLifeCtx()
+  const life = initLife({ ctx, state, log: () => {}, dir, now: () => now, random: () => 0, timers })
+  const route = routes[0]
+  const call = async (method, url, body, headers = {}) => {
+    const stream = body === undefined
+      ? Readable.from([])
+      : Readable.from([Buffer.from(JSON.stringify(body))])
+    stream.method = method
+    stream.url = url
+    stream.headers = { host: '127.0.0.1:3080', ...headers }
+    const res = fakeRes()
+    await route.handler(stream, res)
+    return { status: res.status, body: res.body ? JSON.parse(res.body) : null }
+  }
+
+  let out = await call('GET', '/dsh-aura/life-api?action=status')
+  assert.equal(out.status, 200)
+  assert.equal(out.body.ok, true)
+  assert.equal(out.body.life.state, 'awake')
+  assert.ok(Array.isArray(out.body.history))
+  assert.equal(out.body.life.history.length, out.body.history.length)
+
+  out = await call('POST', '/dsh-aura/life-api', {
+    action: 'plan', state: 'play', activity: '听歌', wakeMode: 'random', wakeEarliestMinutes: 60, wakeLatestMinutes: 180,
+  })
+  assert.equal(out.status, 200)
+  assert.equal(out.body.life.state, 'play')
+  assert.equal(out.body.life.activity, '听歌')
+  assert.equal(out.body.life.wakeMode, 'random')
+
+  out = await call('POST', '/dsh-aura/life-api', { action: 'plan', state: 'nope' })
+  assert.equal(out.status, 400)
+  assert.match(out.body.error, /state/)
+
+  out = await call('POST', '/dsh-aura/life-api', { action: 'plan', state: 'work', minutes: 0 })
+  assert.equal(out.status, 400)
+
+  out = await call('POST', '/dsh-aura/life-api', { action: 'explode' })
+  assert.equal(out.status, 400)
+  assert.match(out.body.error, /未知 action/)
+
+  out = await call('GET', '/dsh-aura/life-api?action=nope')
+  assert.equal(out.status, 400)
+
+  out = await call('GET', '/dsh-aura/life-api?action=list&limit=1')
+  assert.equal(out.status, 200)
+  assert.equal(out.body.history.length, 1)
+
+  out = await call('GET', '/dsh-aura/life-api?action=list&limit=0')
+  assert.equal(out.status, 400)
+
+  out = await call('GET', '/dsh-aura/life-api?action=wake')
+  assert.equal(out.status, 405)
+
+  out = await call('POST', '/dsh-aura/life-api', { action: 'status' })
+  assert.equal(out.status, 405)
+
+  out = await call('POST', '/dsh-aura/life-api', { action: 'wake' })
+  assert.equal(out.status, 200)
+  assert.equal(out.body.life.state, 'awake')
+
+  out = await call('PUT', '/dsh-aura/life-api')
+  assert.equal(out.status, 405)
+
+  out = await call('GET', '/dsh-aura/life-api?action=status', undefined, { origin: 'http://evil.example' })
+  assert.equal(out.status, 403)
+
+  // 旧路径仍兼容：GET / 顶层带 state
+  out = await call('GET', '/dsh-aura/life-api')
+  assert.equal(out.status, 200)
+  assert.equal(out.body.state, 'awake')
+
+  life.dispose()
+})
+
 /* ------------------------------------------------------------------ */
 
 try {

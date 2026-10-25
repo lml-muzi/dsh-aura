@@ -190,7 +190,7 @@ const BOOL_FIELDS = new Set([
   'autoConnect', 'splitEnabled', 'soulEnabled', 'soulGrowthReflection', 'emotionEnabled',
   'emotionGuardOnNegative', 'memoryEnabled', 'memoryAutoCompact', 'memoryDiaryEnabled',
   'memoryImmediate', 'memorySessionDigest', 'diaryAuto',
-  'speakEnabled', 'speakDryRun', 'speakStickerEnabled', 'proactiveEnabled',
+  'speakEnabled', 'speakDryRun', 'speakStickerEnabled', 'proactiveEnabled', 'steerEnabled',
   'lifeRandom', 'lifeQuietSleep', 'lifeWakeGreeting',
 ])
 

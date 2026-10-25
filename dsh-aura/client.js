@@ -23,6 +23,48 @@ window.__ModuleLoader__.load({
     const DIARY_API = '/dsh-aura/diary-api'
     /** 事实卡/实体卡只读接口（Host 单独开的路由，web.js 的 /state 不透传这两块）。 */
     const MEMORY_API = '/dsh-aura/memory-api'
+
+    /** 生活层 Host API（host/life.js；面板「生活」页）。 */
+    const LIFE_API = '/dsh-aura/life-api'
+    const LIFE_POLL_MS = 5000
+    const LIFE_STATE_OPTIONS = [
+      ['awake', '醒着'],
+      ['work', '忙'],
+      ['play', '玩'],
+      ['rest', '休息'],
+      ['sleep', '睡'],
+      ['out', '出门'],
+    ]
+    const LIFE_STATE_LABELS = {
+      awake: '醒着',
+      work: '忙',
+      play: '玩',
+      rest: '休息',
+      sleep: '睡',
+      out: '出门',
+    }
+    const LIFE_WAKE_OPTIONS = [['fixed', '闹钟'], ['random', '自然醒'], ['open', '不定闹钟']]
+    const LIFE_WAKE_LABELS = { fixed: '闹钟', random: '自然醒', open: '不定闹钟' }
+    const LIFE_SOURCE_LABELS = { self: '她自己', random: '随机', auto: '自动', user: '你' }
+    /** 快捷按钮的默认安排：睡=自然醒（open），其余按状态给自然醒窗口。 */
+    const LIFE_QUICK_PLANS = {
+      awake: { wakeMode: 'open' },
+      work: { wakeMode: 'random', wakeEarliestMinutes: 30, wakeLatestMinutes: 120 },
+      play: { wakeMode: 'random', wakeEarliestMinutes: 60, wakeLatestMinutes: 180 },
+      rest: { wakeMode: 'random', wakeEarliestMinutes: 20, wakeLatestMinutes: 60 },
+      sleep: { wakeMode: 'open' },
+      out: { wakeMode: 'random', wakeEarliestMinutes: 60, wakeLatestMinutes: 180 },
+    }
+    const LIFE_FORM_DEFAULTS = {
+      state: 'play',
+      activity: '',
+      wakeMode: 'random',
+      minutes: 45,
+      atTime: '',
+      earliestMinutes: 60,
+      latestMinutes: 180,
+      note: '',
+    }
     /** 人设保存成功后广播的 window 事件：光轨等常驻组件据此立即刷新配置。 */
     const PERSONA_SAVED_EVENT = 'aura:persona-saved'
     const MEME_TAG_LABELS = {
@@ -233,6 +275,8 @@ window.__ModuleLoader__.load({
       'busy.disconnect': '断开中…',
       'busy.import': '导入中…',
       'notice.saved': '已保存',
+      'notice.lifeSaved': '生活设置已保存',
+      'notice.steerSaved': '消息插队偏好已保存',
       'notice.connected': '已连接',
       'notice.disconnected': '已断开',
       'notice.imported': '已导入凭据',
@@ -516,6 +560,8 @@ window.__ModuleLoader__.load({
       'busy.disconnect': 'Disconnecting…',
       'busy.import': 'Importing…',
       'notice.saved': 'Saved',
+      'notice.lifeSaved': 'Life settings saved',
+      'notice.steerSaved': 'Steering preference saved',
       'notice.connected': 'Connected',
       'notice.disconnected': 'Disconnected',
       'notice.imported': 'Credentials imported',
@@ -971,6 +1017,34 @@ window.__ModuleLoader__.load({
 .aura-persona-history-row{flex-direction:column}
 .aura-persona-history-row .qqn-button{align-self:flex-end}
 }
+.aura-life-card{padding:14px 16px;border:.5px solid var(--dsw-alias-border-l3);border-radius:16px;background:var(--dsw-specific-sidebar-fill);margin-bottom:12px}
+.aura-life-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px}
+.aura-life-state{font-size:16px;font-weight:500;line-height:24px;color:var(--dsw-alias-label-primary)}
+.aura-life-badge{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:11px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
+.aura-life-badge-warn{color:var(--dsw-alias-state-business-primary)}
+.aura-life-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px 16px}
+.aura-life-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.aura-life-field>span{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.aura-life-field .qqn-input{width:100%}
+.aura-life-field-row{display:flex;align-items:center;gap:6px}
+.aura-life-stat-label{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.aura-life-stat-value{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.aura-life-note{margin-top:10px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.aura-life-quick{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:12px 0;border-bottom:.5px solid var(--dsw-alias-border-l3)}
+.aura-life-quick-input{flex:1 1 200px;width:auto;min-width:160px}
+.aura-life-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px 16px;padding:12px 0;border-bottom:.5px solid var(--dsw-alias-border-l3)}
+.aura-life-history{display:flex;flex-direction:column;padding:6px 0}
+.aura-life-history-row{display:flex;align-items:flex-start;gap:8px;padding:5px 0;font-size:12px;line-height:18px;border-bottom:.5px solid var(--dsw-alias-border-l3)}
+.aura-life-history-row:last-child{border-bottom:0}
+.aura-life-history-time{flex:none;min-width:56px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.aura-life-history-state{flex:none;color:var(--dsw-alias-label-primary)}
+.aura-life-history-activity{flex:1;min-width:0;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.aura-life-history-source{flex:none;color:var(--dsw-alias-label-tertiary)}
+.aura-life-settings .qqn-look-title{margin-top:2px}
+@media (max-width:640px){
+.aura-life-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.aura-life-form{grid-template-columns:1fr}
+}
 ${TRAIL_CSS}
 `
 
@@ -1060,6 +1134,17 @@ ${TRAIL_CSS}
       } catch {
         return ''
       }
+    }
+
+    /** "HH:MM" → 今天/明天那个时间点的时间戳；非法返回 null。 */
+    function lifeUntilFromClock(text) {
+      const minutes = minutesOf(text)
+      if (minutes === null) return null
+      const now = new Date()
+      const at = new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(minutes / 60), minutes % 60, 0, 0)
+      let until = at.getTime()
+      if (until <= Date.now()) until += 24 * 60 * 60 * 1000
+      return until
     }
 
     /** 6 个内置图标的 64×64 单色 path；stroke 项是光环的同心圆。 */
@@ -1168,6 +1253,7 @@ ${TRAIL_CSS}
       appId: '',
       appSecret: '',
       splitEnabled: true,
+      steerEnabled: true,
       splitRegex: '',
       maxMessages: 4,
       cwd: '',
@@ -1183,6 +1269,7 @@ ${TRAIL_CSS}
         appId: typeof cfg.appId === 'string' ? cfg.appId : '',
         appSecret: '',
         splitEnabled: cfg.splitEnabled !== false,
+        steerEnabled: cfg.steerEnabled !== false,
         splitRegex: typeof cfg.splitRegex === 'string' ? cfg.splitRegex : '',
         maxMessages: clampInt(cfg.maxMessages, 1, MAX_REPLIES, 4),
         cwd: typeof cfg.cwd === 'string' ? cfg.cwd : '',
@@ -1524,6 +1611,15 @@ ${TRAIL_CSS}
         diaryAuto: cfg.diaryAuto !== false,
         diaryAutoHour: clampInt(cfg.diaryAutoHour, 0, 23, 22),
         diaryAutoMinEvents: clampInt(cfg.diaryAutoMinEvents, 1, 20, 3),
+      }
+    }
+
+    function buildLifeSettings(config) {
+      const cfg = asObject(config)
+      return {
+        lifeRandom: cfg.lifeRandom === true,
+        lifeQuietSleep: cfg.lifeQuietSleep !== false,
+        lifeWakeGreeting: cfg.lifeWakeGreeting !== false,
       }
     }
 
@@ -1876,6 +1972,17 @@ ${TRAIL_CSS}
       const [diaryForm, setDiaryForm] = React.useState(() => buildDiaryForm({}))
       const [diaryBaseline, setDiaryBaseline] = React.useState(() => buildDiaryForm({}))
       const [diaryAutoResult, setDiaryAutoResult] = React.useState(null)
+      const [lifeSnap, setLifeSnap] = React.useState(null)
+      const [lifeHistory, setLifeHistory] = React.useState([])
+      const [lifeLoaded, setLifeLoaded] = React.useState(false)
+      const [lifeError, setLifeError] = React.useState('')
+      const [lifeNotice, setLifeNotice] = React.useState('')
+      const [lifeBusy, setLifeBusy] = React.useState('')
+      const [lifeQuickActivity, setLifeQuickActivity] = React.useState('')
+      const [lifeForm, setLifeForm] = React.useState(() => ({ ...LIFE_FORM_DEFAULTS }))
+      const [lifeCustomOpen, setLifeCustomOpen] = React.useState(false)
+      const [lifeSettings, setLifeSettings] = React.useState(() => buildLifeSettings({}))
+      const [lifeSettingsBaseline, setLifeSettingsBaseline] = React.useState(() => buildLifeSettings({}))
 
       const mounted = React.useRef(true)
       const inflight = React.useRef(false)
@@ -1905,6 +2012,9 @@ ${TRAIL_CSS}
       const diaryLoadingRef = React.useRef(false)
       const diaryFormRef = React.useRef(diaryForm)
       const diaryBaselineRef = React.useRef(diaryBaseline)
+      const lifeBusyRef = React.useRef('')
+      const lifeSettingsRef = React.useRef(lifeSettings)
+      const lifeSettingsBaselineRef = React.useRef(lifeSettingsBaseline)
 
       React.useEffect(() => {
         lookRef.current = look
@@ -1942,6 +2052,13 @@ ${TRAIL_CSS}
       React.useEffect(() => {
         diaryBaselineRef.current = diaryBaseline
       }, [diaryBaseline])
+
+      React.useEffect(() => {
+        lifeSettingsRef.current = lifeSettings
+      }, [lifeSettings])
+      React.useEffect(() => {
+        lifeSettingsBaselineRef.current = lifeSettingsBaseline
+      }, [lifeSettingsBaseline])
       React.useEffect(() => {
         blocksRef.current = blocks
       }, [blocks])
@@ -2043,6 +2160,14 @@ ${TRAIL_CSS}
         setDiaryBaseline(next)
       }, [])
 
+      const syncLifeSettings = React.useCallback((config, force) => {
+        const next = buildLifeSettings(config)
+        const untouched = draftKey(lifeSettingsRef.current) === draftKey(lifeSettingsBaselineRef.current)
+        if (!force && !untouched) return
+        setLifeSettings(next)
+        setLifeSettingsBaseline(next)
+      }, [])
+
       const syncDrafts = React.useCallback((config, force) => {
         syncLook(config, force)
         syncSoul(config, force)
@@ -2050,7 +2175,8 @@ ${TRAIL_CSS}
         syncSpeak(config, force)
         syncMemory(config, force)
         syncDiary(config, force)
-      }, [syncLook, syncSoul, syncEmotion, syncSpeak, syncMemory, syncDiary])
+        syncLifeSettings(config, force)
+      }, [syncLook, syncSoul, syncEmotion, syncSpeak, syncMemory, syncDiary, syncLifeSettings])
 
       const flash = React.useCallback((text) => {
         setNotice(text)
@@ -2303,6 +2429,129 @@ ${TRAIL_CSS}
           if (mounted.current) setDiaryBusy('')
         }
       }, [diaryBusy, flashDiary, loadDiary, load])
+
+      /* ---------------- 生活：状态 / 快捷安排 / 自定义安排 / 记录（5s 轮询） ---------------- */
+      const loadLife = React.useCallback(async () => {
+        try {
+          const value = await fetchJson(LIFE_API + '?action=status')
+          if (!mounted.current) return
+          setLifeSnap(asObject(value.life))
+          if (Array.isArray(value.history)) setLifeHistory(value.history)
+          setLifeLoaded(true)
+          setLifeError('')
+        } catch (error) {
+          if (mounted.current) setLifeError(errorMessage(error))
+        }
+      }, [])
+
+      const loadLifeHistory = React.useCallback(async () => {
+        try {
+          const value = await fetchJson(LIFE_API + '?action=list&limit=20')
+          if (!mounted.current) return
+          setLifeHistory(asArray(value.history))
+        } catch {
+          // 记录列表失败不覆盖状态卡的错误，静默降级。
+        }
+      }, [])
+
+      const runLife = React.useCallback(async (name, task, successMessage) => {
+        if (lifeBusyRef.current !== '') return
+        lifeBusyRef.current = name
+        setLifeBusy(name)
+        setLifeError('')
+        setLifeNotice('')
+        try {
+          const value = await task()
+          if (!mounted.current) return
+          if (value && value.life) setLifeSnap(asObject(value.life))
+          if (value && Array.isArray(value.history)) setLifeHistory(value.history)
+          setLifeLoaded(true)
+          if (successMessage) setLifeNotice(successMessage)
+          void loadLifeHistory()
+        } catch (error) {
+          if (mounted.current) setLifeError(errorMessage(error))
+        } finally {
+          lifeBusyRef.current = ''
+          if (mounted.current) setLifeBusy('')
+        }
+      }, [loadLifeHistory])
+
+      React.useEffect(() => {
+        void loadLife()
+        void loadLifeHistory()
+        const timer = setInterval(() => {
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+          void loadLife()
+        }, LIFE_POLL_MS)
+        return () => clearInterval(timer)
+      }, [loadLife, loadLifeHistory])
+
+      const quickLife = state => {
+        const defaults = LIFE_QUICK_PLANS[state] || { wakeMode: 'open' }
+        const activity = lifeQuickActivity.trim().slice(0, 40)
+        void runLife('plan:' + state, () => fetchJson(LIFE_API, {
+          action: 'plan',
+          state,
+          activity,
+          ...defaults,
+        }), '切到「' + (LIFE_STATE_LABELS[state] || state) + '」了')
+      }
+
+      const submitLifePlan = () => {
+        const payload = {
+          action: 'plan',
+          state: lifeForm.state,
+          activity: lifeForm.activity.trim().slice(0, 40),
+          note: lifeForm.note.trim().slice(0, 120),
+        }
+        if (lifeForm.wakeMode === 'fixed') {
+          const minutesText = String(lifeForm.minutes === undefined || lifeForm.minutes === null ? '' : lifeForm.minutes).trim()
+          const untilText = String(lifeForm.atTime || '').trim()
+          if (minutesText !== '') {
+            const minutes = Number(minutesText)
+            if (!Number.isFinite(minutes) || minutes < 1 || minutes > 7 * 24 * 60) {
+              setLifeError('分钟数需要 1~10080 之间')
+              return
+            }
+            payload.minutes = Math.round(minutes)
+          } else if (untilText !== '') {
+            const until = lifeUntilFromClock(untilText)
+            if (until === null) {
+              setLifeError('到点时间格式应为 HH:MM，比如 23:30')
+              return
+            }
+            payload.until = until
+          } else {
+            setLifeError('闹钟模式要填分钟数，或者填一个到点时间')
+            return
+          }
+          payload.wakeMode = 'fixed'
+        } else if (lifeForm.wakeMode === 'random') {
+          const earliest = Number(lifeForm.earliestMinutes)
+          const latest = Number(lifeForm.latestMinutes)
+          if (!Number.isFinite(earliest) || !Number.isFinite(latest)
+            || earliest < 1 || latest > 7 * 24 * 60 || earliest >= latest) {
+            setLifeError('自然醒窗口需要 1 ≤ 最早 < 最晚（分钟）')
+            return
+          }
+          payload.wakeMode = 'random'
+          payload.wakeEarliestMinutes = Math.round(earliest)
+          payload.wakeLatestMinutes = Math.round(latest)
+        } else {
+          payload.wakeMode = 'open'
+        }
+        setLifeNotice('')
+        setLifeError('')
+        void runLife('plan', () => fetchJson(LIFE_API, payload), '安排好了')
+      }
+
+      const wakeLifeNow = () => {
+        void runLife('wake', () => fetchJson(LIFE_API, { action: 'wake' }), '已经醒来了')
+      }
+
+      const cancelLifeNow = () => {
+        void runLife('cancel', () => fetchJson(LIFE_API, { action: 'cancel' }), '闹钟取消了，状态不变')
+      }
 
       /** 人设表单同步：默认不覆盖用户正在编辑的草稿。 */
       const syncPersona = React.useCallback((config, force) => {
@@ -2959,6 +3208,7 @@ ${TRAIL_CSS}
             else if (key === 'speak') syncSpeak(value.config, true)
             else if (key === 'memorySettings') syncMemory(value.config, true)
             else if (key === 'diarySettings') syncDiary(value.config, true)
+            else if (key === 'lifeSettings') syncLifeSettings(value.config, true)
           }
           if (value && value.config && !payloadApplied(value.config, payload)) {
             failBlock(key, t('notice.configNotApplied'))
@@ -3068,6 +3318,18 @@ ${TRAIL_CSS}
           quietEnd: speakForm.quietEnd.trim(),
           speakStickerEnabled: speakForm.speakStickerEnabled === true,
         }, 'notice.speakSaved')
+      }
+
+      const saveLifeSettings = () => {
+        void saveBlock('lifeSettings', {
+          lifeRandom: lifeSettings.lifeRandom === true,
+          lifeQuietSleep: lifeSettings.lifeQuietSleep !== false,
+          lifeWakeGreeting: lifeSettings.lifeWakeGreeting !== false,
+        }, 'notice.lifeSaved')
+      }
+
+      const saveSteer = next => {
+        void saveBlock('steer', { steerEnabled: next === true }, 'notice.steerSaved')
       }
 
       const disarmReset = () => {
@@ -3382,6 +3644,7 @@ ${TRAIL_CSS}
       const speakDirty = draftKey(speakForm) !== draftKey(speakBaseline)
       const memoryDirty = draftKey(memoryForm) !== draftKey(memoryBaseline)
       const diaryDirty = draftKey(diaryForm) !== draftKey(diaryBaseline)
+      const lifeSettingsDirty = draftKey(lifeSettings) !== draftKey(lifeSettingsBaseline)
       const blockFeedback = key => {
         const info = asObject(blocks[key])
         if (info.error) {
@@ -3607,6 +3870,20 @@ ${TRAIL_CSS}
             ),
           }),
           h(Row, {
+            label: '消息插队',
+            hint: 'Agent 回复中收到的新消息立即插入当前回合，而不是排到下一轮',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: form.steerEnabled !== false,
+              onChange: event => {
+                const next = event.target.checked
+                setField('steerEnabled', next)
+                saveSteer(next)
+              },
+            }),
+          }),
+          h(Row, {
             label: t('row.cwd'),
             hint: t('row.cwd.hint'),
             control: h('input', {
@@ -3618,6 +3895,7 @@ ${TRAIL_CSS}
             }),
           }),
         ),
+        blockFeedback('steer'),
       )
 
       const soulSection = h(Section, { title: t('section.soul') },
@@ -4166,7 +4444,241 @@ ${TRAIL_CSS}
         blockFeedback('memory'),
       )
 
-      const speakSection = h(Section, { title: t('section.speak') },
+      /* ---------------- 生活页：状态卡 / 快捷按钮 / 自定义安排 / 记录 / 生活设置 ---------------- */
+      const lifeNow = asObject(lifeSnap)
+      const lifeStateKey = String(lifeNow.state || '')
+      const lifeInterrupted = lifeNow.interruptedFrom === 'sleep'
+      const lifeStateText = LIFE_STATE_LABELS[lifeStateKey] || String(lifeNow.label || '') || '—'
+      const lifeWakeKey = String(lifeNow.wakeMode || '')
+      const lifeWakeText = LIFE_WAKE_LABELS[lifeWakeKey] || '不定闹钟'
+      const lifeSourceText = LIFE_SOURCE_LABELS[String(lifeNow.source || '')] || String(lifeNow.source || '') || '—'
+      const lifeRemaining = lifeNow.remainingMs === null || lifeNow.remainingMs === undefined
+        ? null
+        : (Number.isFinite(Number(lifeNow.remainingMs)) ? Math.max(0, Number(lifeNow.remainingMs)) : null)
+      const lifeUntilMs = Number(lifeNow.until) > 0 ? Number(lifeNow.until) : 0
+      const lifeEarliestMs = Number(lifeNow.wakeEarliest) > 0 ? Number(lifeNow.wakeEarliest) : 0
+      const lifeLatestMs = Number(lifeNow.wakeLatest) > 0 ? Number(lifeNow.wakeLatest) : 0
+      const lifeStartedMs = Number(lifeNow.startedAt) > 0 ? Number(lifeNow.startedAt) : 0
+      const lifeElapsedMs = Number.isFinite(Number(lifeNow.elapsedMs)) ? Math.max(0, Number(lifeNow.elapsedMs)) : 0
+      let lifeCountdownText = ''
+      if (lifeInterrupted && lifeRemaining !== null) {
+        lifeCountdownText = lifeRemaining > 0 ? '还剩 ' + formatUptime(lifeRemaining, t) + ' 接着睡' : '马上接着睡'
+      } else if (lifeRemaining !== null) {
+        lifeCountdownText = lifeRemaining > 0
+          ? '还剩 ' + formatUptime(lifeRemaining, t) + (lifeUntilMs > 0 ? '（' + formatClock(lifeUntilMs) + '）' : '')
+          : '到点了，等一下下'
+      } else if (lifeWakeKey === 'random' && lifeEarliestMs > 0 && lifeLatestMs > 0) {
+        lifeCountdownText = '预计 ' + formatClock(lifeEarliestMs) + ' ~ ' + formatClock(lifeLatestMs) + ' 之间自然醒'
+      } else {
+        lifeCountdownText = lifeWakeKey !== 'open'
+          ? '没有倒计时'
+          : (lifeStateKey === 'awake' ? '没有闹钟' : '没有闹钟，自然醒')
+      }
+      const lifeFromText = lifeStartedMs
+        ? formatClock(lifeStartedMs) + (lifeElapsedMs > 0 ? ' · 已经 ' + formatUptime(lifeElapsedMs, t) : '')
+        : '—'
+      const lifeStats = [
+        ['活动', String(lifeNow.activity || '') || '—'],
+        ['从何时', lifeFromText],
+        ['倒计时', lifeCountdownText],
+        ['醒来方式', lifeWakeText],
+        ['来源', lifeSourceText],
+      ]
+      const lifeHistoryRows = lifeHistory.slice(-20).reverse()
+      const lifeFeedback = lifeError
+        ? h('div', { className: 'qqn-error', role: 'status', 'aria-live': 'polite' }, '生活：' + lifeError)
+        : (lifeNotice ? h('div', { className: 'qqn-feedback', role: 'status', 'aria-live': 'polite' }, lifeNotice) : null)
+
+      const lifeSection = h(Section, {
+        title: '生活',
+        action: h('span', { className: 'qqn-unit' }, lifeBusy !== '' ? '处理中…' : '每 5 秒刷新'),
+      },
+        !lifeLoaded && !lifeError ? h('div', { className: 'qqn-loading' }, '正在读取生活状态…') : null,
+        lifeFeedback,
+        h('div', { className: 'aura-life-card' },
+          h('div', { className: 'aura-life-head' },
+            h('span', { className: 'aura-life-state' }, lifeStateText),
+            lifeInterrupted ? h('span', { className: 'aura-life-badge aura-life-badge-warn' }, '中途醒了一下') : null,
+          ),
+          h('div', { className: 'aura-life-grid' },
+            lifeStats.map(([label, value]) => h('div', { key: 'life-stat-' + label, className: 'aura-life-field' },
+              h('span', { className: 'aura-life-stat-label' }, label),
+              h('span', { className: 'aura-life-stat-value' }, value),
+            )),
+          ),
+          lifeNow.note ? h('div', { className: 'aura-life-note' }, '备注：' + String(lifeNow.note)) : null,
+        ),
+        h('div', { className: 'aura-life-quick' },
+          h('input', {
+            className: 'qqn-input aura-life-quick-input',
+            value: lifeQuickActivity,
+            maxLength: 40,
+            placeholder: '活动（可选，快捷按钮会带上）',
+            'aria-label': '活动（可选）',
+            onChange: event => setLifeQuickActivity(event.target.value),
+          }),
+          LIFE_STATE_OPTIONS.map(([state, label]) => h(Button, {
+            key: 'life-quick-' + state,
+            disabled: lifeBusy !== '',
+            onClick: () => quickLife(state),
+          }, label)),
+          h(Button, { disabled: lifeBusy !== '', onClick: wakeLifeNow }, lifeBusy === 'wake' ? '醒来中…' : '醒来'),
+          h(Button, { disabled: lifeBusy !== '', onClick: cancelLifeNow }, lifeBusy === 'cancel' ? '取消中…' : '取消闹钟'),
+        ),
+        h('div', { className: 'qqn-actions', style: { marginTop: 6, marginBottom: 4 } },
+          h(Button, { onClick: () => setLifeCustomOpen(open => !open) }, lifeCustomOpen ? '收起自定义安排' : '自定义安排'),
+        ),
+        lifeCustomOpen ? h('div', { className: 'aura-life-form' },
+          h('label', { className: 'aura-life-field' },
+            h('span', null, '状态'),
+            selectField(LIFE_STATE_OPTIONS, lifeForm.state, value => setLifeForm(prev => ({ ...prev, state: value })), '生活状态'),
+          ),
+          h('label', { className: 'aura-life-field' },
+            h('span', null, '活动（≤40 字，可留空）'),
+            h('input', {
+              className: 'qqn-input',
+              value: lifeForm.activity,
+              maxLength: 40,
+              placeholder: '在干嘛',
+              onChange: event => setLifeForm(prev => ({ ...prev, activity: event.target.value })),
+            }),
+          ),
+          h('label', { className: 'aura-life-field' },
+            h('span', null, '醒来方式'),
+            selectField(LIFE_WAKE_OPTIONS, lifeForm.wakeMode, value => setLifeForm(prev => ({ ...prev, wakeMode: value })), '醒来方式'),
+          ),
+          lifeForm.wakeMode === 'fixed'
+            ? h('label', { className: 'aura-life-field' },
+                h('span', null, '闹钟：分钟数，或者填到点时间'),
+                h('div', { className: 'aura-life-field-row' },
+                  h('input', {
+                    className: 'qqn-input',
+                    type: 'number',
+                    min: 1,
+                    max: 10080,
+                    step: 5,
+                    value: lifeForm.minutes,
+                    'aria-label': '闹钟分钟数',
+                    onChange: event => setLifeForm(prev => ({ ...prev, minutes: event.target.value === '' ? '' : Number(event.target.value) })),
+                  }),
+                  h('span', { className: 'qqn-unit' }, '分钟'),
+                  h('input', {
+                    className: 'qqn-input qqn-input-time',
+                    value: lifeForm.atTime,
+                    placeholder: '23:30',
+                    maxLength: 5,
+                    spellCheck: false,
+                    'aria-label': '到点时间',
+                    onChange: event => setLifeForm(prev => ({ ...prev, atTime: event.target.value })),
+                  }),
+                ),
+              )
+            : null,
+          lifeForm.wakeMode === 'random'
+            ? h('label', { className: 'aura-life-field' },
+                h('span', null, '自然醒窗口（分钟）'),
+                h('div', { className: 'aura-life-field-row' },
+                  h('input', {
+                    className: 'qqn-input qqn-input-narrow',
+                    type: 'number',
+                    min: 1,
+                    max: 10080,
+                    step: 5,
+                    value: lifeForm.earliestMinutes,
+                    'aria-label': '最早分钟数',
+                    onChange: event => setLifeForm(prev => ({ ...prev, earliestMinutes: event.target.value === '' ? '' : Number(event.target.value) })),
+                  }),
+                  h('span', { className: 'qqn-unit' }, '到'),
+                  h('input', {
+                    className: 'qqn-input qqn-input-narrow',
+                    type: 'number',
+                    min: 1,
+                    max: 10080,
+                    step: 5,
+                    value: lifeForm.latestMinutes,
+                    'aria-label': '最晚分钟数',
+                    onChange: event => setLifeForm(prev => ({ ...prev, latestMinutes: event.target.value === '' ? '' : Number(event.target.value) })),
+                  }),
+                  h('span', { className: 'qqn-unit' }, '分钟'),
+                ),
+              )
+            : null,
+          h('label', { className: 'aura-life-field' },
+            h('span', null, '备注（≤120 字，可留空）'),
+            h('input', {
+              className: 'qqn-input',
+              value: lifeForm.note,
+              maxLength: 120,
+              placeholder: '给自己的备注',
+              onChange: event => setLifeForm(prev => ({ ...prev, note: event.target.value })),
+            }),
+          ),
+          h('div', { className: 'qqn-actions', style: { gridColumn: '1 / -1', marginTop: 0 } },
+            h(Button, { variant: 'primary', disabled: lifeBusy !== '', onClick: submitLifePlan }, lifeBusy === 'plan' ? '提交中…' : '提交安排'),
+          ),
+        ) : null,
+        h('div', { className: 'aura-life-history' },
+          h('div', { className: 'qqn-look-title' }, '最近生活记录'),
+          lifeHistoryRows.length
+            ? lifeHistoryRows.map((row, index) => {
+                const item = asObject(row)
+                const at = Number(item.at)
+                return h('div', { key: 'life-history-' + index, className: 'aura-life-history-row' },
+                  h('span', { className: 'aura-life-history-time' }, at > 0 ? formatClock(at) : '—'),
+                  h('span', { className: 'aura-life-history-state' }, LIFE_STATE_LABELS[String(item.state || '')] || String(item.state || '—')),
+                  h('span', { className: 'aura-life-history-activity' }, String(item.activity || '')),
+                  h('span', { className: 'aura-life-history-source' }, LIFE_SOURCE_LABELS[String(item.source || '')] || String(item.source || '')),
+                )
+              })
+            : h('div', { className: 'qqn-mood-empty' }, '还没有生活记录'),
+        ),
+        h('div', { className: 'qqn-memory-block aura-life-settings' },
+          h('div', { className: 'qqn-look-title' }, '生活设置'),
+          h(Row, {
+            label: '随机生活',
+            hint: '醒着太久时她可能自己换一种状态（默认关）',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: lifeSettings.lifeRandom === true,
+              onChange: event => setLifeSettings(prev => ({ ...prev, lifeRandom: event.target.checked })),
+            }),
+          }),
+          h(Row, {
+            label: '睡觉不打扰',
+            hint: '睡着的时候不主动搭话（默认开）',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: lifeSettings.lifeQuietSleep !== false,
+              onChange: event => setLifeSettings(prev => ({ ...prev, lifeQuietSleep: event.target.checked })),
+            }),
+          }),
+          h(Row, {
+            label: '醒来打招呼',
+            hint: '醒来后允许她先找你一次（默认开）',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: lifeSettings.lifeWakeGreeting !== false,
+              onChange: event => setLifeSettings(prev => ({ ...prev, lifeWakeGreeting: event.target.checked })),
+            }),
+          }),
+          h('div', { className: 'qqn-actions' },
+            h(Button, {
+              variant: 'primary',
+              disabled: blockBusy('lifeSettings') || !lifeSettingsDirty,
+              onClick: saveLifeSettings,
+            }, blockBusy('lifeSettings') ? t('busy.save') : '保存生活设置'),
+          ),
+          lifeSettingsDirty ? h('div', { className: 'qqn-row-hint' }, '有未保存的改动') : null,
+          blockFeedback('lifeSettings'),
+        ),
+      )
+
+      const speakSection = h(React.Fragment, null,
+        lifeSection,
+        h(Section, { title: t('section.speak') },
         h('div', { className: 'qqn-rows' },
           h(Row, {
             label: t('row.speakEnabled'),
@@ -4323,6 +4835,7 @@ ${TRAIL_CSS}
         ),
         blockFeedback('speak'),
         blockFeedback('speakTick'),
+        ),
       )
 
       const timelineSection = h(Section, {
@@ -5077,7 +5590,7 @@ ${TRAIL_CSS}
         ['emotion', '情绪'],
         ['memory', '记忆'],
         ['diary', '日记'],
-        ['speak', '主动'],
+        ['speak', '生活'],
         ['meme', '表情包'],
         ['appearance', '外观'],
         ['connect', '连接'],
