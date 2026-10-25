@@ -534,6 +534,10 @@ window.__ModuleLoader__.load({
 .qqn-session-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .qqn-session-time{flex:none;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .qqn-empty{padding:16px 0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
+.qqn-tabs{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 20px;padding:4px;border-radius:12px;background:var(--dsw-specific-sidebar-fill);width:fit-content;max-width:100%}
+.qqn-tab{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;padding:6px 14px;border-radius:9px;cursor:pointer;line-height:20px}
+.qqn-tab:hover{color:var(--dsw-alias-label-primary)}
+.qqn-tab-active{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 1px 2px rgba(0,0,0,.08)}
 .qqn-notice{display:flex;gap:9px;margin-top:28px;padding:12px 14px;border-radius:10px;background:var(--dsw-specific-sidebar-fill);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .qqn-loading{padding:24px 0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
 .qqn-page :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
@@ -1023,6 +1027,7 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = React.useState('')
       const [actionError, setActionError] = React.useState('')
       const [pollError, setPollError] = React.useState('')
+      const [tab, setTab] = React.useState('soul')
       const [loading, setLoading] = React.useState(true)
       const [look, setLook] = React.useState(configToAppearance(appearance))
       const [lookBaseline, setLookBaseline] = React.useState(configToAppearance(appearance))
@@ -2202,6 +2207,24 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      const tabDefs = [
+        ['soul', '灵魂'],
+        ['emotion', '情绪'],
+        ['memory', '记忆'],
+        ['speak', '主动'],
+        ['appearance', '外观'],
+        ['connect', '连接'],
+        ['debug', '调试'],
+      ]
+      const tabNav = h('div', { className: 'qqn-tabs' },
+        tabDefs.map(([id, label]) => h('button', {
+          key: id,
+          type: 'button',
+          className: 'qqn-tab' + (tab === id ? ' qqn-tab-active' : ''),
+          onClick: () => setTab(id),
+        }, label)),
+      )
+
       return h(React.Fragment, null,
         h('style', { key: 'qqn-css' }, CSS),
         h('section', { className: 'qqn-page' },
@@ -2209,20 +2232,22 @@ window.__ModuleLoader__.load({
             h('div', { className: 'qqn-content' },
               header,
               pollError ? h('div', { className: 'qqn-error' }, t('error.load') + '：' + pollError) : null,
-              soulSection,
-              emotionSection,
-              relationSection,
-              memorySection,
-              speakSection,
-              appearanceSection,
-              h(Section, { title: t('section.status') },
-                statusRows,
-                lastError ? h('div', { className: 'qqn-error' }, t('row.lastError') + '：' + lastError) : null,
-              ),
-              credentialsSection,
-              messagesSection,
-              sessionsSection,
-              timelineSection,
+              tabNav,
+              tab === 'soul' ? soulSection : null,
+              tab === 'emotion' ? h(React.Fragment, null, emotionSection, relationSection) : null,
+              tab === 'memory' ? memorySection : null,
+              tab === 'speak' ? speakSection : null,
+              tab === 'appearance' ? appearanceSection : null,
+              tab === 'connect' ? h(React.Fragment, null,
+                h(Section, { title: t('section.status') },
+                  statusRows,
+                  lastError ? h('div', { className: 'qqn-error' }, t('row.lastError') + '：' + lastError) : null,
+                ),
+                credentialsSection,
+                messagesSection,
+                sessionsSection,
+              ) : null,
+              tab === 'debug' ? h(React.Fragment, null, timelineSection) : null,
               h('div', { className: 'qqn-notice' }, t('note.footer')),
             ),
           ),
