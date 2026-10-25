@@ -322,9 +322,18 @@ export function normalizeSoul(raw, now = Date.now()) {
   return s
 }
 
-/** soul 内不再持有短期记忆；这里只留空壳，兼容面板/旧调用方。 */
+/** soul 内不再持有短期记忆；这里只留空壳，兼容面板/旧调用方（v2 也补上 facts/entities）。 */
 export function emptyMemoryState() {
-  return { events: [], notes: { user: [], us: [], self: [] }, topics: {}, pendingDue: [], lastReflectAt: 0 }
+  return {
+    events: [],
+    notes: { user: [], us: [], self: [] },
+    topics: {},
+    facts: [],
+    entities: [],
+    pendingDue: [],
+    lastReflectAt: 0,
+    lastCompactDayKey: '',
+  }
 }
 
 /** 旧 soul.memory 是否有值得迁移到 memory.json 的内容。 */
@@ -334,6 +343,7 @@ function hasMemoryData(memory) {
   for (const key of ['user', 'us', 'self']) {
     if (asArray(memory.notes?.[key]).length > 0) return true
   }
+  if (asArray(memory.facts).length > 0 || asArray(memory.entities).length > 0) return true
   return Object.keys(asObject(memory.topics)).length > 0
 }
 

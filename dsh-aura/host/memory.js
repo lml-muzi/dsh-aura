@@ -20,15 +20,42 @@ import {
 } from './soul.js'
 import {
   MEMORY_FILE,
+  MEMORY_VERSION,
+  FACT_LIMIT,
+  ENTITY_LIMIT,
+  FACT_TEXT_MAX,
+  addFact as addFactToMemory,
+  compactMemoryFacts,
   createMemoryStore,
   emptyMemory,
+  forgetFact as forgetFactInMemory,
   hasMemoryContent,
+  listEntities as listEntitiesInMemory,
+  listFacts as listFactsInMemory,
+  queryEntities as queryEntitiesInMemory,
+  queryFacts as queryFactsInMemory,
+  upsertEntity as upsertEntityInMemory,
 } from './memory-store.js'
 
 export const SUMMARY_MAX = 80
-/** 记忆上下文总预算（≤220；原 180，保持更紧的现状）。 */
-export const MEMORY_CONTEXT_BUDGET = 180
-export const MEMORY_CONTEXT_BUDGET_MAX = 220
+/** 记忆上下文总预算：v2 从 180 提到 240（事实卡/实体卡也进来）。 */
+export const MEMORY_CONTEXT_BUDGET = 240
+export const MEMORY_CONTEXT_BUDGET_MAX = 260
+/** 面板事实/实体卡只读接口（web.js 的 /state 不透传新字段，这里另开一个小路由）。 */
+export const MEMORY_API_PREFIX = '/dsh-aura/memory-api'
+
+/** 事实卡 / 实体卡纯函数从存储层导出（memory.js 是公共入口）。 */
+export {
+  addFactToMemory as addFact,
+  compactMemoryFacts,
+  forgetFactInMemory as forgetFact,
+  listEntitiesInMemory as listEntities,
+  listFactsInMemory as listFacts,
+  queryEntitiesInMemory as queryEntities,
+  queryFactsInMemory as queryFacts,
+  upsertEntityInMemory as upsertEntity,
+}
+
 export const NOTE_MAX_CHARS = 80
 export const NOTE_MAX = 30
 export const EVENT_MAX = 40
@@ -333,10 +360,192 @@ function recentTopics(source, limit = 3, now = Date.now()) {
     .slice(0, limit)
 }
 
+// ---------- 规则抽取：用户消息 → 事实卡 / 实体卡（零 token） ----------
+
+export const RULE_CONFIDENCE = 0.6
+export const EXPLICIT_CONFIDENCE = 0.9
+export const ENTITY_TYPE_LABELS = Object.freeze({
+  person: '人物',
+  pet: '宠物',
+  place: '地点',
+  project: '项目',
+  other: '其他',
+})
+const NAME_BLACKLIST = new Set([
+  '起床', '起来', '一声', '早点', '回去', '过来', '看看', '知道', '外卖', '车', '醒',
+])
+
+function cleanFactValue(raw, max) {
+  let text = String(raw ?? '').trim()
+  text = text.replace(/^[\s，,、。；;：:！？!?]+/, '').replace(/[\s，,、。；;：:！？!?]+$/, '')
+  text = text.replace(/^(?:了|个|份|点)/, '')
+  text = text.replace(/(?:的事情|的事|的东西|之类)$/, '')
+  return codepointSlice(text, max)
+}
+
+/**
+ * 保守的规则抽取：只认明确句式，单条事实 ≤60 字，避免把整句复制进来。
+ * 返回 { facts, entities }；confidence 规则 0.6，记住/答应/说好 0.9。
+ */
+export function extractFacts(text, options = {}) {
+  const source = String(text ?? '').trim()
+  const result = { facts: [], entities: [] }
+  if (!source) return result
+  const subject = codepointSlice(String(options.subject ?? '对方').trim() || '对方', 24)
+  const seenFacts = new Set()
+  const seenEntities = new Set()
+
+  const pushFact = (predicate, rawValue, config = {}) => {
+    const value = cleanFactValue(rawValue, config.max ?? 30)
+    if (!value) return null
+    const key = `${predicate}\u0001${value}`
+    if (seenFacts.has(key)) return null
+    seenFacts.add(key)
+    const factSubject = codepointSlice(String(config.subject ?? subject).trim() || subject, 24)
+    const fact = {
+      subject: factSubject,
+      predicate,
+      value,
+      text: codepointSlice(
+        String(config.text ?? `${factSubject}${predicate}${value}`),
+        FACT_TEXT_MAX,
+      ),
+      confidence: clamp(asNumber(config.confidence, RULE_CONFIDENCE), 0, 1),
+      source: 'user',
+    }
+    result.facts.push(fact)
+    return fact
+  }
+
+  const pushEntity = (rawName, type, aliases = []) => {
+    const name = codepointSlice(String(rawName ?? '').trim(), 20)
+    if (!name) return null
+    const key = name.toLowerCase()
+    if (seenEntities.has(key)) return null
+    seenEntities.add(key)
+    const cleanAliases = asArray(aliases)
+      .map((alias) => codepointSlice(String(alias ?? '').trim(), 20))
+      .filter((alias) => alias && alias.toLowerCase() !== key)
+      .slice(0, 8)
+    const entity = { name, type, aliases: cleanAliases }
+    result.entities.push(entity)
+    return entity
+  }
+
+  // 称呼：我叫/叫我 X（排除“叫我起床/叫了外卖”这类动词/量词误判）
+  const nameMatch = /(?:我叫|叫我)\s*([\u4e00-\u9fa5A-Za-z0-9·]{1,12})/.exec(source)
+  if (nameMatch) {
+    const value = cleanFactValue(nameMatch[1], 12)
+    if (value && !NAME_BLACKLIST.has(value) && !/^[我你他她]/.test(value)) {
+      pushFact('称呼', value, { text: `${subject}希望被叫「${value}」`, confidence: RULE_CONFIDENCE })
+    }
+  }
+
+  // 喜欢 / 讨厌（“不喜欢”归到讨厌）
+  const dislikeMatch = /(?:我(?:很|也|特别|最)?讨厌|我(?:很|也|特别|最)?不喜欢)([^，,。！？!?\n]{1,30})/.exec(source)
+  if (dislikeMatch) {
+    const value = cleanFactValue(dislikeMatch[1], 20)
+    if (value) pushFact('讨厌', value, { text: `${subject}讨厌${value}` })
+  }
+  const likeMatch = /(?:我(?:很|也|特别|最)?喜欢|我(?:很|也|特别|最)?爱)([^，,。！？!?\n]{1,30})/.exec(source)
+  if (likeMatch) {
+    const value = cleanFactValue(likeMatch[1], 20)
+    if (value) pushFact('喜欢', value, { text: `${subject}喜欢${value}` })
+  }
+
+  // 宠物：优先“叫 X”的实体名；只有物种时记“养了猫”。
+  let petHandled = false
+  const speciesNamed = /(?:我养了|我家养了)(?:一只|一个|条|只)?([\u4e00-\u9fa5]{1,6})(?:叫|名叫)([\u4e00-\u9fa5A-Za-z0-9·]{1,8})/.exec(source)
+  if (speciesNamed) {
+    const species = cleanFactValue(speciesNamed[1], 6)
+    const petName = cleanFactValue(speciesNamed[2], 8)
+    if (species && petName) {
+      pushFact('宠物', petName, { text: `${subject}养了${species}「${petName}」`, max: 8 })
+      pushEntity(petName, 'pet', [species])
+      petHandled = true
+    }
+  }
+  if (!petHandled) {
+    const petNamed = /(?:我养了|我家养了|我有一只|我家有只|我有只)(?:一只|一个|条|只)?(?:宠物)?(?:叫|名叫)([\u4e00-\u9fa5A-Za-z0-9·]{1,8})/.exec(source)
+    if (petNamed) {
+      const petName = cleanFactValue(petNamed[1], 8)
+      if (petName) {
+        pushFact('宠物', petName, { text: `${subject}养了宠物「${petName}」`, max: 8 })
+        pushEntity(petName, 'pet')
+        petHandled = true
+      }
+    }
+  }
+  if (!petHandled) {
+    const petOnly = /(?:我养了|我家养了|我有一只|我家有只|我有只)(?:一只|一个|条|只)?(?:宠物)?([\u4e00-\u9fa5]{1,6})/.exec(source)
+    if (petOnly) {
+      const species = cleanFactValue(petOnly[1], 6)
+      if (species && !/[和跟与及]/.test(species)) {
+        pushFact('宠物', species, { text: `${subject}养了${species}` })
+        pushEntity(species, 'pet')
+      }
+    }
+  }
+
+  // 居住地：我住在/我住 X
+  const liveMatch = /我(?:现在)?住\s*在?\s*([\u4e00-\u9fa5A-Za-z0-9·]{2,12})/.exec(source)
+  if (liveMatch) {
+    const value = cleanFactValue(liveMatch[1], 12)
+    if (value && !/^(?:的|在|过)/.test(value) && !/(?:地方|附近|这里|那里)$/.test(value)) {
+      pushFact('居住地', value, { text: `${subject}住在${value}` })
+      pushEntity(value, 'place')
+    }
+  }
+
+  // 工作：我在 X 上班/工作
+  const workMatch = /我在\s*([\u4e00-\u9fa5A-Za-z0-9·]{2,16}?)\s*(?:上班|工作)/.exec(source)
+  if (workMatch) {
+    const value = cleanFactValue(workMatch[1], 16)
+    if (value) {
+      pushFact('工作', value, { text: `${subject}在${value}上班` })
+      pushEntity(value, 'place')
+    }
+  }
+
+  // 在做 / 在学 / 在忙（一句只取一个）
+  const doingPatterns = [
+    ['在做', /我(?:最近)?在做([^，,。！？!?\n]{2,24})/],
+    ['在学', /我(?:最近)?在学([^，,。！？!?\n]{2,24})/],
+    ['在忙', /我(?:最近)?在忙([^，,。！？!?\n]{2,24})/],
+    ['在做', /我(?:最近)?在写([^，,。！？!?\n]{2,24})/],
+    ['在做', /我(?:最近)?在赶([^，,。！？!?\n]{2,24})/],
+  ]
+  for (const [predicate, pattern] of doingPatterns) {
+    const match = pattern.exec(source)
+    if (!match) continue
+    const value = cleanFactValue(match[1], 24)
+    if (value) pushFact(predicate, value, { text: `${subject}${predicate}${value}` })
+    break
+  }
+
+  // 生日：只认具体日期，避免“我生日快到了”这种模糊句
+  const birthdayMatch = /(?:我的?生日|生日)(?:是|在)?\s*(\d{1,2}月\d{1,2}[日号]?|\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2})/.exec(source)
+  if (birthdayMatch) {
+    const value = cleanFactValue(birthdayMatch[1], 16)
+    if (value) pushFact('生日', value, { text: `${subject}生日是${value}` })
+  }
+
+  // 约定：记住/答应/说好 X → us，显式 0.9
+  const promiseMatch = /(?:记住|答应|说好|约好)([^，,。！？!?\n]{1,50})/.exec(source)
+  if (promiseMatch) {
+    const value = cleanFactValue(promiseMatch[1], 40)
+    if (value) {
+      pushFact('约定', value, { subject: '你们', text: `你们约好${value}`, confidence: EXPLICIT_CONFIDENCE, max: 40 })
+    }
+  }
+
+  return result
+}
+
 /**
  * 记忆上下文段（context order 40）。
  * source 优先是 memoryStore（read()），也兼容旧 soul 对象/句柄。
- * 预算 ≤220（当前 180）；只放最近 2 条事件 + 检索 top 3 笔记。
+ * 预算 ≤240；只放最近 2 条事件 + 检索 top 3 笔记 + top 3 事实 + top 2 实体。
  */
 export function renderMemoryContext(source, config = {}, options = {}) {
   if (config?.soulEnabled === false) return ''
@@ -344,14 +553,25 @@ export function renderMemoryContext(source, config = {}, options = {}) {
   const soul = options.soul || soulOf(source)
   const query = String(options.lastUserText ?? soul?.relation?.lastUserText ?? '')
   const limit = clamp(asNumber(config?.memoryRecallLimit, 3), 1, 3)
+  const memory = memoryOf(source)
   const parts = []
 
-  const notes = recallNotes(source, query, { limit, now })
+  const notes = recallNotes(memory, query, { limit, now })
   if (notes.length > 0) {
     parts.push(`（关于对方/你们，你记得：${notes.map((note) => note.text).join('；')}）`)
   }
 
-  const recent = recentEvents(source, EVENT_CONTEXT_RECENT)
+  const facts = queryFactsInMemory(memory, query, 3, now)
+  const entities = queryEntitiesInMemory(memory, query, 2, now)
+  if (facts.length > 0 || entities.length > 0) {
+    const bits = facts.map((fact) => fact.text)
+    for (const entity of entities) {
+      bits.push(`${entity.name}（${ENTITY_TYPE_LABELS[entity.type] || '其他'}）`)
+    }
+    parts.push(`（你记得：${bits.join('；')}）`)
+  }
+
+  const recent = recentEvents(memory, EVENT_CONTEXT_RECENT)
   if (recent.length > 0) {
     parts.push(`（最近：${recent.map((event) => event.summary).join('；')}）`)
   }
@@ -362,7 +582,7 @@ export function renderMemoryContext(source, config = {}, options = {}) {
     if (thought) parts.push(`（你上次想说但没说出口的念头：${thought.slice(0, 80)}）`)
   }
 
-  const topics = recentTopics(source, 3, now)
+  const topics = recentTopics(memory, 3, now)
   if (topics.length > 0 && parts.join('').length < 120) {
     parts.push(`（最近聊过：${topics.map((item) => item.key).join('、')}）`)
   }
@@ -613,8 +833,18 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     recall: () => [],
     pendingDue: () => [],
     note: () => ({ ok: false }),
+    addFact: () => ({ ok: false }),
+    queryFacts: () => [],
+    listFacts: () => [],
+    forgetFact: () => false,
+    upsertEntity: () => ({ ok: false }),
+    listEntities: () => [],
+    extractFacts: () => ({ facts: [], entities: [] }),
     reflect: async () => ({ ok: false }),
-    compact: () => ({ compacted: 0, notesAdded: 0, eventsLeft: 0 }),
+    compact: () => ({
+      compacted: 0, notesAdded: 0, eventsLeft: 0,
+      factsMerged: 0, factsPruned: 0, factsDecayed: 0, entitiesPruned: 0,
+    }),
     onUserMessage: () => {},
     onAssistantMessage: () => {},
     onTurnEnd: () => {},
@@ -665,6 +895,46 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       raw = {}
     }
     return { ...localDefaults, ...(raw && typeof raw === 'object' ? raw : {}) }
+  }
+
+  function localDayKey(ms = Date.now()) {
+    const date = new Date(asNumber(ms, Date.now()))
+    const pad = (value) => String(value).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  }
+
+  /** 事实卡里的“对方”用当前昵称，没有昵称时退回通用称呼。 */
+  function userFactSubject() {
+    const config = readConfig()
+    const current = readSoul()
+    const nickname = String(config?.soulUserNickname || '').trim()
+      || String(current?.identity?.address?.userPreferred || '').trim()
+      || '对方'
+    return codepointSlice(nickname, 24)
+  }
+
+  /** 用户消息 → 事实卡/实体卡（零 token；规则没命中就不写盘）。 */
+  function applyUserFacts(text, now = Date.now(), source = 'user') {
+    const extracted = extractFacts(text, { subject: userFactSubject(), now })
+    if (extracted.facts.length === 0 && extracted.entities.length === 0) {
+      return { facts: 0, entities: 0 }
+    }
+    let facts = 0
+    try {
+      store.update((memory) => {
+        for (const entity of extracted.entities) {
+          upsertEntityInMemory(memory, entity.name, { type: entity.type, aliases: entity.aliases }, now)
+        }
+        for (const fact of extracted.facts) {
+          const result = addFactToMemory(memory, { ...fact, source }, now)
+          if (result?.ok) facts += 1
+        }
+        return memory
+      })
+    } catch (error) {
+      logger('[soul] 事实抽取写入失败:', error instanceof Error ? error.message : error)
+    }
+    return { facts, entities: extracted.entities.length }
   }
 
   // ⓪ 首次升级：soul.memory → memory.json（只发生一次，失败不阻塞启动）
@@ -799,12 +1069,15 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     try {
       const text = String(payload.text ?? '').trim()
       if (!text) return
+      const at = asNumber(payload.at, Date.now())
       pending = {
         userText: text,
-        at: asNumber(payload.at, Date.now()),
+        at,
         sessionId: String(payload.sessionId ?? ''),
         assistantText: '',
       }
+      // 零 token 规则抽取：只认明确句式，写事实卡/实体卡。
+      applyUserFacts(text, at, 'user')
     } catch (error) {
       logger('[soul] memory onUserMessage 失败:', error instanceof Error ? error.message : error)
     }
@@ -863,7 +1136,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       if (reflectBuffer.length >= every || immediate) {
         void reflect({ reason: immediate ? 'immediate' : 'every-n' })
       }
-      // turnEnd 后再尝试一次压实（pushEvent 里已按阈值处理，这里幂等）。
+      // turnEnd 后再尝试一次事件压实（pushEvent 里已按阈值处理，这里幂等）。
       try {
         store.update((memory) => {
           compactEvents(memory, { threshold: EVENT_COMPACT_THRESHOLD })
@@ -871,6 +1144,14 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         })
       } catch (error) {
         logger('[soul] 记忆压实失败:', error instanceof Error ? error.message : error)
+      }
+      // 周期整理（事实/实体）每天最多跑一次；onTurnEnd 是天然触发点。
+      try {
+        if ((readMemory().reflection?.lastCompactDayKey || '') !== localDayKey(now)) {
+          compact(false)
+        }
+      } catch (error) {
+        logger('[soul] 记忆周期整理失败:', error instanceof Error ? error.message : error)
       }
     } catch (error) {
       logger('[soul] memory onTurnEnd 失败:', error instanceof Error ? error.message : error)
@@ -1175,20 +1456,195 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       },
       output: {
         schema: { type: 'json' },
-        render: (_args, value) => [{
-          type: 'text',
-          text: Array.isArray(value?.items) && value.items.length > 0
-            ? value.items.map((item) => `- ${item.text}`).join('\n')
-            : '（想不起来了）',
-        }],
+        render: (_args, value) => {
+          const lines = []
+          for (const item of Array.isArray(value?.items) ? value.items : []) lines.push(`- ${item.text}`)
+          for (const fact of Array.isArray(value?.facts) ? value.facts : []) {
+            lines.push(`- 事实：${fact.subject} · ${fact.predicate} · ${fact.value}`)
+          }
+          for (const entity of Array.isArray(value?.entities) ? value.entities : []) {
+            lines.push(`- 实体：${entity.name}（${ENTITY_TYPE_LABELS[entity.type] || '其他'}）`)
+          }
+          return [{ type: 'text', text: lines.length > 0 ? lines.join('\n') : '（想不起来了）' }]
+        },
       },
       async execute(args = {}) {
         const items = recall(args?.query, { category: args?.category, limit: args?.limit })
-        return { items, count: items.length }
+        const memory = readMemory()
+        const limit = clamp(asNumber(args?.limit, 5), 1, 5)
+        const facts = queryFactsInMemory(memory, args?.query, limit, Date.now())
+        const entities = queryEntitiesInMemory(memory, args?.query, 3, Date.now(), { fallback: false })
+        return { items, count: items.length, facts, entities }
+      },
+    }))
+    ctx.tools?.register?.(defineTool({
+      name: 'soul_fact',
+      description: '结构化事实卡：add=记一条事实（subject · predicate · value，如 木子 · 喜欢 · 听歌），'
+        + 'query=按关键词找，list=最近的事实，forget=忘掉一条。事实卡会自动合并/取代同类旧值。',
+      parameters: {
+        action: { type: 'string', description: 'add | query | list | forget', required: true },
+        subject: { type: 'string', description: '主体，如 木子 / 你们 / 团子' },
+        predicate: { type: 'string', description: '关系词，如 喜欢 / 居住地 / 生日 / 约定' },
+        value: { type: 'string', description: '≤60 字的值' },
+        confidence: { type: 'number', description: '0..1；add 省略时默认 0.9（显式）' },
+        source: { type: 'string', description: 'user | aura | reflection，默认 user' },
+        query: { type: 'string', description: 'query 用关键词' },
+        limit: { type: 'number', description: 'list/query 条数' },
+        id: { type: 'string', description: 'forget 用事实 id' },
+      },
+      output: {
+        schema: { type: 'json' },
+        render: (_args, value) => {
+          if (value?.ok === false) return [{ type: 'text', text: `没记下：${String(value?.reason ?? '')}` }]
+          if (value?.fact) {
+            return [{ type: 'text', text: `记下了：${value.fact.subject} · ${value.fact.predicate} · ${value.fact.value}` }]
+          }
+          if (value?.forgotten !== undefined) {
+            return [{ type: 'text', text: value.forgotten ? '忘了这张事实卡' : '没找到这张事实卡' }]
+          }
+          const facts = Array.isArray(value?.facts) ? value.facts : []
+          return [{
+            type: 'text',
+            text: facts.length > 0
+              ? facts.map((fact) => `- ${fact.subject} · ${fact.predicate} · ${fact.value}`
+                + `（${Math.round(asNumber(fact.confidence, 0.6) * 100)}%）`).join('\n')
+              : '（还没有事实卡）',
+          }]
+        },
+      },
+      async execute(args = {}) {
+        const action = String(args?.action ?? '').trim()
+        if (action === 'add') {
+          let result = { ok: false, reason: '写入失败' }
+          store.update((memory) => {
+            result = addFactToMemory(memory, {
+              subject: args?.subject,
+              predicate: args?.predicate,
+              value: args?.value,
+              confidence: args?.confidence ?? 0.9,
+              source: args?.source,
+            }, Date.now())
+            return memory
+          })
+          return result
+        }
+        if (action === 'query') {
+          const query = String(args?.query ?? '').trim()
+          if (!query) return { ok: false, reason: 'query 为空' }
+          const facts = queryFactsInMemory(readMemory(), query, clamp(asNumber(args?.limit, 5), 1, 50))
+          return { ok: true, facts, count: facts.length }
+        }
+        if (action === 'list') {
+          const facts = listFactsInMemory(readMemory(), clamp(asNumber(args?.limit, 20), 1, 50))
+          return { ok: true, facts, count: facts.length }
+        }
+        if (action === 'forget') {
+          const id = String(args?.id ?? '').trim()
+          if (!id) return { ok: false, reason: 'id 为空' }
+          let forgotten = false
+          store.update((memory) => {
+            forgotten = forgetFactInMemory(memory, id)
+            return memory
+          })
+          return { ok: true, forgotten }
+        }
+        return { ok: false, reason: '未知 action（add | query | list | forget）' }
       },
     }))
   } catch (error) {
     logger('[soul] 记忆工具注册失败:', error instanceof Error ? error.message : error)
+  }
+
+  // ⑦.5 面板只读接口：/dsh-aura/memory-api/state（facts/entities）。
+  // web.js 的 soulPayload 只透传 events/notes/topics，facts/entities 用这个独立路由补上。
+  function hostIsLoopback(req) {
+    const host = req?.headers?.host
+    if (!host) return true
+    const text = String(host)
+    let name = text
+    if (text.startsWith('[')) {
+      const end = text.indexOf(']')
+      name = end >= 0 ? text.slice(0, end + 1) : text
+    } else {
+      const colon = text.lastIndexOf(':')
+      if (colon > 0) name = text.slice(0, colon)
+    }
+    return ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(name.toLowerCase())
+  }
+
+  function memoryApiAllowed(req) {
+    if (!hostIsLoopback(req)) return false
+    const site = req?.headers?.['sec-fetch-site']
+    if (site && String(site).toLowerCase() === 'cross-site') return false
+    const origin = req?.headers?.origin
+    if (origin) {
+      try {
+        const url = new URL(String(origin))
+        if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname.toLowerCase())) return false
+      } catch {
+        return false
+      }
+    }
+    return true
+  }
+
+  function sendJson(res, status, body) {
+    const data = Buffer.from(JSON.stringify(body))
+    res.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-length': data.length,
+    })
+    res.end(data)
+  }
+
+  try {
+    const webServer = (() => {
+      try {
+        return ctx.get && typeof ctx.get === 'function' ? ctx.get('webServer') : undefined
+      } catch {
+        return undefined
+      }
+    })() || ctx.webServer
+    if (webServer && typeof webServer.register === 'function') {
+      const registration = {
+        kind: 'prefix',
+        path: MEMORY_API_PREFIX,
+        async handler(req, res) {
+          if (!memoryApiAllowed(req)) {
+            sendJson(res, 403, { ok: false, error: 'forbidden' })
+            return
+          }
+          const url = new URL(String(req.url || '/'), 'http://localhost')
+          const route = url.pathname.replace(MEMORY_API_PREFIX, '') || '/'
+          try {
+            if (req.method === 'GET' && (route === '/' || route === '' || route === '/state')) {
+              const memory = readMemory()
+              const limit = clamp(asNumber(url.searchParams.get('limit'), 12), 1, 50)
+              sendJson(res, 200, {
+                ok: true,
+                facts: listFactsInMemory(memory, limit),
+                entities: listEntitiesInMemory(memory, limit),
+                factCount: asArray(memory.facts).filter((fact) => fact && !fact.supersededBy).length,
+                entityCount: asArray(memory.entities).length,
+              })
+              return
+            }
+            sendJson(res, 404, { ok: false, error: 'not found' })
+          } catch (error) {
+            logger('[soul] memory HTTP 失败:', error instanceof Error ? error.message : error)
+            sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+          }
+        },
+      }
+      if (typeof ctx.effect === 'function') {
+        ctx.effect(() => webServer.register(registration), 'aura-memory: http')
+      } else {
+        webServer.register(registration)
+      }
+    }
+  } catch (error) {
+    logger('[soul] memory HTTP 路由注册失败:', error instanceof Error ? error.message : error)
   }
 
   // ⑧ API
@@ -1202,8 +1658,16 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         eventCount: asArray(memory.events).length,
         notes: counts,
         topics: Object.keys(asObject(memory.topics)).length,
+        facts: listFactsInMemory(memory, 30).map((fact) => ({ ...fact })),
+        entities: listEntitiesInMemory(memory, 30).map((entity) => ({
+          ...entity,
+          aliases: asArray(entity.aliases).slice(),
+        })),
+        factCount: asArray(memory.facts).filter((fact) => fact && !fact.supersededBy).length,
+        entityCount: asArray(memory.entities).length,
         pendingDue: asArray(memory.reflection?.pendingDue).length,
         lastReflectAt: memory.reflection?.lastReflectAt || 0,
+        lastCompactDayKey: memory.reflection?.lastCompactDayKey || '',
         recent: asArray(memory.events).slice(-5).map((event) => ({
           at: event.at,
           kind: event.kind,
@@ -1237,17 +1701,55 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     }
   }
 
-  function compact(force = true) {
+  function compact(force = false) {
+    const now = Date.now()
+    const dayKey = localDayKey(now)
+    const emptyResult = {
+      compacted: 0,
+      notesAdded: 0,
+      eventsLeft: 0,
+      factsMerged: 0,
+      factsPruned: 0,
+      factsDecayed: 0,
+      entitiesPruned: 0,
+      skipped: false,
+    }
     try {
-      let result = { compacted: 0, notesAdded: 0, eventsLeft: 0 }
+      const current = readMemory()
+      const lastDayKey = current.reflection?.lastCompactDayKey || ''
+      if (force !== true && lastDayKey === dayKey) {
+        return {
+          ...emptyResult,
+          eventsLeft: asArray(current.events).length,
+          skipped: true,
+          reason: 'daily',
+        }
+      }
+      let result = { ...emptyResult }
       store.update((memory) => {
-        result = compactEvents(memory, { force: force === true, threshold: EVENT_COMPACT_THRESHOLD })
+        const events = compactEvents(memory, {
+          force: force === true,
+          threshold: EVENT_COMPACT_THRESHOLD,
+        })
+        if (!memory.reflection || typeof memory.reflection !== 'object') memory.reflection = {}
+        const facts = compactMemoryFacts(memory, now)
+        result = {
+          compacted: events.compacted,
+          notesAdded: events.notesAdded,
+          eventsLeft: memory.events.length,
+          factsMerged: facts.factsMerged,
+          factsPruned: facts.factsPruned,
+          factsDecayed: facts.factsDecayed,
+          entitiesPruned: facts.entitiesPruned,
+          skipped: false,
+        }
+        memory.reflection.lastCompactDayKey = dayKey
         return memory
       })
       return result
     } catch (error) {
       logger('[soul] 记忆压实失败:', error instanceof Error ? error.message : error)
-      return { compacted: 0, notesAdded: 0, eventsLeft: 0 }
+      return { ...emptyResult }
     }
   }
 
@@ -1294,6 +1796,48 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     },
     recall,
     note,
+    addFact: (input = {}) => {
+      let result = { ok: false }
+      try {
+        store.update((memory) => {
+          result = addFactToMemory(memory, input, Date.now())
+          return memory
+        })
+      } catch (error) {
+        logger('[soul] addFact 失败:', error instanceof Error ? error.message : error)
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      }
+      return result
+    },
+    queryFacts: (query, limit = 5) => queryFactsInMemory(readMemory(), query, clamp(asNumber(limit, 5), 1, 50), Date.now()),
+    listFacts: (limit = 50) => listFactsInMemory(readMemory(), clamp(asNumber(limit, 50), 1, FACT_LIMIT)),
+    forgetFact: (id) => {
+      let forgotten = false
+      try {
+        store.update((memory) => {
+          forgotten = forgetFactInMemory(memory, id)
+          return memory
+        })
+      } catch (error) {
+        logger('[soul] forgetFact 失败:', error instanceof Error ? error.message : error)
+      }
+      return forgotten
+    },
+    upsertEntity: (name, options = {}) => {
+      let result = { ok: false }
+      try {
+        store.update((memory) => {
+          result = upsertEntityInMemory(memory, name, options, Date.now())
+          return memory
+        })
+      } catch (error) {
+        logger('[soul] upsertEntity 失败:', error instanceof Error ? error.message : error)
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      }
+      return result
+    },
+    listEntities: (limit = 50) => listEntitiesInMemory(readMemory(), clamp(asNumber(limit, 50), 1, ENTITY_LIMIT)),
+    extractFacts,
     reflect,
     compact,
     pendingDue,
@@ -1314,6 +1858,12 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       EVENT_COMPACT_THRESHOLD,
       EVENT_COMPACT_BATCH,
       MEMORY_FILE,
+      MEMORY_VERSION,
+      FACT_LIMIT,
+      ENTITY_LIMIT,
+      FACT_TEXT_MAX,
+      MEMORY_API_PREFIX,
+      ENTITY_TYPE_LABELS,
     },
   }
   return api

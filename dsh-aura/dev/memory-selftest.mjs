@@ -7,7 +7,9 @@
  *   迁移：soul.memory → memory.json、写前 backup('memory-migrate')、soul 清空、二次不覆盖；
  *   真实 installSoul + installMemory：旧 soul.json 自动迁移、soul.json 不再写 memory、reset 不清 memory.json；
  *   ring 裁剪（memoryMaxEvents 可调 5..40）、压实（>30 最旧 10 条 → notes）、context 预算与最近 2 条；
- *   soul_note/soul_recall/pendingDue 行为、diary 注入 getMemoryStore 读 events。
+ *   soul_note/soul_recall/pendingDue 行为、diary 注入 getMemoryStore 读 events；
+ *   v2：v1→v2 迁移、facts/entities 上限、addFact 合并/取代、queryFacts、规则抽取、
+ *   compact 去重/清理/衰减、soul_fact 工具、context 事实注入、实体别名去重。
  */
 import assert from 'node:assert/strict'
 import {
@@ -37,6 +39,9 @@ const storeMod = await import('../host/memory-store.js')
 const diaryMod = await import('../host/diary.js')
 const {
   MEMORY_FILE,
+  MEMORY_VERSION,
+  FACT_LIMIT,
+  ENTITY_LIMIT,
   createMemoryStore,
   emptyMemory,
   normalizeMemory,
@@ -47,9 +52,17 @@ const {
   MEMORY_CONTEXT_BUDGET_MAX,
   NOTE_MAX,
   NOTE_MAX_CHARS,
+  addFact,
   compactEvents,
+  compactMemoryFacts,
+  extractFacts,
+  forgetFact,
   installMemory,
+  listEntities,
+  listFacts,
+  queryFacts,
   renderMemoryContext,
+  upsertEntity,
 } = memoryMod
 
 const lengthOf = (text) => Array.from(String(text ?? '')).length
@@ -76,6 +89,7 @@ function makeFakeCtx() {
   const tools = []
   const contexts = []
   const disposers = []
+  const registrations = []
   const ctx = {
     on() {
       return () => {}
@@ -100,6 +114,12 @@ function makeFakeCtx() {
         return () => {}
       },
     },
+    webServer: {
+      register(registration) {
+        registrations.push(registration)
+        return () => {}
+      },
+    },
     get() {
       return undefined
     },
@@ -108,6 +128,7 @@ function makeFakeCtx() {
     ctx,
     tools,
     contexts,
+    registrations,
     dispose() {
       for (const fn of disposers.reverse()) {
         try {
@@ -136,7 +157,7 @@ function eventText(i, at = Date.now()) {
 // ---------- 1. memory-store 纯存储 ----------
 section('1. memory-store：原子写 / 损坏回退 / 归一化裁剪 / 重启读取')
 
-await test('write/read：version 1、原子 tmp+rename、没有残留 tmp 文件', () => {
+await test('write/read：version 2、原子 tmp+rename、没有残留 tmp 文件', () => {
   const dir = join(root, 'store-a')
   const store = createMemoryStore({ home: dir, log: () => {} })
   const written = store.write({
@@ -145,9 +166,11 @@ await test('write/read：version 1、原子 tmp+rename、没有残留 tmp 文件
     topics: { 加班: { lastAt: 1000, count: 2 } },
     reflection: { lastReflectAt: 123, pendingDue: [{ at: 5000, text: '面试' }] },
   })
-  assert.equal(written.version, 1)
+  assert.equal(written.version, MEMORY_VERSION)
   const disk = JSON.parse(readFileSync(store.file, 'utf8'))
-  assert.equal(disk.version, 1)
+  assert.equal(disk.version, MEMORY_VERSION)
+  assert.deepEqual(disk.facts, [])
+  assert.deepEqual(disk.entities, [])
   assert.equal(disk.events.length, 1)
   assert.equal(lengthOf(disk.notes.user[0].text), NOTE_MAX_CHARS)
   const leftovers = readdirSync(dir).filter((name) => name.endsWith('.tmp'))
@@ -363,7 +386,7 @@ await test('压实：事件超过 30 时最旧 10 条汇总成 notes，events �
   assert.equal(memoryNow.events.length, 15)
 })
 
-await test('renderMemoryContext：预算 ≤220（当前 180），只含最近 2 条事件', () => {
+await test('renderMemoryContext：预算 ≤240，只含最近 2 条事件', () => {
   memory.clear()
   memory.note('user', '用户叫木子', 0.9)
   memory.note('user', '用户喜欢听歌', 0.8)
@@ -473,6 +496,425 @@ await test('renderRuleDiary 支持只传 memory；createDiary 注入 store 后�
   const stored = JSON.parse(readFileSync(join(diaryHome, 'diary.json'), 'utf8'))
   assert.equal(stored.entries.length, 1)
   diary.dispose()
+})
+
+// ---------- 7. schema v2：迁移与上限 ----------
+section('7. schema v2：v1→v2 迁移、facts 200 / entities 100 上限')
+
+await test('v1→v2：读取自动补 facts/entities/lastCompactDayKey 并写回一次', () => {
+  const dir = join(root, 'store-v1')
+  mkdirSync(dir, { recursive: true })
+  const store = createMemoryStore({ home: dir, log: () => {} })
+  writeFileSync(store.file, JSON.stringify({
+    version: 1,
+    events: [eventText(1, 1000)],
+    notes: { user: [{ text: '旧笔记' }], us: [], self: [] },
+    topics: { 加班: { lastAt: 1000, count: 1 } },
+    reflection: { lastReflectAt: 99, pendingDue: [] },
+  }), 'utf8')
+  const memory = store.read()
+  assert.equal(memory.version, MEMORY_VERSION)
+  assert.deepEqual(memory.facts, [])
+  assert.deepEqual(memory.entities, [])
+  assert.equal(memory.reflection.lastCompactDayKey, '')
+  assert.equal(memory.events.length, 1)
+  const disk = JSON.parse(readFileSync(store.file, 'utf8'))
+  assert.equal(disk.version, MEMORY_VERSION)
+  assert.ok(Array.isArray(disk.facts) && Array.isArray(disk.entities))
+  assert.ok('lastCompactDayKey' in disk.reflection)
+  // 第二次读不应再写回：塞一个 sentinel，读后还在说明没有重写。
+  disk.sentinel = 'keep-me'
+  writeFileSync(store.file, JSON.stringify(disk), 'utf8')
+  store.read()
+  assert.equal(JSON.parse(readFileSync(store.file, 'utf8')).sentinel, 'keep-me')
+  store.dispose()
+})
+
+await test('上限裁剪：facts 超 200 先删 superseded，entities 超 100 删最旧', () => {
+  const memory = emptyMemory()
+  memory.facts = Array.from({ length: FACT_LIMIT }, (_, index) => ({
+    id: `old-fact-${index}`,
+    subject: `主体${index}`,
+    predicate: '喜欢',
+    value: `值${index}`,
+    text: '旧卡',
+    confidence: 0.3,
+    source: 'user',
+    firstSeenAt: index,
+    lastSeenAt: index,
+    supersededBy: index < 50 ? `gone-${index}` : null,
+    lastDecayAt: index,
+  }))
+  const added = addFact(memory, {
+    subject: '新主体', predicate: '喜欢', value: '听歌', confidence: 0.9,
+  }, 500)
+  assert.equal(added.created, true)
+  assert.equal(memory.facts.length, FACT_LIMIT)
+  assert.equal(memory.facts.filter(fact => fact.supersededBy).length, 49, '应优先删已取代的卡')
+  assert.equal(memory.facts.some(fact => fact.id === 'old-fact-0'), false)
+
+  memory.entities = Array.from({ length: ENTITY_LIMIT }, (_, index) => ({
+    id: `old-ent-${index}`,
+    name: `实体${index}`,
+    type: 'other',
+    aliases: [],
+    firstSeenAt: index,
+    lastSeenAt: index,
+  }))
+  const entity = upsertEntity(memory, '团子', { type: 'pet', aliases: ['猫'] }, 900)
+  assert.equal(entity.created, true)
+  assert.equal(memory.entities.length, ENTITY_LIMIT)
+  assert.equal(memory.entities.some(item => item.name === '实体0'), false)
+  assert.ok(memory.entities.some(item => item.name === '团子'))
+})
+
+await test('memory-store 便捷方法：store.addFact / queryFacts / upsertEntity / compactFacts', () => {
+  const dir = join(root, 'store-facts')
+  const store = createMemoryStore({ home: dir, log: () => {} })
+  const added = store.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.9 })
+  assert.equal(added.ok, true)
+  assert.equal(store.queryFacts('听歌').length, 1)
+  assert.equal(store.listFacts().length, 1)
+  const entity = store.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  assert.equal(entity.created, true)
+  assert.equal(store.listEntities()[0].name, '团子')
+  const compacted = store.compactFacts()
+  assert.equal(compacted.factsMerged, 0)
+  assert.equal(store.forgetFact(added.fact.id), true)
+  assert.equal(store.listFacts().length, 0)
+  store.dispose()
+})
+
+// ---------- 8. 事实卡 / 实体卡 API ----------
+section('8. addFact / queryFacts / listFacts / forgetFact / upsertEntity')
+
+await test('addFact：同值合并提升 confidence、不同值取代旧卡、confidence 取高', () => {
+  const memory = emptyMemory()
+  const first = addFact(memory, {
+    subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.6, source: 'user', text: '木子喜欢听歌',
+  }, 1000)
+  assert.equal(first.created, true)
+  assert.equal(first.fact.firstSeenAt, 1000)
+  assert.equal(first.fact.lastSeenAt, 1000)
+
+  const merged = addFact(memory, {
+    subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.6, source: 'user',
+  }, 2000)
+  assert.equal(merged.merged, true)
+  assert.equal(memory.facts.length, 1)
+  assert.ok(Math.abs(merged.fact.confidence - 0.65) < 1e-9)
+  assert.equal(merged.fact.lastSeenAt, 2000)
+  assert.equal(merged.fact.firstSeenAt, 1000)
+
+  const replaced = addFact(memory, {
+    subject: '木子', predicate: '喜欢', value: '看电影', confidence: 0.8, source: 'reflection',
+  }, 3000)
+  assert.equal(replaced.created, true)
+  assert.equal(replaced.superseded, 1)
+  const oldFact = memory.facts.find(fact => fact.value === '听歌')
+  assert.equal(oldFact.supersededBy, replaced.fact.id)
+  assert.equal(replaced.fact.confidence, 0.8)
+
+  const high = addFact(memory, {
+    subject: '木子', predicate: '喜欢', value: '跑步', confidence: 0.95,
+  }, 4000)
+  const lower = addFact(memory, {
+    subject: '木子', predicate: '喜欢', value: '爬山', confidence: 0.6,
+  }, 5000)
+  assert.equal(high.created, true)
+  assert.equal(lower.fact.confidence, 0.95, '新卡应继承旧卡更高置信度')
+})
+
+await test('queryFacts：subject/value/predicate token 命中 + recency，跳过 superseded', () => {
+  const memory = emptyMemory()
+  addFact(memory, { subject: '木子', predicate: '居住地', value: '杭州', text: '木子住在杭州' }, 1000)
+  addFact(memory, { subject: '木子', predicate: '生日', value: '5月3日', text: '木子生日是5月3日' }, 2000)
+  addFact(memory, { subject: '木子', predicate: '工作', value: '字节', text: '木子在字节上班' }, 3000)
+  addFact(memory, { subject: '木子', predicate: '喜欢', value: '听歌', text: '木子喜欢听歌' }, 4000)
+  addFact(memory, { subject: '木子', predicate: '喜欢', value: '看电影', text: '木子喜欢看电影' }, 5000)
+
+  assert.equal(queryFacts(memory, '杭州')[0].predicate, '居住地')
+  assert.equal(queryFacts(memory, '生日')[0].value, '5月3日')
+  assert.equal(queryFacts(memory, '字节')[0].predicate, '工作')
+  assert.equal(queryFacts(memory, '喜欢')[0].value, '看电影')
+  assert.equal(queryFacts(memory, '听歌').length, 0, 'superseded 不应命中')
+  assert.equal(listFacts(memory).length, 4)
+  assert.equal(listFacts(memory)[0].value, '看电影')
+
+  const forgot = forgetFact(memory, memory.facts.find(fact => fact.value === '看电影').id)
+  assert.equal(forgot, true)
+  assert.equal(queryFacts(memory, '喜欢').length, 0)
+  assert.equal(forgetFact(memory, 'does-not-exist'), false)
+})
+
+await test('upsertEntity：名字/别名去重，类型更新，lastSeenAt 刷新', () => {
+  const memory = emptyMemory()
+  const first = upsertEntity(memory, '团子', { type: 'pet', aliases: ['猫', '咪咪'] }, 1000)
+  assert.equal(first.created, true)
+  const second = upsertEntity(memory, '咪咪', { type: 'pet', aliases: ['团子', '猫猫'] }, 2000)
+  assert.equal(second.created, false)
+  assert.equal(memory.entities.length, 1)
+  assert.equal(second.entity.name, '团子')
+  assert.deepEqual(second.entity.aliases.sort(), ['猫', '猫猫', '咪咪'].sort())
+  assert.equal(second.entity.lastSeenAt, 2000)
+  assert.equal(second.entity.firstSeenAt, 1000)
+})
+
+// ---------- 9. 规则抽取 ----------
+section('9. 规则抽取：称呼/喜欢/讨厌/宠物/居住/在做/生日/工作/约定')
+
+await test('每种句式都能抽出事实；约定 0.9，普通规则 0.6，单条 ≤60 字', () => {
+  const cases = [
+    ['我叫木子', '称呼', '木子'],
+    ['我喜欢听歌', '喜欢', '听歌'],
+    ['我不喜欢香菜', '讨厌', '香菜'],
+    ['我养了一只猫叫团子', '宠物', '团子'],
+    ['我住在杭州', '居住地', '杭州'],
+    ['我最近在忙长期记忆项目', '在忙', '长期记忆项目'],
+    ['我生日是5月3日', '生日', '5月3日'],
+    ['我在字节上班', '工作', '字节'],
+    ['答应你周末陪你看电影', '约定', '你周末陪你看电影'],
+  ]
+  for (const [text, predicate, value] of cases) {
+    const extracted = extractFacts(text, { subject: '木子' })
+    const fact = extracted.facts.find(item => item.predicate === predicate)
+    assert.ok(fact, `「${text}」应抽出 ${predicate}`)
+    assert.equal(fact.value, value)
+    assert.ok(lengthOf(fact.text) <= 60, `事实 text 应 ≤60 字，实际 ${lengthOf(fact.text)}`)
+    assert.ok(lengthOf(fact.value) <= 60)
+    if (predicate === '约定') assert.equal(fact.confidence, 0.9)
+    else assert.equal(fact.confidence, 0.6)
+  }
+})
+
+await test('抽取保守：叫我起床 / 我住的地方 / 模糊生日 不产生事实', () => {
+  assert.equal(extractFacts('叫我起床').facts.length, 0)
+  assert.equal(extractFacts('我住的地方很吵').facts.length, 0)
+  assert.equal(extractFacts('我生日快到了').facts.length, 0)
+  assert.equal(extractFacts('我在上班').facts.length, 0)
+  const longText = extractFacts('我喜欢' + '很长的爱好'.repeat(20))
+  assert.ok(longText.facts.every(fact => lengthOf(fact.text) <= 60))
+})
+
+await test('宠物/居住/工作生成对应实体（pet / place）', () => {
+  const pet = extractFacts('我养了一只猫叫团子')
+  assert.ok(pet.entities.some(entity => entity.name === '团子' && entity.type === 'pet'))
+  const live = extractFacts('我住在杭州')
+  assert.ok(live.entities.some(entity => entity.name === '杭州' && entity.type === 'place'))
+  const work = extractFacts('我在字节上班')
+  assert.ok(work.entities.some(entity => entity.name === '字节' && entity.type === 'place'))
+})
+
+await test('onUserMessage：规则抽取真的写进 memory.json', () => {
+  memory.clear()
+  const base = Date.now()
+  memory.onUserMessage({
+    text: '我养了一只猫叫团子，我住在杭州，我喜欢听歌',
+    at: base,
+    sessionId: 'qq:extract',
+  })
+  const disk = memory.store.read()
+  assert.ok(disk.facts.some(fact => fact.predicate === '宠物' && fact.value === '团子'))
+  assert.ok(disk.facts.some(fact => fact.predicate === '居住地' && fact.value === '杭州'))
+  assert.ok(disk.facts.some(fact => fact.predicate === '喜欢' && fact.value === '听歌'))
+  assert.ok(disk.entities.some(entity => entity.name === '团子' && entity.type === 'pet'))
+  assert.ok(disk.entities.some(entity => entity.name === '杭州' && entity.type === 'place'))
+  assert.ok(disk.facts.every(fact => lengthOf(fact.text) <= 60))
+})
+
+// ---------- 10. 周期整理 ----------
+section('10. compact：去重 / 60 天清理 / 30 天衰减 / 90 天实体清理 / 每天一次')
+
+await test('compactMemoryFacts：合并同 subject+predicate+value 重复卡', () => {
+  const now = Date.now()
+  const memory = emptyMemory()
+  const first = addFact(memory, {
+    subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.6, text: '木子喜欢听歌',
+  }, now - 2000)
+  memory.facts.push({
+    ...first.fact,
+    id: 'fact-duplicate',
+    confidence: 0.9,
+    lastSeenAt: now - 1000,
+    text: '木子喜欢听歌（重复）',
+  })
+  const result = compactMemoryFacts(memory, now)
+  assert.equal(result.factsMerged, 1)
+  assert.equal(memory.facts.filter(fact => !fact.supersededBy).length, 1)
+  assert.equal(memory.facts[0].confidence, 0.9)
+})
+
+await test('compactMemoryFacts：清理 60 天前 superseded，30 天后每天 -0.02（下限 0.3）', () => {
+  const now = Date.now()
+  const day = 86_400_000
+  const memory = emptyMemory()
+  addFact(memory, { subject: '木子', predicate: '喜欢', value: '旧爱好', confidence: 0.8 }, now - 70 * day)
+  addFact(memory, { subject: '木子', predicate: '喜欢', value: '新爱好', confidence: 0.8 }, now - 70 * day + 1)
+  const decay = addFact(memory, { subject: '木子', predicate: '在做', value: '长期项目', confidence: 0.9 }, now - 40 * day)
+  decay.fact.lastDecayAt = now - 40 * day
+  const floor = addFact(memory, { subject: '木子', predicate: '在学', value: '旧项目', confidence: 0.5 }, now - 200 * day)
+  floor.fact.lastDecayAt = now - 200 * day
+
+  const result = compactMemoryFacts(memory, now)
+  assert.ok(result.factsPruned >= 1, '应清理旧的 superseded')
+  assert.equal(memory.facts.some(fact => fact.value === '旧爱好'), false)
+  const decayed = memory.facts.find(fact => fact.value === '长期项目')
+  assert.ok(Math.abs(decayed.confidence - 0.7) < 1e-9, `40 天应衰减到 0.7，实际 ${decayed.confidence}`)
+  const floored = memory.facts.find(fact => fact.value === '旧项目')
+  assert.equal(floored.confidence, 0.3, '衰减不应低于 0.3')
+  // 第二天再整理：应再降 0.02，而不是重新等 30 天
+  compactMemoryFacts(memory, now + day)
+  assert.ok(Math.abs(memory.facts.find(fact => fact.value === '长期项目').confidence - 0.68) < 1e-9)
+})
+
+await test('compactMemoryFacts：90 天无事实关联的实体清理，有关联的保留', () => {
+  const now = Date.now()
+  const day = 86_400_000
+  const memory = emptyMemory()
+  upsertEntity(memory, '杭州', { type: 'place' }, now - 100 * day)
+  memory.entities.find(entity => entity.name === '杭州').lastSeenAt = now - 100 * day
+  upsertEntity(memory, '团子', { type: 'pet' }, now - 100 * day)
+  memory.entities.find(entity => entity.name === '团子').lastSeenAt = now - 100 * day
+  addFact(memory, { subject: '木子', predicate: '宠物', value: '团子', confidence: 0.9 }, now)
+  const result = compactMemoryFacts(memory, now)
+  assert.equal(result.entitiesPruned, 1)
+  assert.equal(memory.entities.some(entity => entity.name === '杭州'), false)
+  assert.equal(memory.entities.some(entity => entity.name === '团子'), true)
+})
+
+await test('compact()：每天最多一次，force 可强制再跑', () => {
+  memory.clear()
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.9 })
+  const first = memory.compact(false)
+  assert.equal(first.skipped, false)
+  assert.equal(memory.snapshot().lastCompactDayKey, diaryMod.localDayKey(Date.now()))
+  const second = memory.compact(false)
+  assert.equal(second.skipped, true)
+  assert.equal(second.reason, 'daily')
+  const forced = memory.compact(true)
+  assert.equal(forced.skipped, false)
+})
+
+// ---------- 11. soul_fact / soul_recall ----------
+section('11. soul_fact 工具 / soul_recall 附带 facts+entities')
+
+await test('soul_fact：add / query / list / forget 全流程', async () => {
+  memory.clear()
+  const factTool = memFake.tools.find(tool => tool.name === 'soul_fact')
+  assert.ok(factTool, '应注册 soul_fact')
+  const added = await factTool.execute({
+    action: 'add', subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.9,
+  })
+  assert.equal(added.ok, true)
+  assert.equal(added.fact.subject, '木子')
+  assert.equal(added.fact.value, '听歌')
+  assert.equal(added.fact.confidence, 0.9)
+
+  const queried = await factTool.execute({ action: 'query', query: '听歌' })
+  assert.ok(queried.facts.some(fact => fact.value === '听歌'))
+  const listed = await factTool.execute({ action: 'list', limit: 5 })
+  assert.ok(listed.count >= 1)
+  const forgotten = await factTool.execute({ action: 'forget', id: added.fact.id })
+  assert.equal(forgotten.forgotten, true)
+  const after = await factTool.execute({ action: 'query', query: '听歌' })
+  assert.equal(after.count, 0)
+  const bad = await factTool.execute({ action: 'unknown' })
+  assert.equal(bad.ok, false)
+})
+
+await test('soul_recall 结果附带命中的 facts 与 entities', async () => {
+  memory.clear()
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', text: '木子喜欢听歌', confidence: 0.9 })
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  const recallTool = memFake.tools.find(tool => tool.name === 'soul_recall')
+  assert.ok(recallTool)
+  const factRecall = await recallTool.execute({ query: '听歌' })
+  assert.ok(Array.isArray(factRecall.facts))
+  assert.ok(factRecall.facts.some(fact => fact.value === '听歌'))
+  const entityRecall = await recallTool.execute({ query: '团子' })
+  assert.ok(Array.isArray(entityRecall.entities))
+  assert.ok(entityRecall.entities.some(entity => entity.name === '团子'))
+  assert.equal(entityRecall.entities[0].type, 'pet')
+})
+
+await test('memory-api：面板只读接口返回 facts/entities，非本机请求 403', async () => {
+  const registration = memFake.registrations.find(item => item.path === '/dsh-aura/memory-api')
+  assert.ok(registration, 'installMemory 应注册 /dsh-aura/memory-api')
+  memory.clear()
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', text: '木子喜欢听歌', confidence: 0.9 })
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  const response = {
+    status: 0,
+    body: '',
+    writeHead(status) {
+      this.status = status
+    },
+    end(chunk) {
+      this.body = String(chunk ?? '')
+    },
+  }
+  await registration.handler({
+    method: 'GET',
+    url: '/dsh-aura/memory-api/state?limit=12',
+    headers: { host: '127.0.0.1:3080' },
+  }, response)
+  assert.equal(response.status, 200)
+  const body = JSON.parse(response.body)
+  assert.ok(body.facts.some(fact => fact.value === '听歌'))
+  assert.ok(body.entities.some(entity => entity.name === '团子'))
+  assert.equal(body.facts.some(fact => fact.supersededBy), false)
+
+  const forbidden = {
+    status: 0,
+    body: '',
+    writeHead(status) {
+      this.status = status
+    },
+    end(chunk) {
+      this.body = String(chunk ?? '')
+    },
+  }
+  await registration.handler({
+    method: 'GET',
+    url: '/dsh-aura/memory-api/state',
+    headers: { host: 'example.com' },
+  }, forbidden)
+  assert.equal(forbidden.status, 403)
+})
+
+// ---------- 12. context / snapshot ----------
+section('12. context 注入事实/实体且 ≤240；snapshot 带 facts/entities')
+
+await test('context：query 命中事实 + top2 实体，superseded 不注入', () => {
+  memory.clear()
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', text: '木子喜欢听歌', confidence: 0.9 })
+  memory.addFact({ subject: '木子', predicate: '居住地', value: '杭州', text: '木子住在杭州', confidence: 0.9 })
+  memory.addFact({ subject: '木子', predicate: '生日', value: '5月3日', text: '木子生日是5月3日', confidence: 0.9 })
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '看电影', text: '木子喜欢看电影', confidence: 0.9 })
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  memory.upsertEntity('杭州', { type: 'place' })
+  for (let index = 1; index <= 5; index += 1) {
+    memory.addEvent(eventText(index, Date.now() + index * 1000))
+  }
+  const context = memory.renderContext(Date.now(), { lastUserText: '喜欢' })
+  assert.ok(context.includes('（你记得：'), context)
+  assert.ok(context.includes('木子喜欢看电影'), '应注入当前有效事实')
+  assert.equal(context.includes('木子喜欢听歌'), false, 'superseded 不应注入')
+  assert.ok(context.includes('团子（宠物）'))
+  assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET, `预算应 ≤${MEMORY_CONTEXT_BUDGET}，实际 ${lengthOf(context)}`)
+  assert.ok(context.includes('事件编号5') && context.includes('事件编号4'))
+  assert.equal(context.includes('事件编号1'), false)
+})
+
+await test('snapshot 带 facts/entities，且事实不含 superseded', () => {
+  const snap = memory.snapshot()
+  assert.ok(Array.isArray(snap.facts))
+  assert.ok(Array.isArray(snap.entities))
+  assert.ok(snap.facts.length > 0)
+  assert.ok(snap.entities.length > 0)
+  assert.ok(snap.facts.every(fact => !fact.supersededBy))
+  assert.ok(snap.factCount >= snap.facts.length)
+  assert.ok(snap.entities.every(entity => Array.isArray(entity.aliases)))
 })
 
 // 收尾

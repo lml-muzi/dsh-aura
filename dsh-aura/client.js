@@ -21,6 +21,8 @@ window.__ModuleLoader__.load({
     const PERSONA_API = '/dsh-aura/persona-api'
     /** 日记 Host API（本机同源；mode=rule 零 token）。 */
     const DIARY_API = '/dsh-aura/diary-api'
+    /** 事实卡/实体卡只读接口（Host 单独开的路由，web.js 的 /state 不透传这两块）。 */
+    const MEMORY_API = '/dsh-aura/memory-api'
     /** 人设保存成功后广播的 window 事件：光轨等常驻组件据此立即刷新配置。 */
     const PERSONA_SAVED_EVENT = 'aura:persona-saved'
     const MEME_TAG_LABELS = {
@@ -44,6 +46,8 @@ window.__ModuleLoader__.load({
       see: '看看',
       sigh: '叹气',
     }
+    /** 事实卡/实体卡的类型白名单（和 Host 的 ENTITY_TYPES 对齐）。 */
+    const MEMORY_ENTITY_TYPES = ['person', 'pet', 'place', 'project', 'other']
     const PERSONA_TRAIL_COLOR_DEFAULT = '#679EFE'
     const PERSONA_STYLES = [
       ['professional', '专业严谨'],
@@ -319,12 +323,23 @@ window.__ModuleLoader__.load({
       'memory.notesCount': '{count} 条',
       'memory.topics': '聊到的话题',
       'memory.topicsEmpty': '还没有话题',
+      'memory.facts': '事实卡',
+      'memory.factsEmpty': '还没有事实卡',
+      'memory.factConfidence': '{value}%',
+      'memory.entities': '实体卡',
+      'memory.entitiesEmpty': '还没有实体卡',
+      'memory.entityAliases': '别名：{names}',
+      'memory.entity.person': '人物',
+      'memory.entity.pet': '宠物',
+      'memory.entity.place': '地点',
+      'memory.entity.project': '项目',
+      'memory.entity.other': '其他',
       'memory.empty': '还没有记忆',
       'memory.emptyHint': '她会在聊天中慢慢记下值得记住的事',
       'memory.reset': '清空记忆',
       'memory.resetConfirm': '再点一次确认清空',
       'memory.resetNotice': '记忆已清空',
-      'memory.resetWarning': '会删除事件、笔记和话题，且不可恢复',
+      'memory.resetWarning': '会删除事件、笔记、话题和事实/实体卡，且不可恢复',
       'section.speak': '主动搭话',
       'row.speakEnabled': '开启主动搭话',
       'row.speakEnabled.hint': '她会在你安静太久时自己开口',
@@ -530,12 +545,23 @@ window.__ModuleLoader__.load({
       'memory.notesCount': '{count}',
       'memory.topics': 'Topics',
       'memory.topicsEmpty': 'No topics yet',
+      'memory.facts': 'Fact cards',
+      'memory.factsEmpty': 'No fact cards yet',
+      'memory.factConfidence': '{value}%',
+      'memory.entities': 'Entity cards',
+      'memory.entitiesEmpty': 'No entity cards yet',
+      'memory.entityAliases': 'Aliases: {names}',
+      'memory.entity.person': 'Person',
+      'memory.entity.pet': 'Pet',
+      'memory.entity.place': 'Place',
+      'memory.entity.project': 'Project',
+      'memory.entity.other': 'Other',
       'memory.empty': 'No memory yet',
       'memory.emptyHint': 'She will remember what is worth remembering as you talk',
       'memory.reset': 'Clear memory',
       'memory.resetConfirm': 'Click again to confirm',
       'memory.resetNotice': 'Memory cleared',
-      'memory.resetWarning': 'Deletes events, notes and topics; cannot be undone',
+      'memory.resetWarning': 'Deletes events, notes, topics and fact/entity cards; cannot be undone',
       'section.speak': 'Proactive pings',
       'row.speakEnabled': 'Enable proactive pings',
       'row.speakEnabled.hint': 'She may speak up when you have been quiet too long',
@@ -747,6 +773,13 @@ window.__ModuleLoader__.load({
 .qqn-memory-group{display:flex;flex-direction:column;gap:2px}
 .qqn-memory-group-title{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .qqn-memory-item{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
+.aura-memory-fact-list,.aura-memory-entity-list{display:flex;flex-direction:column;gap:6px}
+.aura-memory-fact{display:flex;flex-direction:column;gap:2px;padding:7px 9px;border-radius:8px;background:var(--dsw-alias-bg-layer-3);border:.5px solid var(--dsw-alias-border-l3)}
+.aura-memory-fact-text{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
+.aura-memory-fact-meta{display:flex;gap:8px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.aura-memory-entity{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.aura-memory-entity-type{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.aura-memory-entity-aliases{color:var(--dsw-alias-label-caption);font-size:11px;line-height:16px;overflow-wrap:anywhere}
 .qqn-chip-list{display:flex;flex-wrap:wrap;gap:6px}
 .qqn-tag{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:11px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .qqn-log-list{display:flex;flex-direction:column;padding:6px 0}
@@ -1417,6 +1450,41 @@ ${TRAIL_CSS}
       return value
     }
 
+    /** 事实/实体卡：/state 只带 events/notes/topics，这两块单独拉只读接口。 */
+    async function fetchMemoryCards() {
+      try {
+        const value = await fetchJson(MEMORY_API + '/state?limit=50')
+        return {
+          facts: Array.isArray(value?.facts) ? value.facts : [],
+          entities: Array.isArray(value?.entities) ? value.entities : [],
+        }
+      } catch {
+        return null
+      }
+    }
+
+    /** 把 memory 接口的 facts/entities 并进 /state 的 soul.memory；旧 Host 缺失时静默跳过。 */
+    function mergeMemoryCards(value, cards) {
+      if (!cards || !value || typeof value !== 'object') return value
+      const soul = asObject(value.soul)
+      const hasCards = cards.facts.length > 0 || cards.entities.length > 0
+      if (Object.keys(soul).length === 0 && !hasCards) return value
+      const memory = asObject(soul.memory)
+      if ((!Array.isArray(memory.facts) || memory.facts.length === 0) && cards.facts.length > 0) {
+        memory.facts = cards.facts
+      } else if (!Array.isArray(memory.facts)) {
+        memory.facts = []
+      }
+      if ((!Array.isArray(memory.entities) || memory.entities.length === 0) && cards.entities.length > 0) {
+        memory.entities = cards.entities
+      } else if (!Array.isArray(memory.entities)) {
+        memory.entities = []
+      }
+      soul.memory = memory
+      value.soul = soul
+      return value
+    }
+
     /** 本地时区的 YYYY-MM-DD，和日记 API 的 date 对齐。 */
     function diaryDateKey(ms) {
       const date = new Date(Number.isFinite(Number(ms)) ? Number(ms) : Date.now())
@@ -1796,9 +1864,9 @@ ${TRAIL_CSS}
         if (inflight.current) return
         inflight.current = true
         try {
-          const value = await api('/state')
+          const [value, cards] = await Promise.all([api('/state'), fetchMemoryCards()])
           if (!mounted.current) return
-          setSnap(value)
+          setSnap(mergeMemoryCards(value, cards))
           setPollError('')
           if (value && value.config) {
             setAppearance(value.config)
@@ -2894,6 +2962,37 @@ ${TRAIL_CSS}
       })
       const noteCount = noteGroups.reduce((total, group) => total + group.items.length, 0)
       const topics = topicRows(memory.topics).slice(0, 24)
+      /* ---- 事实卡 / 实体卡（superseded 不显示；面板各最多 12 条） ---- */
+      const memoryFacts = asArray(memory.facts)
+        .map(row => asObject(row))
+        .filter(row => !row.supersededBy && String(row.value || '').trim())
+        .map((row, index) => ({
+          key: String(row.id || '') || ('fact-' + index + '-' + String(row.lastSeenAt || '')),
+          subject: String(row.subject || '').trim(),
+          predicate: String(row.predicate || '').trim(),
+          value: String(row.value || '').trim(),
+          confidence: Number.isFinite(Number(row.confidence))
+            ? Math.max(0, Math.min(1, Number(row.confidence)))
+            : 0.6,
+          lastSeenAt: timeOf(row.lastSeenAt || row.firstSeenAt),
+        }))
+        .sort((left, right) => right.lastSeenAt - left.lastSeenAt)
+        .slice(0, 12)
+      const memoryEntities = asArray(memory.entities)
+        .map(row => asObject(row))
+        .filter(row => String(row.name || '').trim())
+        .map((row, index) => ({
+          key: String(row.id || '') || ('entity-' + index + '-' + String(row.lastSeenAt || '')),
+          name: String(row.name || '').trim(),
+          type: MEMORY_ENTITY_TYPES.includes(row.type) ? row.type : 'other',
+          aliases: asArray(row.aliases)
+            .map(alias => String(alias || '').trim())
+            .filter(Boolean)
+            .slice(0, 8),
+          lastSeenAt: timeOf(row.lastSeenAt || row.firstSeenAt),
+        }))
+        .sort((left, right) => right.lastSeenAt - left.lastSeenAt)
+        .slice(0, 12)
       /* ---- 成长：她自己长出来的部分（只读；宿主暂未开放编辑 HTTP） ---- */
       const growthAll = rowsNewest(soulData.growth, 'at')
       const growthTotal = growthAll.length
@@ -3407,6 +3506,37 @@ ${TRAIL_CSS}
                   h('span', { className: 'qqn-event-text' }, row.text),
                 )))
               : h('div', { className: 'qqn-mood-empty' }, soulPresent ? t('memory.eventsEmpty') : t('empty.soulPending')),
+          ),
+          h('div', { className: 'qqn-memory-block' },
+            h('div', { className: 'qqn-look-title' }, t('memory.facts')),
+            memoryFacts.length
+              ? h('div', { className: 'aura-memory-fact-list' }, memoryFacts.map(fact => h('div', {
+                  key: fact.key,
+                  className: 'aura-memory-fact',
+                },
+                  h('div', { className: 'aura-memory-fact-text' },
+                    [fact.subject, fact.predicate, fact.value].filter(Boolean).join(' · ')),
+                  h('div', { className: 'aura-memory-fact-meta' },
+                    h('span', null, t('memory.factConfidence', { value: Math.round(fact.confidence * 100) })),
+                    fact.lastSeenAt ? h('span', null, formatRelative(fact.lastSeenAt, t)) : null,
+                  ),
+                )))
+              : h('div', { className: 'qqn-mood-empty' }, soulPresent ? t('memory.factsEmpty') : t('empty.soulPending')),
+          ),
+          h('div', { className: 'qqn-memory-block' },
+            h('div', { className: 'qqn-look-title' }, t('memory.entities')),
+            memoryEntities.length
+              ? h('div', { className: 'aura-memory-entity-list' }, memoryEntities.map(entity => h('div', {
+                  key: entity.key,
+                  className: 'aura-memory-entity',
+                },
+                  h('span', { className: 'qqn-tag' }, entity.name),
+                  h('span', { className: 'aura-memory-entity-type' }, t('memory.entity.' + entity.type)),
+                  entity.aliases.length
+                    ? h('span', { className: 'aura-memory-entity-aliases' }, t('memory.entityAliases', { names: entity.aliases.join('、') }))
+                    : null,
+                )))
+              : h('div', { className: 'qqn-mood-empty' }, soulPresent ? t('memory.entitiesEmpty') : t('empty.soulPending')),
           ),
           h('div', { className: 'qqn-memory-block' },
             h('div', { className: 'qqn-look-title' }, t('memory.notes')),
