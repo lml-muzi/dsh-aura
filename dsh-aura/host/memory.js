@@ -2,7 +2,7 @@
  * 记忆层（Host 侧）：短期事件流 / 长期笔记 / 话题索引 / 关键词召回 / 反思 / 记忆工具 /
  * 实体图（facts → entities → relations，1 跳召回）、立即记忆、会话整理（digest）。
  *
- * 设计依据：docs/aura-soul-design.md 的 C（记忆）、E.4（context order 40）、E.5.2/E.5.3（soul_note/soul_recall）。
+ * 设计依据：docs/aura-soul-design.md 的 C（记忆）、E.4（context order 40）、E.5.2/E.5.3（soul_memory/soul_recall）。
  *
  * 状态所有权：
  * - 短期记忆已和灵魂分离，存在独立 memory.json（host/memory-store.js）。本模块是唯一读写方。
@@ -959,6 +959,10 @@ export function renderMemoryToolText(value) {
   if (result.entity && result.removedRelations !== undefined) {
     return `删掉了实体「${result.entity.name}」，清掉 ${asNumber(result.removedRelations, 0)} 条关系`
   }
+  if (result.fact && result.fact.subject !== undefined) {
+    return `记下了：${result.fact.subject} · ${result.fact.predicate} · ${result.fact.value}`
+      + (result.merged ? '（已合并同类）' : '')
+  }
   if (result.deleted) return `删掉了事实卡 ${String(result.id ?? '')}`
   if (result.note && result.removed) return `删掉了笔记：${String(result.note.text ?? '')}`
   if (result.note && Array.isArray(result.updated)) return `已更新：${String(result.note.text ?? '')}`
@@ -1136,7 +1140,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
 
   /**
    * 立即记忆去重：同一段文本已经在笔记里（24h 内）就不再写。
-   * 只在立即记忆/重要事实路径使用；普通 soul_note 不受影响。
+   * 只在立即记忆/重要事实路径使用；普通 soul_memory writeNote 不受影响。
    */
   function findFreshNote(memory, text, now) {
     for (const key of ['user', 'us', 'self']) {
@@ -1981,7 +1985,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       })
       return { ok: true, merged: merged.merged, note: merged.note ?? made, count }
     } catch (error) {
-      logger('[soul] soul_note 失败:', error instanceof Error ? error.message : error)
+      logger('[soul] 写笔记失败:', error instanceof Error ? error.message : error)
       return { ok: false, reason: error instanceof Error ? error.message : String(error) }
     }
   }
@@ -2006,29 +2010,6 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
   }
 
   try {
-    ctx.tools?.register?.(defineTool({
-      name: 'soul_note',
-      description: '把值得长期记住的东西写进你的记忆。category：user=关于对方的事实/偏好/边界，'
-        + 'us=你们之间的约定和共同经历，self=你对自己的认识。text ≤80 字；重复的会自动合并。',
-      parameters: {
-        category: { type: 'string', description: 'user | us | self', required: true },
-        text: { type: 'string', description: '≤80 字，一句话', required: true },
-        importance: { type: 'number', description: '0..1，越重要越不容易被淘汰' },
-        dueAt: { type: 'string', description: '可选：到时要问的约定，填 ISO 时间（如"面试是明天"）' },
-      },
-      output: {
-        schema: { type: 'json' },
-        render: (_args, value) => [{ type: 'text', text: value?.ok ? '记住了' : `没记住：${String(value?.reason ?? '')}` }],
-      },
-      async execute(args = {}) {
-        let dueAt = 0
-        if (typeof args?.dueAt === 'string' && args.dueAt.trim()) {
-          const parsed = Date.parse(args.dueAt)
-          if (Number.isFinite(parsed) && parsed > Date.now()) dueAt = parsed
-        }
-        return note(args?.category, args?.text, args?.importance, dueAt)
-      },
-    }))
     ctx.tools?.register?.(defineTool({
       name: 'soul_recall',
       description: '回忆关于对方或你们之间的事。用户提到过去、问"你还记得吗"时调用。',
@@ -2082,98 +2063,33 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       },
     }))
     ctx.tools?.register?.(defineTool({
-      name: 'soul_fact',
-      description: '结构化事实卡：add=记一条事实（subject · predicate · value，如 木子 · 喜欢 · 听歌），'
-        + 'query=按关键词找，list=最近的事实，forget=忘掉一条。事实卡会自动合并/取代同类旧值。',
-      parameters: {
-        action: { type: 'string', description: 'add | query | list | forget', required: true },
-        subject: { type: 'string', description: '主体，如 木子 / 你们 / 团子' },
-        predicate: { type: 'string', description: '关系词，如 喜欢 / 居住地 / 生日 / 约定' },
-        value: { type: 'string', description: '≤60 字的值' },
-        confidence: { type: 'number', description: '0..1；add 省略时默认 0.9（显式）' },
-        source: { type: 'string', description: 'user | aura | reflection，默认 user' },
-        query: { type: 'string', description: 'query 用关键词' },
-        limit: { type: 'number', description: 'list/query 条数' },
-        id: { type: 'string', description: 'forget 用事实 id' },
-      },
-      output: {
-        schema: { type: 'json' },
-        render: (_args, value) => {
-          if (value?.ok === false) return [{ type: 'text', text: `没记下：${String(value?.reason ?? '')}` }]
-          if (value?.fact) {
-            return [{ type: 'text', text: `记下了：${value.fact.subject} · ${value.fact.predicate} · ${value.fact.value}` }]
-          }
-          if (value?.forgotten !== undefined) {
-            return [{ type: 'text', text: value.forgotten ? '忘了这张事实卡' : '没找到这张事实卡' }]
-          }
-          const facts = Array.isArray(value?.facts) ? value.facts : []
-          return [{
-            type: 'text',
-            text: facts.length > 0
-              ? facts.map((fact) => `- ${fact.subject} · ${fact.predicate} · ${fact.value}`
-                + `（${Math.round(asNumber(fact.confidence, 0.6) * 100)}%）`).join('\n')
-              : '（还没有事实卡）',
-          }]
-        },
-      },
-      async execute(args = {}) {
-        const action = String(args?.action ?? '').trim()
-        if (action === 'add') {
-          let result = { ok: false, reason: '写入失败' }
-          store.update((memory) => {
-            result = addFactToMemory(memory, {
-              subject: args?.subject,
-              predicate: args?.predicate,
-              value: args?.value,
-              confidence: args?.confidence ?? 0.9,
-              source: args?.source,
-            }, Date.now())
-            return memory
-          })
-          return result
-        }
-        if (action === 'query') {
-          const query = String(args?.query ?? '').trim()
-          if (!query) return { ok: false, reason: 'query 为空' }
-          const facts = queryFactsInMemory(readMemory(), query, clamp(asNumber(args?.limit, 5), 1, 50))
-          return { ok: true, facts, count: facts.length }
-        }
-        if (action === 'list') {
-          const facts = listFactsInMemory(readMemory(), clamp(asNumber(args?.limit, 20), 1, 50))
-          return { ok: true, facts, count: facts.length }
-        }
-        if (action === 'forget') {
-          const id = String(args?.id ?? '').trim()
-          if (!id) return { ok: false, reason: 'id 为空' }
-          let forgotten = false
-          store.update((memory) => {
-            forgotten = forgetFactInMemory(memory, id)
-            return memory
-          })
-          return { ok: true, forgotten }
-        }
-        return { ok: false, reason: '未知 action（add | query | list | forget）' }
-      },
-    }))
-    ctx.tools?.register?.(defineTool({
       name: 'soul_memory',
       description: '记忆库控制面：stats=统计，search=搜索笔记/事实/实体/关系，'
-        + 'writeNote/updateNote/deleteNote=管理长期笔记，deleteFact/deleteEntity=删除事实卡或实体卡，'
+        + 'writeNote=写一条长期笔记（category：user=关于对方的事实/偏好/边界，us=你们之间的约定和共同经历，'
+        + 'self=你对自己的认识；≤80 字，重复的会自动合并），updateNote/deleteNote=改/删笔记，'
+        + 'addFact=记一条结构化事实卡（subject · predicate · value，如 木子 · 喜欢 · 听歌），'
+        + 'forgetFact=忘掉一条事实卡（同 deleteFact），deleteEntity=删除实体卡，'
         + 'mergeEntities=合并两个实体（事实与关系一起迁移），compact=立即整理，'
         + 'digest=立即整理这段会话（窗口内事件+新事实 → us 摘要笔记）。写操作前会自动备份 memory.json。',
       parameters: {
         action: {
           type: 'string',
-          description: 'stats | search | writeNote | updateNote | deleteNote | deleteFact | deleteEntity | mergeEntities | compact | digest',
+          description: 'stats | search | writeNote | updateNote | deleteNote | addFact | forgetFact | deleteFact | deleteEntity | mergeEntities | compact | digest',
           required: true,
         },
         sessionId: { type: 'string', description: 'digest：要整理的会话 id；省略时取最近活动的会话' },
         query: { type: 'string', description: 'search 关键词；为空时返回最近/最重的几条' },
         category: { type: 'string', description: 'writeNote：user | us | self，默认 user' },
-        text: { type: 'string', description: 'writeNote 新笔记 / updateNote 新文本（≤200 字，落盘受笔记上限截断）' },
+        text: { type: 'string', description: 'writeNote 新笔记 / updateNote 新文本（≤200 字，落盘受笔记上限截断）；addFact 时可当 value 兜底' },
         oldText: { type: 'string', description: 'updateNote / deleteNote 定位用的旧文本（也可改用 id）' },
         importance: { type: 'number', description: '0..1，越重要越不容易被淘汰' },
-        id: { type: 'string', description: 'updateNote / deleteNote / deleteFact / deleteEntity 的 id' },
+        dueAt: { type: 'string', description: 'writeNote：到时要问的约定，填 ISO 时间（如"面试是明天"）' },
+        subject: { type: 'string', description: 'addFact：主体，如 木子 / 你们 / 团子' },
+        predicate: { type: 'string', description: 'addFact：关系词，如 喜欢 / 居住地 / 生日 / 约定' },
+        value: { type: 'string', description: 'addFact：≤60 字的值' },
+        confidence: { type: 'number', description: 'addFact：0..1；省略时默认 0.9（显式）' },
+        source: { type: 'string', description: 'addFact：user | aura | reflection，默认 user' },
+        id: { type: 'string', description: 'updateNote / deleteNote / addFact 之后忘卡用 forgetFact / deleteFact / deleteEntity 的 id' },
         fromId: { type: 'string', description: 'mergeEntities 被合并的实体 id（也接受名字/别名）' },
         toId: { type: 'string', description: 'mergeEntities 保留的实体 id（也接受名字/别名）' },
         limit: { type: 'number', description: 'search 每类条数，默认 5，最多 5' },
@@ -2203,7 +2119,13 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
             await backupMemoryBeforeWrite()
             return memoryDeleteNote(args)
           }
-          if (action === 'deleteFact') {
+          if (action === 'addFact') {
+            const parsed = factInputOf(args)
+            if (!parsed.ok) return parsed
+            await backupMemoryBeforeWrite()
+            return memoryAddFact(parsed.input)
+          }
+          if (action === 'forgetFact' || action === 'deleteFact') {
             await backupMemoryBeforeWrite()
             return memoryDeleteFact(args?.id)
           }
@@ -2221,7 +2143,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           }
           return {
             ok: false,
-            reason: '未知 action（stats | search | writeNote | updateNote | deleteNote | deleteFact | deleteEntity | mergeEntities | compact | digest）',
+            reason: '未知 action（stats | search | writeNote | updateNote | deleteNote | addFact | forgetFact | deleteFact | deleteEntity | mergeEntities | compact | digest）',
           }
         } catch (error) {
           logger('[soul] soul_memory 失败:', error instanceof Error ? error.message : error)
@@ -2542,6 +2464,14 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     }
   }
 
+  /** dueAt：ISO 字符串或毫秒数；只认未来时间，非法/过去的一律 0（不排提醒）。 */
+  function resolveDueAt(value) {
+    if (value === undefined || value === null || value === '') return 0
+    const numeric = typeof value === 'number' ? value : Date.parse(String(value))
+    if (!Number.isFinite(numeric) || numeric <= Date.now()) return 0
+    return Math.round(numeric)
+  }
+
   /** writeNote：text 最多接收 200 字；真正落盘仍受笔记库单条上限约束。 */
   function memoryWriteNote(input = {}) {
     const text = codepointSlice(String(input?.text ?? '').trim(), 200)
@@ -2550,7 +2480,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     const importance = input?.importance === undefined
       ? 0.6
       : clamp(asNumber(input.importance, 0.6), 0, 1)
-    return note(category, text, importance, 0)
+    return note(category, text, importance, resolveDueAt(input?.dueAt))
   }
 
   /** updateNote：id 或 oldText 定位；text / importance 至少给一个。 */
@@ -2585,6 +2515,50 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     let result = { ok: false, reason: 'not-found' }
     store.update((memory) => {
       result = deleteNoteInMemory(memory, id ? { id } : { text })
+      return memory
+    })
+    return result
+  }
+
+  /**
+   * addFact 入参归一化：subject/predicate/value 优先；
+   * value 缺省时用 text 兜底，整段 text 也能按「甲 · 乙 · 丙」拆开。
+   */
+  function factInputOf(args = {}) {
+    const subject = String(args?.subject ?? '').trim()
+    const predicate = String(args?.predicate ?? '').trim()
+    const fallbackText = String(args?.text ?? '').trim()
+    let factSubject = subject
+    let factPredicate = predicate
+    let value = String(args?.value ?? '').trim()
+    if (!value && !subject && !predicate && fallbackText) {
+      const parts = fallbackText.split(/\s*[·•|｜]\s*/).filter(Boolean)
+      if (parts.length >= 3) {
+        factSubject = parts[0]
+        factPredicate = parts[1]
+        value = parts.slice(2).join('·')
+      }
+    }
+    if (!value && fallbackText) value = fallbackText
+    if (!factSubject || !factPredicate || !value) {
+      return { ok: false, reason: 'addFact 需要 subject / predicate / value（可用 text 兜底）' }
+    }
+    return {
+      ok: true,
+      input: {
+        subject: factSubject,
+        predicate: factPredicate,
+        value,
+        confidence: args?.confidence ?? 0.9,
+        source: args?.source,
+      },
+    }
+  }
+
+  function memoryAddFact(input = {}) {
+    let result = { ok: false, reason: '写入失败' }
+    store.update((memory) => {
+      result = addFactToMemory(memory, input, Date.now())
       return memory
     })
     return result

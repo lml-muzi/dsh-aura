@@ -7,9 +7,9 @@
  *   迁移：soul.memory → memory.json、写前 backup('memory-migrate')、soul 清空、二次不覆盖；
  *   真实 installSoul + installMemory：旧 soul.json 自动迁移、soul.json 不再写 memory、reset 不清 memory.json；
  *   ring 裁剪（memoryMaxEvents 可调 5..40）、压实（>30 最旧 10 条 → notes）、context 预算与最近 2 条；
- *   soul_note/soul_recall/pendingDue 行为、diary 注入 getMemoryStore 读 events；
+ *   soul_memory writeNote / soul_recall / pendingDue 行为、diary 注入 getMemoryStore 读 events；
  *   v2：v1→v2 迁移、facts/entities 上限、addFact 合并/取代、queryFacts、规则抽取、
- *   compact 去重/清理/衰减、soul_fact 工具、context 事实注入、实体别名去重。
+ *   compact 去重/清理/衰减、soul_memory addFact、context 事实注入、实体别名去重。
  *   v2.1 实体图：relations schema/坏值清洗/300 上限、addFact 建边、co 共现加权、
  *   1 跳召回（context / soul_recall / memory-api / snapshot）、compactRelations 衰减清理。
  *   v2.2 记忆控制面：soul_memory 九种 action、笔记 id 迁移/更新/删除、实体删除清边、
@@ -28,6 +28,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const root = mkdtempSync(join(tmpdir(), 'dsh-aura-memory-selftest-'))
 const home = join(root, 'home')
@@ -36,6 +37,7 @@ process.env.HOME = home
 process.env.DSH_HOME = join(home, '.dsh')
 const dataDir = join(process.env.DSH_HOME, 'dsh-aura')
 mkdirSync(dataDir, { recursive: true })
+const pluginRoot = fileURLToPath(new URL('..', import.meta.url))
 
 const state = await import('../host/state.js')
 const soulMod = await import('../host/soul.js')
@@ -442,22 +444,47 @@ await test('onUserMessage/onAssistantMessage/onTurnEnd：配对成事件，规�
 })
 
 // ---------- 5. 工具与到点提醒 ----------
-section('5. soul_note / soul_recall / pendingDue')
+section('5. soul_memory writeNote / soul_recall / pendingDue')
 
-await test('soul_note 写入 memory.json，soul_recall 能召回；单条 ≤80 字', async () => {
+await test('soul_memory writeNote 写入 memory.json，soul_recall 能召回；单条 ≤80 字', async () => {
   memory.clear()
-  const noteTool = memFake.tools.find((tool) => tool.name === 'soul_note')
+  const noteTool = memFake.tools.find((tool) => tool.name === 'soul_memory')
   const recallTool = memFake.tools.find((tool) => tool.name === 'soul_recall')
   assert.ok(noteTool && recallTool)
-  const written = await noteTool.execute({ category: 'user', text: '用户叫木子', importance: 0.9 })
+  const written = await noteTool.execute({ action: 'writeNote', category: 'user', text: '用户叫木子', importance: 0.9 })
   assert.equal(written.ok, true)
-  const long = await noteTool.execute({ category: 'self', text: '长'.repeat(200), importance: 0.5 })
+  assert.equal(written.note.category, 'user')
+  const long = await noteTool.execute({ action: 'writeNote', category: 'self', text: '长'.repeat(200), importance: 0.5 })
   assert.equal(long.ok, true)
   assert.ok(lengthOf(long.note.text) <= NOTE_MAX_CHARS)
   const found = await recallTool.execute({ query: '木子' })
   assert.ok(found.items.some((item) => item.text.includes('木子')))
   const disk = JSON.parse(readFileSync(memory.store.file, 'utf8'))
   assert.ok(disk.notes.user.some((note) => note.text === '用户叫木子'))
+})
+
+await test('soul_memory writeNote 支持 dueAt（吃掉原 soul_note 的承诺提醒）', async () => {
+  memory.clear()
+  const noteTool = memFake.tools.find((tool) => tool.name === 'soul_memory')
+  const later = Date.now() + 3_600_000
+  const promised = await noteTool.execute({
+    action: 'writeNote',
+    category: 'us',
+    text: '提醒你面试',
+    importance: 0.7,
+    dueAt: new Date(later).toISOString(),
+  })
+  assert.equal(promised.ok, true)
+  assert.equal(memory.pendingDue(Date.now()).length, 0, '还没到点')
+  assert.ok(memory.pendingDue(later + 1000).some((item) => item.text === '提醒你面试'))
+  const past = await noteTool.execute({
+    action: 'writeNote', category: 'us', text: '过去的事', dueAt: new Date(Date.now() - 1000).toISOString(),
+  })
+  assert.equal(past.ok, true)
+  assert.equal(memory.store.read().reflection.pendingDue.some((item) => item.text === '过去的事'), false)
+  const broken = await noteTool.execute({ action: 'writeNote', text: '坏 dueAt', dueAt: 'not-a-date' })
+  assert.equal(broken.ok, true)
+  assert.equal(memory.store.read().reflection.pendingDue.some((item) => item.text === '坏 dueAt'), false)
 })
 
 await test('pendingDue / consumeDue：到点才给，用掉即清', () => {
@@ -806,29 +833,42 @@ await test('compact()：每天最多一次，force 可强制再跑', () => {
   assert.equal(forced.skipped, false)
 })
 
-// ---------- 11. soul_fact / soul_recall ----------
-section('11. soul_fact 工具 / soul_recall 附带 facts+entities')
+// ---------- 11. soul_memory addFact / soul_recall ----------
+section('11. soul_memory addFact / forgetFact / soul_recall 附带 facts+entities')
 
-await test('soul_fact：add / query / list / forget 全流程', async () => {
+await test('soul_memory addFact / forgetFact：加 → 搜 → 忘 全流程', async () => {
   memory.clear()
-  const factTool = memFake.tools.find(tool => tool.name === 'soul_fact')
-  assert.ok(factTool, '应注册 soul_fact')
+  const factTool = memFake.tools.find(tool => tool.name === 'soul_memory')
+  assert.ok(factTool, '应注册 soul_memory')
   const added = await factTool.execute({
-    action: 'add', subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.9,
+    action: 'addFact', subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.9,
   })
   assert.equal(added.ok, true)
   assert.equal(added.fact.subject, '木子')
   assert.equal(added.fact.value, '听歌')
   assert.equal(added.fact.confidence, 0.9)
 
-  const queried = await factTool.execute({ action: 'query', query: '听歌' })
+  // text 兜底当 value
+  const viaText = await factTool.execute({ action: 'addFact', subject: '木子', predicate: '居住地', text: '杭州' })
+  assert.equal(viaText.ok, true)
+  assert.equal(viaText.fact.value, '杭州')
+  // 整段「甲 · 乙 · 丙」拆开
+  const parsed = await factTool.execute({ action: 'addFact', text: '木子 · 养的猫 · 团子' })
+  assert.equal(parsed.ok, true)
+  assert.equal(parsed.fact.subject, '木子')
+  assert.equal(parsed.fact.predicate, '养的猫')
+  assert.equal(parsed.fact.value, '团子')
+
+  const queried = await factTool.execute({ action: 'search', query: '听歌' })
   assert.ok(queried.facts.some(fact => fact.value === '听歌'))
-  const listed = await factTool.execute({ action: 'list', limit: 5 })
-  assert.ok(listed.count >= 1)
-  const forgotten = await factTool.execute({ action: 'forget', id: added.fact.id })
+  const forgotten = await factTool.execute({ action: 'forgetFact', id: added.fact.id })
   assert.equal(forgotten.forgotten, true)
-  const after = await factTool.execute({ action: 'query', query: '听歌' })
-  assert.equal(after.count, 0)
+  const after = await factTool.execute({ action: 'search', query: '听歌' })
+  assert.equal(after.facts.some(fact => fact.value === '听歌'), false)
+  const missing = await factTool.execute({ action: 'forgetFact', id: 'fact-nope' })
+  assert.equal(missing.ok, false)
+  const empty = await factTool.execute({ action: 'addFact', subject: '' })
+  assert.equal(empty.ok, false)
   const bad = await factTool.execute({ action: 'unknown' })
   assert.equal(bad.ok, false)
 })
@@ -1688,14 +1728,14 @@ await test('soul_memory digest：窗口内事件/事实 → us 摘要（≤200�
   memory2.onAssistantMessage({ text: '加油', at: base + 500, sessionId: 'qq:digest' })
   memory2.onTurnEnd({ at: base + 500, sessionId: 'qq:digest' })
   const backupDir = join(dataDir, 'backups')
-  const backupsBefore = existsSync(backupDir)
-    ? readdirSync(backupDir).filter((id) => id.endsWith('-memory')).length
-    : 0
+  // 保留上限 30 会淘汰最旧的一份，所以按「新出现的 id」判断，而不是数量。
+  const memoryBackupIds = () => (existsSync(backupDir)
+    ? readdirSync(backupDir).filter((id) => id.endsWith('-memory')).sort()
+    : [])
+  const backupsBefore = new Set(memoryBackupIds())
   const result = await memoryTool2().execute({ action: 'digest', sessionId: 'qq:digest' })
-  const backupsAfter = existsSync(backupDir)
-    ? readdirSync(backupDir).filter((id) => id.endsWith('-memory')).length
-    : 0
-  assert.ok(backupsAfter > backupsBefore, '整理写盘前应 backup.snapshot(\'memory\')')
+  const freshBackups = memoryBackupIds().filter((id) => !backupsBefore.has(id))
+  assert.ok(freshBackups.length > 0, '整理写盘前应 backup.snapshot(\'memory\')')
   assert.equal(result.ok, true)
   assert.equal(result.sessionId, 'qq:digest')
   assert.ok(result.note && result.note.text, '应生成摘要笔记')
@@ -1928,6 +1968,67 @@ await test('默认值与范围：memoryImmediate / memorySessionDigest / idle 60
   })
 })
 
+
+// ---------- 22. 工具合并：soul_note / soul_fact 并入 soul_memory ----------
+section('22. 工具合并：注册集合不含 soul_note / soul_fact，提示词无旧名字')
+
+await test('工具名集合：只有 soul_memory / soul_recall，没有 soul_note / soul_fact', () => {
+  const names = new Set([...memFake.tools, ...memFake2.tools].map((tool) => tool.name))
+  assert.equal(names.has('soul_note'), false, '不再注册 soul_note')
+  assert.equal(names.has('soul_fact'), false, '不再注册 soul_fact')
+  assert.equal(names.has('soul_memory'), true, '应注册 soul_memory')
+  assert.equal(names.has('soul_recall'), true, '应注册 soul_recall')
+  assert.equal(memFake.tools.filter((tool) => tool.name === 'soul_memory').length, 1, 'soul_memory 只注册一次')
+  assert.equal(memFake.tools.filter((tool) => tool.name === 'soul_recall').length, 1, 'soul_recall 只注册一次')
+})
+
+await test('soul_memory 参数覆盖 addFact / forgetFact / writeNote', () => {
+  const tool = memoryTool()
+  assert.ok(tool)
+  const props = tool.parameters.properties
+  for (const key of [
+    'action', 'sessionId', 'query', 'category', 'text', 'oldText', 'importance',
+    'dueAt', 'subject', 'predicate', 'value', 'confidence', 'source', 'id', 'fromId', 'toId', 'limit',
+  ]) {
+    assert.ok(props[key], 'soul_memory 应有参数 ' + key)
+  }
+  const actionText = String(props.action.description)
+  for (const name of ['writeNote', 'addFact', 'forgetFact', 'deleteFact', 'digest', 'mergeEntities', 'compact']) {
+    assert.ok(actionText.includes(name), 'action 说明应含 ' + name)
+  }
+  for (const name of ['writeNote', 'addFact', 'forgetFact', 'digest']) {
+    assert.ok(tool.description.includes(name), '工具描述应含 ' + name)
+  }
+})
+
+await test('提示词 / 描述里不再出现 soul_note / soul_fact', () => {
+  const contexts = [...memFake.contexts, ...memFake2.contexts, ...soulFake.contexts]
+  const tools = [...memFake.tools, ...memFake2.tools, ...soulFake.tools]
+  assert.ok(tools.length > 0)
+  for (const tool of tools) {
+    const text = String(tool.name || '') + ' ' + String(tool.description || '')
+    assert.equal(/soul_note|soul_fact/.test(text), false, tool.name + ' 的描述不该提旧工具名')
+  }
+  for (const spec of contexts) {
+    let text = ''
+    try {
+      text = typeof spec.text === 'function' ? String(spec.text({ agent: { session: {} } }) || '') : String(spec.text || '')
+    } catch {
+      text = ''
+    }
+    assert.equal(/soul_note|soul_fact/.test(text), false, 'context ' + String(spec.name) + ' 不该提旧工具名')
+  }
+})
+
+await test('源码里不再出现 soul_note / soul_fact（提示词、注释一起清掉）', () => {
+  const hostDir = join(pluginRoot, 'host')
+  const files = readdirSync(hostDir).filter((name) => name.endsWith('.js'))
+  assert.ok(files.length > 0)
+  for (const name of files) {
+    const text = readFileSync(join(hostDir, name), 'utf8')
+    assert.equal(/soul_note|soul_fact/.test(text), false, name + ' 不该再提 soul_note / soul_fact')
+  }
+})
 
 // 收尾
 soulFake.dispose()

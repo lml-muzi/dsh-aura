@@ -5,15 +5,21 @@
  * 用临时 HOME / DSH_HOME 隔离，不碰真实 soul/diary：
  *   规则日记（有事件 / 无事件 / 非当天）/ LLM prompt 要点 / 同日覆盖合并 /
  *   日期升序与 list 倒序 / generate 的 rule/llm/回退/跳过 / soul_diary 工具参数校验 /
- *   HTTP 路由与 fence / 写盘前 backup.snapshot('diary') 真的被调用。
+ *   HTTP 路由与 fence / 写盘前 backup.snapshot('diary') 真的被调用 /
+ *   自动写：开关 / 到点 / 跨天补昨天 / 事件不足 / 已有条目 / 每日最多 2 篇 /
+ *   手动 autoWrite / 定时器与 dispose / 面板配置夹取。
  */
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 import * as diary from '../host/diary.js'
 import * as backup from '../host/backup.js'
+import * as state from '../host/state.js'
+
+const pluginRoot = fileURLToPath(new URL('..', import.meta.url))
 
 const root = mkdtempSync(join(tmpdir(), 'dsh-aura-diary-selftest-'))
 const home = join(root, 'home')
@@ -155,7 +161,7 @@ await test('parseDiaryOutput 兼容围栏 / 前后废话 / 坏 JSON', () => {
 })
 
 section('2. 存储：同日覆盖合并 / 日期升序 / list 倒序')
-const api = diary.createDiary({ home: diaryDir, getSoul, getConfig, llm: mockLlm, log: () => {} })
+const api = diary.createDiary({ home: diaryDir, getSoul, getConfig, llm: mockLlm, log: () => {}, autoSchedule: false })
 
 await test('初始没有日记文件，read/list 返回空', () => {
   assert.equal(api.read(), null)
@@ -285,6 +291,7 @@ await test('LLM 抛错时回退规则日记', async () => {
     getConfig,
     llm: async () => { throw new Error('mock boom') },
     log: () => {},
+    autoSchedule: false,
   })
   await badApi.remove(day)
   const result = await badApi.generate({ date: day, mode: 'llm' })
@@ -300,6 +307,7 @@ await test('LLM 返回非 JSON 时回退规则日记', async () => {
     getConfig,
     llm: async () => '抱歉，我写不出来',
     log: () => {},
+    autoSchedule: false,
   })
   await badApi.remove(day)
   const result = await badApi.generate({ date: day, mode: 'llm' })
@@ -318,6 +326,7 @@ await test('LLM 对象适配器 generate({text}) 可用', async () => {
       },
     },
     log: () => {},
+    autoSchedule: false,
   })
   await objectApi.remove(day)
   const result = await objectApi.generate({ date: day, mode: 'llm' })
@@ -334,6 +343,7 @@ await test('没有当天事件时 generate 不写空日记', async () => {
     getConfig,
     llm: mockLlm,
     log: () => {},
+    autoSchedule: false,
   })
   await emptyApi.remove(day)
   const result = await emptyApi.generate({ date: day, mode: 'rule' })
@@ -377,6 +387,7 @@ const ctxApi = diary.createDiary({
   getConfig,
   llm: mockLlm,
   log: () => {},
+  autoSchedule: false,
   ctx: fakeCtx,
 })
 
@@ -386,7 +397,8 @@ await test('createDiary 传入 ctx 后注册 soul_diary 与 prefix 路由', () =
   assert.match(captured.tool.description, /日记/)
   assert.match(captured.tool.description, /不是记忆/)
   assert.match(captured.tool.description, /不要每轮写/)
-  assert.deepEqual(captured.tool.parameters.properties.action.enum, ['write', 'read', 'list', 'today'])
+  assert.deepEqual(captured.tool.parameters.properties.action.enum, ['write', 'read', 'list', 'today', 'auto'])
+  assert.equal(captured.tool.parameters.properties.force.type, 'boolean')
   assert.equal(captured.tool.parameters.properties.date.type, 'string')
   assert.equal(captured.tool.parameters.properties.highlights.type, 'array')
   assert.equal(captured.tool.parameters.properties.private.type, 'boolean')
@@ -619,6 +631,266 @@ await test('diary.json 版本/升序/同日唯一', () => {
   assert.equal(disk.version, diary.DIARY_VERSION)
   assert.deepEqual(disk.entries.map((item) => item.date), [...disk.entries.map((item) => item.date)].sort())
   assert.equal(new Set(disk.entries.map((item) => item.date)).size, disk.entries.length)
+})
+
+// ---------- 6. 日记自动写 ----------
+section('6. 日记自动写：开关 / 到点 / 跨天 / 上限 / 手动 / 定时器')
+
+function makeFakeTimers() {
+  const list = []
+  const timers = {
+    setTimeout(fn, ms) {
+      const handle = { kind: 'timeout', fn, ms, cleared: false, unref() { return this } }
+      list.push(handle)
+      return handle
+    },
+    setInterval(fn, ms) {
+      const handle = { kind: 'interval', fn, ms, cleared: false, unref() { return this } }
+      list.push(handle)
+      return handle
+    },
+    clearTimeout(handle) { if (handle) handle.cleared = true },
+    clearInterval(handle) { if (handle) handle.cleared = true },
+  }
+  return { timers, list }
+}
+
+function eventsOn(dateKey, hour, count) {
+  return Array.from({ length: count }, (_, index) => ({
+    id: 'auto-' + dateKey + '-' + index,
+    at: atOn(dateKey, hour, 10 + index),
+    kind: 'chat',
+    summary: '用户说「' + dateKey + ' 第 ' + (index + 1) + ' 次加班」；她回「早点睡」',
+    topics: ['加班'],
+    salience: 0.6,
+    source: 'rule',
+  }))
+}
+
+const autoToday = '2034-06-01'
+const autoPrev = '2034-05-31'
+let autoSeq = 0
+
+/** 每个用例独立的 home 目录 + 假定时器 + 可注入时钟。 */
+function makeAutoCase(options = {}) {
+  autoSeq += 1
+  const dir = join(root, 'auto-' + autoSeq)
+  mkdirSync(dir, { recursive: true })
+  const autoSoul = makeSoul(options.events || [])
+  const autoConfig = {
+    soulName: 'Aura',
+    soulUserNickname: '木子',
+    diaryAuto: true,
+    diaryAutoHour: 22,
+    diaryAutoMinEvents: 3,
+    ...(options.config || {}),
+  }
+  const fake = makeFakeTimers()
+  const nowFn = () => (typeof options.clock === 'function' ? options.clock() : options.clock)
+  const instance = diary.createDiary({
+    home: dir,
+    getSoul: () => autoSoul,
+    getConfig: () => autoConfig,
+    now: nowFn,
+    timers: fake.timers,
+    autoSchedule: options.autoSchedule === true,
+    log: () => {},
+  })
+  return { api: instance, dir, fake, config: autoConfig, soul: autoSoul }
+}
+
+await test('diaryAuto=false：到点也不自动写', async () => {
+  const c = makeAutoCase({
+    events: eventsOn(autoToday, 21, 4),
+    clock: atOn(autoToday, 23, 5),
+    config: { diaryAuto: false },
+  })
+  const result = await c.api.autoWrite()
+  assert.equal(result.ok, true)
+  assert.equal(result.skipped, true)
+  assert.equal(result.reason, 'disabled')
+  assert.deepEqual(result.dates, [])
+  assert.equal(c.api.read(autoToday), null)
+  c.api.dispose()
+})
+
+await test('到点且事件够 → 自动写今天（rule，source=auto，auto meta 落盘）', async () => {
+  const c = makeAutoCase({ events: eventsOn(autoToday, 21, 4), clock: atOn(autoToday, 22, 30) })
+  const result = await c.api.autoWrite()
+  assert.equal(result.skipped, false)
+  assert.deepEqual(result.dates, [autoToday])
+  const entry = c.api.read(autoToday)
+  assert.ok(entry)
+  assert.equal(entry.source, 'auto')
+  assert.match(entry.summary, /木子/)
+  assert.equal(c.api.read(autoPrev), null)
+  const disk = JSON.parse(readFileSync(join(c.dir, diary.DIARY_FILE), 'utf8'))
+  assert.ok(disk.auto[autoToday] > 0, 'diary.json 应记 auto meta')
+  c.api.dispose()
+})
+
+await test('没到 diaryAutoHour → 不写今天，reason=before-hour', async () => {
+  const c = makeAutoCase({ events: eventsOn(autoToday, 9, 4), clock: atOn(autoToday, 12, 0) })
+  const result = await c.api.autoWrite()
+  assert.equal(result.skipped, true)
+  assert.equal(result.reason, 'before-hour')
+  assert.equal(c.api.read(autoToday), null)
+  c.api.dispose()
+})
+
+await test('跨天：昨天没日记且事件够 → 任何时间都补写昨天', async () => {
+  const c = makeAutoCase({
+    events: [...eventsOn(autoPrev, 20, 4), ...eventsOn(autoToday, 9, 1)],
+    clock: atOn(autoToday, 8, 30),
+  })
+  const result = await c.api.autoWrite()
+  assert.deepEqual(result.dates, [autoPrev])
+  assert.equal(c.api.read(autoPrev).source, 'auto')
+  assert.equal(c.api.read(autoToday), null, '今天还没到点，不写')
+  c.api.dispose()
+})
+
+await test('事件不足 diaryAutoMinEvents → 跳过（rule 无素材不落空日记）', async () => {
+  const c = makeAutoCase({ events: eventsOn(autoToday, 21, 2), clock: atOn(autoToday, 22, 30) })
+  const result = await c.api.autoWrite()
+  assert.equal(result.skipped, true)
+  assert.equal(result.reason, 'few-events')
+  assert.deepEqual(result.dates, [])
+  assert.equal(c.api.read(autoToday), null)
+  c.api.dispose()
+})
+
+await test('已有条目 force=false 不覆盖（你手写的日记保住）', async () => {
+  const c = makeAutoCase({ events: eventsOn(autoToday, 21, 4), clock: atOn(autoToday, 22, 30) })
+  await c.api.save({ date: autoToday, summary: '我自己写的今天', highlights: [] }, { source: 'user' })
+  const result = await c.api.autoWrite()
+  assert.equal(result.skipped, true)
+  assert.equal(result.reason, 'exists')
+  assert.equal(c.api.read(autoToday).summary, '我自己写的今天')
+  assert.equal(c.api.read(autoToday).source, 'user')
+  c.api.dispose()
+})
+
+await test('每天最多自动写 2 篇：昨天 + 今天，再跑就 daily-cap', async () => {
+  const c = makeAutoCase({
+    events: [...eventsOn(autoPrev, 20, 4), ...eventsOn(autoToday, 10, 4)],
+    clock: atOn(autoToday, 22, 40),
+  })
+  const first = await c.api.autoWrite()
+  assert.deepEqual(first.dates, [autoPrev, autoToday])
+  assert.equal(c.api.read(autoPrev).source, 'auto')
+  assert.equal(c.api.read(autoToday).source, 'auto')
+  const second = await c.api.autoWrite()
+  assert.equal(second.skipped, true)
+  assert.equal(second.reason, 'daily-cap')
+  assert.deepEqual(second.dates, [])
+  c.api.dispose()
+})
+
+await test('autoWrite({force:true})：越过开关/时间，但依旧不覆盖已有条目', async () => {
+  const c = makeAutoCase({
+    events: eventsOn(autoToday, 9, 4),
+    clock: atOn(autoToday, 10, 0),
+    config: { diaryAuto: false },
+  })
+  const plain = await c.api.autoWrite()
+  assert.equal(plain.reason, 'disabled')
+  const forced = await c.api.autoWrite({ force: true })
+  assert.deepEqual(forced.dates, [autoToday])
+  assert.equal(c.api.read(autoToday).source, 'auto')
+  const again = await c.api.autoWrite({ force: true })
+  assert.equal(again.reason, 'exists')
+  assert.deepEqual(again.dates, [])
+  assert.equal(c.api.read(autoToday).source, 'auto')
+  c.api.dispose()
+})
+
+await test('定时器：安装后 10s 一次 + 每 30 分钟一次；dispose 清掉', async () => {
+  const c = makeAutoCase({
+    events: eventsOn(autoToday, 21, 4),
+    clock: atOn(autoToday, 22, 30),
+    autoSchedule: true,
+  })
+  const timeouts = c.fake.list.filter((item) => item.kind === 'timeout')
+  const intervals = c.fake.list.filter((item) => item.kind === 'interval')
+  assert.equal(timeouts.length, 1)
+  assert.equal(timeouts[0].ms, diary.DIARY_AUTO_INITIAL_DELAY_MS)
+  assert.equal(intervals.length, 1)
+  assert.equal(intervals[0].ms, diary.DIARY_AUTO_INTERVAL_MS)
+  timeouts[0].fn()
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  assert.ok(c.api.read(autoToday), '安装 10s 后那次检查应写今天')
+  assert.equal(c.api.read(autoToday).source, 'auto')
+  c.api.dispose()
+  assert.equal(c.fake.list.every((item) => item.cleared), true, 'dispose 应清掉定时器')
+})
+
+await test('HTTP POST autoWrite：返回 {ok, wrote, dates}，force 生效', async () => {
+  const routeHolder = {}
+  const autoWebServer = {
+    register(registration) {
+      routeHolder.route = registration
+      return () => { routeHolder.disposed = true }
+    },
+  }
+  const httpHome = join(root, 'auto-http')
+  const httpApi = diary.createDiary({
+    home: httpHome,
+    getSoul: () => makeSoul(eventsOn(autoToday, 21, 4)),
+    getConfig: () => ({ diaryAuto: false }),
+    now: () => atOn(autoToday, 22, 30),
+    timers: makeFakeTimers().timers,
+    autoSchedule: false,
+    log: () => {},
+    ctx: { get: (name) => (name === 'webServer' ? autoWebServer : undefined), webServer: autoWebServer },
+  })
+  assert.ok(routeHolder.route, '应注册 diary-api 路由')
+
+  const res = fakeRes()
+  await routeHolder.route.handler(fakeReq('POST', '/dsh-aura/diary-api', { action: 'autoWrite', force: true }), res)
+  assert.equal(res.status, 200)
+  assert.equal(res.body.ok, true)
+  assert.deepEqual(res.body.dates, [autoToday])
+  assert.equal(res.body.wrote.length, 1)
+  assert.equal(res.body.skipped, false)
+
+  const again = fakeRes()
+  await routeHolder.route.handler(fakeReq('POST', '/dsh-aura/diary-api', { action: 'autoWrite', force: true }), again)
+  assert.equal(again.status, 200)
+  assert.equal(again.body.skipped, true)
+  assert.deepEqual(again.body.dates, [])
+  httpApi.dispose()
+})
+
+await test('配置默认值与范围夹取：diaryAuto / hour 0-23 / minEvents 1-20', () => {
+  const defaults = state.DEFAULT_CONFIG
+  assert.equal(defaults.diaryAuto, true)
+  assert.equal(defaults.diaryAutoHour, 22)
+  assert.equal(defaults.diaryAutoMinEvents, 3)
+  assert.equal(state.normalizeConfig({ diaryAutoHour: 99 }).diaryAutoHour, 23, '高于 23 夹到 23')
+  assert.equal(state.normalizeConfig({ diaryAutoHour: -3 }).diaryAutoHour, 0, '低于 0 夹到 0')
+  assert.equal(state.normalizeConfig({ diaryAutoMinEvents: 0 }).diaryAutoMinEvents, 1, '低于 1 夹到 1')
+  assert.equal(state.normalizeConfig({ diaryAutoMinEvents: 99 }).diaryAutoMinEvents, 20, '高于 20 夹到 20')
+  assert.equal(state.normalizeConfig({ diaryAutoHour: 'abc' }).diaryAutoHour, 22, '非数字回落默认')
+  assert.equal(state.normalizeConfig({ diaryAuto: false }).diaryAuto, false)
+  const written = state.writeConfig({ diaryAuto: false, diaryAutoHour: 7, diaryAutoMinEvents: 5 })
+  assert.equal(written.diaryAuto, false)
+  assert.equal(written.diaryAutoHour, 7)
+  assert.equal(written.diaryAutoMinEvents, 5)
+  const back = state.readConfig()
+  assert.equal(back.diaryAutoHour, 7)
+  assert.equal(back.diaryAutoMinEvents, 5)
+  state.writeConfig({ diaryAuto: true, diaryAutoHour: 22, diaryAutoMinEvents: 3 })
+})
+
+await test('面板：日记设置夹取后 POST /config，且有「自动补一篇」按钮', () => {
+  const client = readFileSync(join(pluginRoot, 'client.js'), 'utf8')
+  assert.ok(client.includes('clampInt(diaryForm.diaryAutoHour, 0, 23, 22)'), '小时 0-23 夹取')
+  assert.ok(client.includes('clampInt(diaryForm.diaryAutoMinEvents, 1, 20, 3)'), '最少事件 1-20 夹取')
+  assert.ok(client.includes('diaryAuto: diaryForm.diaryAuto !== false'), '自动写开关走 /config')
+  assert.ok(client.includes("action: 'autoWrite'"), '面板应调用 diary-api 的 autoWrite')
+  assert.ok(client.includes("'diary.autoWrite': '自动补一篇'"), '应有「自动补一篇」按钮文案')
+  assert.equal(/soul_note|soul_fact/.test(client), false, '面板里不该再提 soul_note / soul_fact')
 })
 
 for (const instance of [api, ctxApi]) {

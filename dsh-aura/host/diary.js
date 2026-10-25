@@ -11,7 +11,9 @@
  * - 与 memory 分开：日记不写进 soul.memory，也不参与任何 system prompt 注入。
  * - 零新增依赖、Node ESM；文件写入统一 tmp + rename。
  * - 每次写/删之前尽量做一次 backup.snapshot('diary')；失败只 warn，不阻断。
- * - 不实现定时器。自动生成由调用方按需调用 generate()。
+ * - 自动写：scheduleAuto() 在安装 10s 后查一次，之后每 30 分钟查一次。
+ *   开关/时间/最少事件数来自 config 的 diaryAuto / diaryAutoHour(0-23) / diaryAutoMinEvents(1-20)；
+ *   每个自然日最多自动写 2 篇（今天 + 跨天补昨天）。已有条目 force=false 不覆盖。
  * - 可选 ctx：传入时自动注册 soul_diary 工具与 /dsh-aura/diary-api 路由；
  *   ctx.get('webServer') / ctx.get('tools') 都取不到时静默跳过。
  *
@@ -23,6 +25,9 @@
  *        -> 200 { ok, date, entry, overwritten }
  *   POST { action:'generate', date?, mode?:'rule'|'llm', force? }
  *        -> 200 { ok, date, entry, skipped, reason, via, overwritten }
+ *   POST { action:'autoWrite', force? }
+ *        -> 200 { ok, skipped, reason, wrote, dates }
+ *           force=true 忽略 diaryAuto 开关/时间/当日上限（面板「自动补一篇」用）
  *   POST { action:'delete', date }      -> 200 { ok, date, removed, entry? }
  *   围栏失败 403 { ok:false, error:'forbidden' }；参数错 400；内部错 500。
  */
@@ -43,6 +48,15 @@ export const DIARY_HIGHLIGHT_MAX = 8
 export const DIARY_HIGHLIGHT_CHARS = 60
 export const DIARY_LIST_DEFAULT = 7
 export const DIARY_TOOL_NAME = 'soul_diary'
+/** 自动写：安装后 10s 先查一次，之后每 30 分钟一次。 */
+export const DIARY_AUTO_INTERVAL_MS = 30 * 60_000
+export const DIARY_AUTO_INITIAL_DELAY_MS = 10_000
+/** 每个自然日最多自动写几篇（今天 + 昨天补齐）。 */
+export const DIARY_AUTO_DAILY_CAP = 2
+/** 配置缺省值（与 state.js 的 DEFAULT_CONFIG 同口径）。 */
+export const DIARY_AUTO_HOUR_DEFAULT = 22
+export const DIARY_AUTO_MIN_EVENTS_DEFAULT = 3
+export const DIARY_AUTO_MARK_MAX = 40
 
 const SOURCE_SET = new Set(DIARY_SOURCES)
 const STAGE_TEXT = {
@@ -389,7 +403,19 @@ export function parseDiaryOutput(text) {
 // ---------- 存储归一化 ----------
 
 function emptyStore() {
-  return { version: DIARY_VERSION, entries: [] }
+  return { version: DIARY_VERSION, entries: [], auto: {} }
+}
+
+/** auto meta：{ 'YYYY-MM-DD': 自动写入时间 }，只保留合法日期键。 */
+function normalizeAuto(raw) {
+  const out = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const [key, value] of Object.entries(raw)) {
+    if (!isDateKey(key)) continue
+    const at = Number(value)
+    out[key] = Number.isFinite(at) && at > 0 ? Math.round(at) : 0
+  }
+  return out
 }
 
 function normalizeEntry(raw, context = {}) {
@@ -439,6 +465,7 @@ function normalizeStore(raw) {
     byDate.set(entry.date, previous ? mergeEntry(previous, entry) : entry)
   }
   store.entries = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date))
+  store.auto = normalizeAuto(raw.auto)
   return store
 }
 
@@ -629,15 +656,17 @@ export function createDiaryTool(diary, { log } = {}) {
   return defineTool({
     name: DIARY_TOOL_NAME,
     description: '她自己的日记，不是记忆。action=write 记录今天（或指定日期）的一篇日记，text/summary 二选一；'
-      + 'read 读某天或最近一篇；list 看最近几篇；today 看今天。'
+      + 'read 读某天或最近一篇；list 看最近几篇；today 看今天；'
+      + 'auto=按自动写规则补写（昨天没写就补昨天、今天到点且事件够就写今天）。'
       + '只在想记录、或用户明确要求时写，不要每轮写。',
     parameters: {
       action: {
         type: 'string',
-        enum: ['write', 'read', 'list', 'today'],
+        enum: ['write', 'read', 'list', 'today', 'auto'],
         required: true,
-        description: 'write=写日记；read=读指定日期或最近一篇；list=最近几篇；today=今天',
+        description: 'write=写日记；read=读指定日期或最近一篇；list=最近几篇；today=今天；auto=按自动写规则补一篇',
       },
+      force: { type: 'boolean', description: 'auto：忽略自动写开关/时间/当日上限（不覆盖已有条目）' },
       date: { type: 'string', description: 'YYYY-MM-DD；write/read 省略时 write 用今天、read 用最近一篇' },
       text: { type: 'string', description: '日记正文；与 summary 二选一，优先 summary' },
       summary: { type: 'string', description: '日记正文（≤500 字），优先于 text' },
@@ -665,6 +694,15 @@ export function createDiaryTool(diary, { log } = {}) {
             text: result.entry
               ? `${result.entry.date}：${result.entry.summary}`
               : '那天没有日记。',
+          }]
+        }
+        if (action === 'auto') {
+          const dates = Array.isArray(result.dates) ? result.dates : []
+          return [{
+            type: 'text',
+            text: dates.length > 0
+              ? `自动补了 ${dates.join('、')} 的日记。`
+              : `没有补写：${result.reason || '今天还没有可写的素材'}`,
           }]
         }
         if (action === 'list') {
@@ -709,6 +747,9 @@ export function createDiaryTool(diary, { log } = {}) {
           const entry = diary.read(date)
           return { ok: true, date, entry }
         }
+        if (action === 'auto') {
+          return await diary.autoWrite({ force: args && args.force === true })
+        }
         return { ok: false, reason: 'unknown-action' }
       } catch (error) {
         warn('[diary] soul_diary 执行失败:', messageOf(error))
@@ -731,7 +772,10 @@ export function createDiaryTool(diary, { log } = {}) {
  * @param {Function} [options.log] warn 日志
  * @param {object} [options.ctx] 可选 Cordis ctx；传入时自动注册 soul_diary 工具和 HTTP 路由
  */
-export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log, ctx } = {}) {
+export function createDiary({
+  home, getSoul, getMemoryStore, getConfig, llm, log, ctx,
+  now, timers, autoSchedule,
+} = {}) {
   const warn = (...args) => {
     try {
       if (typeof log === 'function') log(...args)
@@ -745,6 +789,22 @@ export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log
   const file = join(dir, DIARY_FILE)
   const disposers = []
   let disposed = false
+
+  /** 时间源：默认 Date.now，测试可注入固定时钟。 */
+  const nowOf = typeof now === 'function' ? now : () => Date.now()
+  /** 定时器：默认全局，测试可注入假定时器。 */
+  const timerApi = (() => {
+    const custom = timers && typeof timers === 'object' ? timers : {}
+    const pick = (name) => (typeof custom[name] === 'function'
+      ? (...args) => custom[name](...args)
+      : (...args) => globalThis[name](...args))
+    return {
+      setTimeout: pick('setTimeout'),
+      setInterval: pick('setInterval'),
+      clearTimeout: pick('clearTimeout'),
+      clearInterval: pick('clearInterval'),
+    }
+  })()
 
   const readSoul = () => {
     try {
@@ -819,7 +879,11 @@ export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log
   const writeStore = (store) => {
     mkdirSync(dir, { recursive: true })
     const tmp = `${file}.${process.pid}.tmp`
-    writeFileSync(tmp, `${JSON.stringify({ version: DIARY_VERSION, entries: store.entries }, null, 2)}\n`)
+    writeFileSync(tmp, `${JSON.stringify({
+      version: DIARY_VERSION,
+      entries: store.entries,
+      auto: normalizeAuto(store.auto),
+    }, null, 2)}\n`)
     renameSync(tmp, file)
   }
 
@@ -905,7 +969,7 @@ export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log
   }
 
   async function generate(options = {}) {
-    const date = options && options.date ? String(options.date) : localDayKey(Date.now())
+    const date = options && options.date ? String(options.date) : localDayKey(nowOf())
     if (!isDateKey(date)) return { ok: false, reason: 'invalid-date', date }
     const existing = read(date)
     if (existing && options.force !== true) {
@@ -958,9 +1022,159 @@ export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log
     }
   }
 
+  /* ---------------- 自动写 ---------------- */
+
+  let autoRunning = false
+  let autoScheduled = false
+  let autoTimers = []
+
+  /** 读配置里的三个自动写开关（缺省/坏值回落 state.js 默认）。 */
+  function autoSettings() {
+    const config = readConfig()
+    return {
+      enabled: !(config && config.diaryAuto === false),
+      hour: Math.round(clampNumber(config && config.diaryAutoHour, 0, 23, DIARY_AUTO_HOUR_DEFAULT)),
+      minEvents: Math.round(clampNumber(config && config.diaryAutoMinEvents, 1, 20, DIARY_AUTO_MIN_EVENTS_DEFAULT)),
+    }
+  }
+
+  /** 记一条 auto meta（日期 → 自动写入时间），只留最近 40 天防膨胀。 */
+  function markAuto(date, at) {
+    try {
+      const store = readStore()
+      store.auto[date] = at
+      const keys = Object.keys(store.auto).sort()
+      while (keys.length > DIARY_AUTO_MARK_MAX) delete store.auto[keys.shift()]
+      writeStore(store)
+    } catch (error) {
+      warn('[diary] 自动写标记失败:', messageOf(error))
+    }
+  }
+
+  /**
+   * 自动写检查（定时器 / 面板按钮 / soul_diary action:'auto' 共用）。
+   * - diaryAuto=false → 不写（force 可越过）
+   * - 今天：hour >= diaryAutoHour、今天还没日记、今天 events 数 >= diaryAutoMinEvents
+   * - 跨天：昨天还没日记、昨天 events 数 >= diaryAutoMinEvents → 补写昨天
+   * - 每个自然日最多 DIARY_AUTO_DAILY_CAP 篇；已有条目 force=false 不覆盖
+   * - rule 生成返回 null（无事件）就跳过，不落空日记
+   */
+  async function autoWrite(options = {}) {
+    if (disposed) return { ok: false, reason: 'disposed', wrote: [], dates: [] }
+    const force = options && options.force === true
+    const settings = autoSettings()
+    if (!force && !settings.enabled) {
+      return { ok: true, skipped: true, reason: 'disabled', wrote: [], dates: [] }
+    }
+    const at = Number.isFinite(Number(options && options.now)) && Number(options.now) > 0
+      ? Number(options.now)
+      : nowOf()
+    const day = localDayKey(at)
+    const prevDay = localDayKey(at - 86_400_000)
+    const hour = new Date(at).getHours()
+    // 到点判定只管「今天」；昨天补齐任何时候都能做（凌晨/上午补昨天的日记）。
+    const afterHour = force || hour >= settings.hour
+
+    const memory = readMemory()
+    const store = readStore()
+    const existing = new Set(store.entries.map((entry) => entry.date))
+    const usedToday = Object.keys(store.auto).filter((key) => key === day || key === prevDay).length
+    const budget = force ? DIARY_AUTO_DAILY_CAP : Math.max(0, DIARY_AUTO_DAILY_CAP - usedToday)
+    if (budget === 0) {
+      return { ok: true, skipped: true, reason: 'daily-cap', date: day, wrote: [], dates: [] }
+    }
+
+    const candidates = []
+    // 先补昨天（跨天），再写今天。
+    if (!existing.has(prevDay) && eventsForDay(memory, prevDay).length >= settings.minEvents) candidates.push(prevDay)
+    if (afterHour && !existing.has(day) && eventsForDay(memory, day).length >= settings.minEvents) candidates.push(day)
+
+    const wrote = []
+    const skippedRows = []
+    for (const date of candidates) {
+      if (wrote.length >= budget) break
+      const result = await generate({ date, mode: 'rule', force: false })
+      if (!result.ok) {
+        skippedRows.push({ date, reason: result.reason || 'failed' })
+        continue
+      }
+      if (result.skipped) {
+        skippedRows.push({ date, reason: result.reason || 'skipped' })
+        continue
+      }
+      markAuto(date, at)
+      wrote.push({ date, entry: result.entry, via: result.via })
+    }
+
+    if (candidates.length === 0) {
+      let reason = 'nothing'
+      if (existing.has(day)) reason = 'exists'
+      else if (!afterHour) reason = 'before-hour'
+      else if (eventsForDay(memory, day).length < settings.minEvents) reason = 'few-events'
+      return {
+        ok: true, skipped: true, reason, date: day, hour: settings.hour, wrote: [], dates: [],
+      }
+    }
+    return {
+      ok: true,
+      skipped: wrote.length === 0,
+      date: day,
+      hour: settings.hour,
+      wrote,
+      dates: wrote.map((item) => item.date),
+      reasons: skippedRows,
+      reason: wrote.length > 0 ? null : (skippedRows[0] ? skippedRows[0].reason : 'skipped'),
+    }
+  }
+
+  /** 一次定时检查：防重入 + 错误只 warn。 */
+  function runAutoTick() {
+    if (disposed || autoRunning) return Promise.resolve({ ok: false, reason: 'busy' })
+    autoRunning = true
+    return Promise.resolve()
+      .then(() => autoWrite())
+      .catch((error) => {
+        warn('[diary] 自动写失败:', messageOf(error))
+        return { ok: false, reason: messageOf(error) }
+      })
+      .finally(() => {
+        autoRunning = false
+      })
+  }
+
+  function clearAutoTimers() {
+    for (const [kind, handle] of autoTimers) {
+      try {
+        if (kind === 'interval') timerApi.clearInterval(handle)
+        else timerApi.clearTimeout(handle)
+      } catch {
+        /* ignore */
+      }
+    }
+    autoTimers = []
+  }
+
+  /** 装定时器：安装后 DIARY_AUTO_INITIAL_DELAY_MS 查一次，之后每 DIARY_AUTO_INTERVAL_MS 一次。 */
+  function scheduleAuto() {
+    if (disposed) return null
+    if (autoScheduled) return { scheduled: true }
+    autoScheduled = true
+    clearAutoTimers()
+    const arm = (kind, handle) => {
+      autoTimers.push([kind, handle])
+      // 真实定时器 unref：自动写定时器不该把进程钉住。
+      if (handle && typeof handle.unref === 'function') handle.unref()
+    }
+    arm('timeout', timerApi.setTimeout(() => { void runAutoTick() }, DIARY_AUTO_INITIAL_DELAY_MS))
+    arm('interval', timerApi.setInterval(() => { void runAutoTick() }, DIARY_AUTO_INTERVAL_MS))
+    return { initialDelayMs: DIARY_AUTO_INITIAL_DELAY_MS, intervalMs: DIARY_AUTO_INTERVAL_MS }
+  }
+
   function dispose() {
     if (disposed) return
     disposed = true
+    autoScheduled = false
+    clearAutoTimers()
     while (disposers.length > 0) {
       const disposer = disposers.pop()
       try {
@@ -972,7 +1186,7 @@ export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log
     }
   }
 
-  const api = { read, list, save, generate, remove, dispose }
+  const api = { read, list, save, generate, autoWrite, remove, scheduleAuto, dispose }
   const tool = createDiaryTool(api, { log: warn })
   api.tool = tool
 
@@ -1079,6 +1293,18 @@ export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log
               })
               return
             }
+            if (action === 'autoWrite') {
+              const result = await autoWrite({ force: body.force === true })
+              json(res, 200, {
+                ok: true,
+                skipped: !!result.skipped,
+                reason: result.reason || null,
+                date: result.date || null,
+                wrote: Array.isArray(result.wrote) ? result.wrote : [],
+                dates: Array.isArray(result.dates) ? result.dates : [],
+              })
+              return
+            }
             if (action === 'delete') {
               const date = String(body.date ?? '')
               if (!isDateKey(date)) {
@@ -1094,7 +1320,7 @@ export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log
               })
               return
             }
-            json(res, 400, { ok: false, error: '未知 action（save | generate | delete）' })
+            json(res, 400, { ok: false, error: '未知 action（save | generate | autoWrite | delete）' })
             return
           }
 
@@ -1110,6 +1336,9 @@ export function createDiary({ home, getSoul, getMemoryStore, getConfig, llm, log
   }
 
   api.webRegistration = createWebRegistration()
+
+  // 自动写定时器：默认开启；注入 timers 或传 autoSchedule:false 可关（测试用假定时器）。
+  if (autoSchedule !== false) scheduleAuto()
 
   // 可选注册：工具 + HTTP。ctx 缺省时仅返回 API，由调用方自行接线。
   if (ctx) {

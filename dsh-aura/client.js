@@ -388,6 +388,19 @@ window.__ModuleLoader__.load({
       'memory.deleteUnsupported': '这条记录没有 id，旧 Host 暂不支持删除',
       'memory.unsaved': '记忆设置有改动，记得保存',
       'notice.memorySettingsSaved': '记忆设置已保存',
+      'diary.settings': '日记设置',
+      'diary.auto': '每天自动写',
+      'diary.auto.hint': '到点后如果今天还没有日记、事件也够多，就自动用规则写一篇；跨天会补昨天',
+      'diary.autoHour': '自动写时间',
+      'diary.autoHour.hint': '每天几点之后检查（0–23 点）',
+      'diary.autoMinEvents': '最少事件数',
+      'diary.autoMinEvents.hint': '当天事件少于这个数就不自动写（1–20 条）',
+      'diary.autoWrite': '自动补一篇',
+      'diary.autoWriting': '检查中…',
+      'diary.save': '保存日记设置',
+      'diary.unsaved': '日记设置有改动，记得保存',
+      'diary.unitHour': '点',
+      'notice.diarySettingsSaved': '日记设置已保存',
       'section.speak': '主动搭话',
       'row.speakEnabled': '开启主动搭话',
       'row.speakEnabled.hint': '她会在你安静太久时自己开口',
@@ -1505,6 +1518,15 @@ ${TRAIL_CSS}
       }
     }
 
+    function buildDiaryForm(config) {
+      const cfg = asObject(config)
+      return {
+        diaryAuto: cfg.diaryAuto !== false,
+        diaryAutoHour: clampInt(cfg.diaryAutoHour, 0, 23, 22),
+        diaryAutoMinEvents: clampInt(cfg.diaryAutoMinEvents, 1, 20, 3),
+      }
+    }
+
     /** compact 接口回显的 counts → 文案占位。 */
     function memoryCountParams(counts) {
       const source = asObject(counts)
@@ -1851,6 +1873,9 @@ ${TRAIL_CSS}
       const [diaryDraft, setDiaryDraft] = React.useState('')
       const [diaryToday, setDiaryToday] = React.useState(null)
       const [diaryTodayChecked, setDiaryTodayChecked] = React.useState(false)
+      const [diaryForm, setDiaryForm] = React.useState(() => buildDiaryForm({}))
+      const [diaryBaseline, setDiaryBaseline] = React.useState(() => buildDiaryForm({}))
+      const [diaryAutoResult, setDiaryAutoResult] = React.useState(null)
 
       const mounted = React.useRef(true)
       const inflight = React.useRef(false)
@@ -1878,6 +1903,8 @@ ${TRAIL_CSS}
       const personaBaselineRef = React.useRef(personaBaseline)
       const diaryTimer = React.useRef(null)
       const diaryLoadingRef = React.useRef(false)
+      const diaryFormRef = React.useRef(diaryForm)
+      const diaryBaselineRef = React.useRef(diaryBaseline)
 
       React.useEffect(() => {
         lookRef.current = look
@@ -1909,6 +1936,12 @@ ${TRAIL_CSS}
       React.useEffect(() => {
         memoryBaselineRef.current = memoryBaseline
       }, [memoryBaseline])
+      React.useEffect(() => {
+        diaryFormRef.current = diaryForm
+      }, [diaryForm])
+      React.useEffect(() => {
+        diaryBaselineRef.current = diaryBaseline
+      }, [diaryBaseline])
       React.useEffect(() => {
         blocksRef.current = blocks
       }, [blocks])
@@ -2002,13 +2035,22 @@ ${TRAIL_CSS}
         setMemoryBaseline(next)
       }, [])
 
+      const syncDiary = React.useCallback((config, force) => {
+        const next = buildDiaryForm(config)
+        const untouched = draftKey(diaryFormRef.current) === draftKey(diaryBaselineRef.current)
+        if (!force && !untouched) return
+        setDiaryForm(next)
+        setDiaryBaseline(next)
+      }, [])
+
       const syncDrafts = React.useCallback((config, force) => {
         syncLook(config, force)
         syncSoul(config, force)
         syncEmotion(config, force)
         syncSpeak(config, force)
         syncMemory(config, force)
-      }, [syncLook, syncSoul, syncEmotion, syncSpeak, syncMemory])
+        syncDiary(config, force)
+      }, [syncLook, syncSoul, syncEmotion, syncSpeak, syncMemory, syncDiary])
 
       const flash = React.useCallback((text) => {
         setNotice(text)
@@ -2228,6 +2270,39 @@ ${TRAIL_CSS}
           if (mounted.current) setDiaryBusy('')
         }
       }, [diaryBusy, flashDiary])
+
+      /** 「自动补一篇」：走 diary-api 的 autoWrite，force 让开关/时间/上限都让路。 */
+      const autoWriteDiary = React.useCallback(async () => {
+        if (diaryBusy) return
+        setDiaryBusy('auto')
+        setDiaryError('')
+        setDiaryNotice('')
+        try {
+          const value = await fetchJson(DIARY_API, { action: 'autoWrite', force: true })
+          if (!mounted.current) return
+          const dates = asArray(value && value.dates).map(date => String(date || '')).filter(Boolean)
+          setDiaryAutoResult({ dates, reason: rowText(value, 'reason'), at: Date.now() })
+          if (dates.length === 0) {
+            flashDiary('没补写：' + (rowText(value, 'reason') || '还没有可写的素材'))
+            return
+          }
+          flashDiary('自动补了 ' + dates.join('、') + ' 的日记')
+          await loadDiary()
+          const today = diaryDateKey()
+          if (dates.includes(today)) {
+            const todayValue = await fetchJson(DIARY_API + '?action=get&date=' + encodeURIComponent(today))
+            if (mounted.current && todayValue && todayValue.entry) {
+              setDiaryToday(asObject(todayValue.entry))
+              setDiaryTodayChecked(true)
+            }
+          }
+          if (mounted.current) void load(false)
+        } catch (error) {
+          if (mounted.current) setDiaryError(errorMessage(error))
+        } finally {
+          if (mounted.current) setDiaryBusy('')
+        }
+      }, [diaryBusy, flashDiary, loadDiary, load])
 
       /** 人设表单同步：默认不覆盖用户正在编辑的草稿。 */
       const syncPersona = React.useCallback((config, force) => {
@@ -2883,6 +2958,7 @@ ${TRAIL_CSS}
             else if (key === 'emotion') syncEmotion(value.config, true)
             else if (key === 'speak') syncSpeak(value.config, true)
             else if (key === 'memorySettings') syncMemory(value.config, true)
+            else if (key === 'diarySettings') syncDiary(value.config, true)
           }
           if (value && value.config && !payloadApplied(value.config, payload)) {
             failBlock(key, t('notice.configNotApplied'))
@@ -3047,6 +3123,14 @@ ${TRAIL_CSS}
           memoryDigestIdleMinutes: clampInt(memoryForm.memoryDigestIdleMinutes, 60, 1440, 360),
           memoryDigestDailyCap: clampInt(memoryForm.memoryDigestDailyCap, 1, 5, 2),
         }, 'notice.memorySettingsSaved')
+      }
+
+      const saveDiarySettings = () => {
+        void saveBlock('diarySettings', {
+          diaryAuto: diaryForm.diaryAuto !== false,
+          diaryAutoHour: clampInt(diaryForm.diaryAutoHour, 0, 23, 22),
+          diaryAutoMinEvents: clampInt(diaryForm.diaryAutoMinEvents, 1, 20, 3),
+        }, 'notice.diarySettingsSaved')
       }
 
       const compactMemory = async () => {
@@ -3297,6 +3381,7 @@ ${TRAIL_CSS}
       const emotionDirty = draftKey(emotionForm) !== draftKey(emotionBaseline)
       const speakDirty = draftKey(speakForm) !== draftKey(speakBaseline)
       const memoryDirty = draftKey(memoryForm) !== draftKey(memoryBaseline)
+      const diaryDirty = draftKey(diaryForm) !== draftKey(diaryBaseline)
       const blockFeedback = key => {
         const info = asObject(blocks[key])
         if (info.error) {
@@ -4893,6 +4978,73 @@ ${TRAIL_CSS}
           h(Button, { disabled: diaryBusy !== '', onClick: () => setDiaryComposeOpen(previous => !previous) }, diaryComposeOpen ? '收起手写' : '写一篇'),
         ),
         diaryFeedback,
+        h('div', { className: 'qqn-memory-block aura-memory-settings', style: { marginBottom: 12 } },
+          h('div', { className: 'qqn-look-title' }, t('diary.settings')),
+          h(Row, {
+            label: t('diary.auto'),
+            hint: t('diary.auto.hint'),
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: diaryForm.diaryAuto !== false,
+              onChange: event => setDiaryForm(prev => ({ ...prev, diaryAuto: event.target.checked })),
+            }),
+          }),
+          h(Row, {
+            label: t('diary.autoHour'),
+            hint: t('diary.autoHour.hint'),
+            control: h(React.Fragment, null,
+              h('input', {
+                className: 'qqn-input qqn-input-narrow',
+                type: 'number',
+                min: 0,
+                max: 23,
+                step: 1,
+                value: diaryForm.diaryAutoHour,
+                onChange: event => setDiaryForm(prev => ({
+                  ...prev,
+                  diaryAutoHour: event.target.value === '' ? '' : Number(event.target.value),
+                })),
+              }),
+              h('span', { className: 'qqn-unit' }, t('diary.unitHour')),
+            ),
+          }),
+          h(Row, {
+            label: t('diary.autoMinEvents'),
+            hint: t('diary.autoMinEvents.hint'),
+            control: h(React.Fragment, null,
+              h('input', {
+                className: 'qqn-input qqn-input-narrow',
+                type: 'number',
+                min: 1,
+                max: 20,
+                step: 1,
+                value: diaryForm.diaryAutoMinEvents,
+                onChange: event => setDiaryForm(prev => ({
+                  ...prev,
+                  diaryAutoMinEvents: event.target.value === '' ? '' : Number(event.target.value),
+                })),
+              }),
+              h('span', { className: 'qqn-unit' }, t('memory.unitCount')),
+            ),
+          }),
+          h('div', { className: 'qqn-actions' },
+            h(Button, {
+              variant: 'primary',
+              disabled: blockBusy('diarySettings') || !diaryDirty,
+              onClick: saveDiarySettings,
+            }, blockBusy('diarySettings') ? t('busy.save') : t('diary.save')),
+            h(Button, {
+              disabled: diaryBusy !== '',
+              onClick: () => { void autoWriteDiary() },
+            }, diaryBusy === 'auto' ? t('diary.autoWriting') : t('diary.autoWrite')),
+          ),
+          diaryDirty ? h('div', { className: 'qqn-row-hint' }, t('diary.unsaved')) : null,
+          blockFeedback('diarySettings'),
+          diaryAutoResult && diaryAutoResult.dates.length > 0
+            ? h('div', { className: 'qqn-row-hint' }, '上次自动补写：' + diaryAutoResult.dates.join('、'))
+            : null,
+        ),
         diaryComposeOpen
           ? h('div', { className: 'qqn-rows', style: { marginBottom: 12 } },
               h('div', { className: 'qqn-row', style: { flexDirection: 'column', alignItems: 'stretch', gap: 0, padding: '10px 0' } },

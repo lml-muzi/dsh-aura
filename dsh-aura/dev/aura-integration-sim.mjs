@@ -71,7 +71,7 @@ check('注册了情绪 context', contexts.some(c => c.name === 'aura:emotion'))
 check('注册了记忆 context', contexts.some(c => c.name === 'aura:memory'))
 check('注册了临场 context', contexts.some(c => c.name === 'aura:presence'))
 check('注册了主动念头 context', contexts.some(c => c.name === 'aura:intent'))
-for (const tool of ['soul_mood', 'soul_note', 'soul_recall', 'dsh_im_return_file']) {
+for (const tool of ['soul_mood', 'soul_memory', 'soul_recall', 'dsh_im_return_file']) {
   check(`注册工具 ${tool}`, tools.has(tool))
 }
 check('提供了 dshAura 服务', provided.has('dshAura'))
@@ -115,8 +115,8 @@ check('临场段文本非空', textOf(contexts.find(c => c.name === 'aura:presen
 // ---- 工具：soul_mood 自报 ----
 const mood = await tools.get('soul_mood').execute({ valence: 0.8, arousal: 0.6, cause: '项目上线' }, { agent: { session } })
 check('soul_mood 返回 ok', mood && mood.ok !== false, mood)
-const note = await tools.get('soul_note').execute({ category: 'user', text: '用户在做项目上线，经常加班', importance: 0.8 }, { agent: { session } })
-check('soul_note 返回 ok', note && note.ok !== false, note)
+const note = await tools.get('soul_memory').execute({ action: 'writeNote', category: 'user', text: '用户在做项目上线，经常加班', importance: 0.8 }, { agent: { session } })
+check('soul_memory writeNote 返回 ok', note && note.ok !== false, note)
 const recall = await tools.get('soul_recall').execute({ query: '加班 项目', limit: 5 }, { agent: { session } })
 check('soul_recall 能召回', Array.isArray(recall?.items) || Array.isArray(recall) || (recall && recall.ok !== false), recall)
 

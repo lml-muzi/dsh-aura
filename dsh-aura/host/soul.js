@@ -1307,7 +1307,7 @@ export function installSoul(ctx, { state, log } = {}) {
       description: '记录你自己长出来的一部分：新的自我认识、兴趣、习惯，或你和对方之间的默契'
         + '（kind: trait / interest / habit / bond / self）。'
         + '只在某次对话真的让“你”改变了一点时才用；不要每轮写，一次对话最多 1~2 条。'
-        + '不要写短期记忆、对方的隐私或一次性琐事（那些用 soul_note）。'
+        + '不要写短期记忆、对方的隐私或一次性琐事（那些用 soul_memory 的 writeNote）。'
         + '注意：写入会改变 system prompt（模型缓存失效一次），所以克制；同 kind + 同文会自动去重。'
         + 'config 可直接改灵魂身份字段（soulName / soulUserNickname / soulEnabled / soulPromptBudget 200~4000 / '
         + 'soulBio / soulContent / interests / strengths）。',

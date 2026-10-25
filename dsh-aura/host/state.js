@@ -105,6 +105,11 @@ export const DEFAULT_CONFIG = {
   memoryDigestIdleMinutes: 360,
   memoryDigestDailyCap: 2,
 
+  // ---- 日记自动写（host/diary.js 每 30 分钟检查一次）----
+  diaryAuto: true,
+  diaryAutoHour: 22,
+  diaryAutoMinEvents: 3,
+
   // ---- 主动搭话（speak） ----
   speakEnabled: false,
   speakDryRun: true,
@@ -153,6 +158,8 @@ const INT_RANGES = {
   memoryRecallLimit: [1, 3],
   memoryDigestIdleMinutes: [60, 1440],
   memoryDigestDailyCap: [1, 5],
+  diaryAutoHour: [0, 23],
+  diaryAutoMinEvents: [1, 20],
   speakIntervalMinutes: [5, 1440],
   speakCooldownMinutes: [0, 1440],
   speakDailyCap: [0, 10],
@@ -176,7 +183,7 @@ const FLOAT_RANGES = {
 const BOOL_FIELDS = new Set([
   'autoConnect', 'splitEnabled', 'soulEnabled', 'soulGrowthReflection', 'emotionEnabled',
   'emotionGuardOnNegative', 'memoryEnabled', 'memoryAutoCompact', 'memoryDiaryEnabled',
-  'memoryImmediate', 'memorySessionDigest',
+  'memoryImmediate', 'memorySessionDigest', 'diaryAuto',
   'speakEnabled', 'speakDryRun', 'speakStickerEnabled', 'proactiveEnabled',
 ])
 
