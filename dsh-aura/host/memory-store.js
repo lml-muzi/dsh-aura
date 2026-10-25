@@ -1102,6 +1102,8 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
       corruptWarned = false
       const record = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null
       // v1 → v2：补 facts/entities，并写回一次；坏文件已在上面回退，不会被覆盖。
+      const notesNeedId = NOTE_CATEGORIES.some((category) => asArray(record?.notes?.[category])
+        .some((note) => note && typeof note === 'object' && !asString(note.id, '').trim()))
       const needsUpgrade = record !== null && (
         asNumber(record.version, 0) < MEMORY_VERSION
         || !Array.isArray(record.facts)
@@ -1109,6 +1111,7 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
         || !Array.isArray(record.relations)
         || !record.reflection || typeof record.reflection !== 'object'
         || !('lastCompactDayKey' in record.reflection)
+        || notesNeedId
       )
       const memory = normalizeMemory(raw)
       if (needsUpgrade) {
@@ -1330,4 +1333,239 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
   }
 
   return api
+}
+
+// ---------- 笔记读写 / 实体整理（soul_memory 控制面） ----------
+
+function noteRef(input) {
+  if (typeof input === 'string') return { id: input.trim(), text: '' }
+  const source = input && typeof input === 'object' ? input : {}
+  return {
+    id: asString(source.id, '').trim(),
+    text: asString(source.text ?? source.oldText, '').trim(),
+  }
+}
+
+/**
+ * 定位一条笔记：id 优先；否则按 text 精确匹配，并且必须唯一（跨 category 也算一条）。
+ * 返回 { ok:true, category, index, note, list } 或 { ok:false, reason, matches }。
+ * 旧笔记没有 id 时在这里补一个并写回 note（store.update 落盘后 id 就稳定了）。
+ */
+export function locateNote(memory, input) {
+  if (!memory || typeof memory !== 'object') return { ok: false, reason: 'empty-memory' }
+  const ref = noteRef(input)
+  if (!ref.id && !ref.text) return { ok: false, reason: 'need-id-or-text' }
+  const matches = []
+  for (const category of NOTE_CATEGORIES) {
+    const list = asArray(memory.notes?.[category])
+    list.forEach((note, index) => {
+      if (!note || typeof note !== 'object') return
+      const noteId = asString(note.id, '').trim()
+      if (ref.id) {
+        if (noteId === ref.id) matches.push({ category, index, note, list })
+        return
+      }
+      if (asString(note.text, '').trim() === ref.text) matches.push({ category, index, note, list })
+    })
+  }
+  if (matches.length === 0) return { ok: false, reason: 'not-found' }
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      reason: 'ambiguous',
+      matches: matches.map((item) => ({
+        category: item.category,
+        id: asString(item.note.id, ''),
+        text: item.note.text,
+      })),
+    }
+  }
+  const found = matches[0]
+  if (!asString(found.note.id, '').trim()) found.note.id = newId('note')
+  return { ok: true, category: found.category, index: found.index, note: found.note, list: found.list }
+}
+
+/** 更新笔记：id 或 oldText 定位；text / importance 至少给一个。 */
+export function updateNote(memory, input = {}, now = Date.now()) {
+  if (!memory || typeof memory !== 'object') return { ok: false, reason: 'empty-memory' }
+  const source = input && typeof input === 'object' ? input : {}
+  const located = locateNote(memory, { id: source.id, text: source.oldText })
+  if (!located.ok) return located
+  const note = located.note
+  const updated = []
+  if (source.text !== undefined) {
+    const text = codepointSlice(String(source.text ?? '').trim(), NOTE_TEXT_MAX)
+    if (!text) return { ok: false, reason: 'empty-text' }
+    note.text = text
+    updated.push('text')
+  }
+  if (source.importance !== undefined) {
+    note.importance = clamp(asNumber(source.importance, note.importance), 0, 1)
+    updated.push('importance')
+  }
+  if (updated.length === 0) return { ok: false, reason: 'nothing-to-update' }
+  note.updatedAt = asNumber(now, Date.now())
+  return { ok: true, id: note.id, category: located.category, note, updated }
+}
+
+/** 删除笔记：id 或 text 精确/唯一匹配；顺手清掉指向它的到点提醒。 */
+export function deleteNote(memory, input = {}) {
+  if (!memory || typeof memory !== 'object') return { ok: false, reason: 'empty-memory' }
+  const located = locateNote(memory, input)
+  if (!located.ok) return located
+  const [removed] = located.list.splice(located.index, 1)
+  let dueRemoved = 0
+  const removedId = asString(removed?.id, '').trim()
+  if (removedId) {
+    const pending = asArray(memory.reflection?.pendingDue)
+    const kept = pending.filter((item) => {
+      const hit = item && asString(item.noteId, '') === removedId
+      if (hit) dueRemoved += 1
+      return !hit
+    })
+    if (dueRemoved > 0 && memory.reflection && typeof memory.reflection === 'object') {
+      memory.reflection.pendingDue = kept
+    }
+  }
+  return {
+    ok: true,
+    id: removedId,
+    category: located.category,
+    note: removed,
+    removed: 1,
+    dueRemoved,
+  }
+}
+
+/**
+ * 删除实体卡：同时清掉所有以它为端点的关系边。
+ * 保守：不动 facts 的 subject/value 文本（历史事实仍可读），只删实体和悬空边。
+ */
+export function deleteEntity(memory, id) {
+  const key = String(id ?? '').trim()
+  if (!memory || typeof memory !== 'object') return { ok: false, reason: 'empty-memory' }
+  if (!key) return { ok: false, reason: 'id-empty' }
+  const entities = asArray(memory.entities)
+  const index = entities.findIndex((entity) => entity && asString(entity.id, '') === key)
+  if (index < 0) return { ok: false, reason: 'not-found' }
+  const [entity] = entities.splice(index, 1)
+  const before = asArray(memory.relations)
+  const relations = before.filter((relation) => !relation || (
+    asString(relation.from, '') !== key && asString(relation.to, '') !== key
+  ))
+  memory.relations = relations
+  return {
+    ok: true,
+    id: key,
+    entity,
+    removedRelations: before.length - relations.length,
+  }
+}
+
+/**
+ * 合并实体：from 并入 to。
+ * - facts 的 subject/value 文本里等于 from 名字/别名的，替换成 to.name；
+ * - relations 端点 from.id → to.id，并去重（co 无向）、清掉自环；
+ * - 别名并进 to，firstSeenAt 取更早、lastSeenAt 取更晚，最后删掉 from。
+ */
+export function mergeEntities(memory, fromId, toId, now = Date.now()) {
+  if (!memory || typeof memory !== 'object') return { ok: false, reason: 'empty-memory' }
+  const from = resolveEntity(memory, fromId)
+  const to = resolveEntity(memory, toId)
+  if (!from) return { ok: false, reason: 'from-not-found' }
+  if (!to) return { ok: false, reason: 'to-not-found' }
+  if (from.id === to.id) return { ok: false, reason: 'same-entity' }
+  const at = asNumber(now, Date.now())
+  const fromNames = new Set([from.name.toLowerCase(), ...asArray(from.aliases).map((alias) => String(alias).toLowerCase())])
+
+  const aliases = asArray(to.aliases).map((alias) => codepointSlice(String(alias ?? '').trim(), ENTITY_NAME_MAX)).filter(Boolean)
+  const seen = new Set([to.name.toLowerCase(), ...aliases.map((alias) => alias.toLowerCase())])
+  let aliasesAdded = 0
+  const addAlias = (name) => {
+    const clean = codepointSlice(String(name ?? '').trim(), ENTITY_NAME_MAX)
+    if (!clean) return
+    const lower = clean.toLowerCase()
+    if (seen.has(lower)) return
+    seen.add(lower)
+    aliases.push(clean)
+    aliasesAdded += 1
+  }
+  addAlias(from.name)
+  for (const alias of asArray(from.aliases)) addAlias(alias)
+  to.aliases = aliases.slice(0, ENTITY_ALIAS_MAX)
+  to.firstSeenAt = Math.min(asNumber(to.firstSeenAt, at), asNumber(from.firstSeenAt, at))
+  to.lastSeenAt = Math.max(asNumber(to.lastSeenAt, at), asNumber(from.lastSeenAt, at))
+
+  const replaceName = (value) => {
+    const text = String(value ?? '').trim()
+    if (!text) return value
+    return fromNames.has(text.toLowerCase()) ? to.name : value
+  }
+  let factsUpdated = 0
+  for (const fact of asArray(memory.facts)) {
+    if (!fact || typeof fact !== 'object') continue
+    let changed = false
+    const subject = replaceName(fact.subject)
+    if (subject !== fact.subject) {
+      fact.subject = subject
+      changed = true
+    }
+    const value = replaceName(fact.value)
+    if (value !== fact.value) {
+      fact.value = value
+      changed = true
+    }
+    if (changed) factsUpdated += 1
+  }
+
+  const relationSeen = new Map()
+  let redirected = 0
+  let merged = 0
+  let droppedSelf = 0
+  for (const relation of asArray(memory.relations)) {
+    if (!relation || typeof relation !== 'object') continue
+    const next = { ...relation }
+    let touched = false
+    if (asString(next.from, '') === from.id) {
+      next.from = to.id
+      touched = true
+    }
+    if (asString(next.to, '') === from.id) {
+      next.to = to.id
+      touched = true
+    }
+    if (next.from === next.to) {
+      droppedSelf += 1
+      continue
+    }
+    if (touched) redirected += 1
+    const type = asString(next.type, '')
+    const ends = type === RELATION_CO
+      ? [next.from, next.to].sort().join('\u0001')
+      : `${next.from}\u0001${next.to}`
+    const key = `${ends}\u0001${type}`
+    const existing = relationSeen.get(key)
+    if (!existing) {
+      relationSeen.set(key, next)
+      continue
+    }
+    existing.weight = Math.max(asNumber(existing.weight, 0), asNumber(next.weight, 0))
+    existing.firstSeenAt = Math.min(asNumber(existing.firstSeenAt, at), asNumber(next.firstSeenAt, at))
+    existing.lastSeenAt = Math.max(asNumber(existing.lastSeenAt, 0), asNumber(next.lastSeenAt, 0))
+    merged += 1
+  }
+  memory.relations = [...relationSeen.values()]
+  memory.entities = asArray(memory.entities).filter((entity) => entity && asString(entity.id, '') !== from.id)
+  return {
+    ok: true,
+    fromId: from.id,
+    toId: to.id,
+    fromName: from.name,
+    toName: to.name,
+    aliasesAdded,
+    factsUpdated,
+    relationsRedirected: redirected,
+    relationsMerged: merged,
+    relationsDropped: droppedSelf,
+  }
 }

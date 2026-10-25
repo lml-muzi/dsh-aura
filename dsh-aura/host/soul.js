@@ -42,7 +42,7 @@ export const STAGE_LABELS = {
 export const DEFAULT_THRESHOLDS = { familiar: 10, close: 40, intimate: 80 }
 /** @deprecated 旧版身份段硬上限；身份段预算已统一走 config.soulPromptBudget，此常量仅为导出兼容保留。 */
 export const IDENTITY_BUDGET = 620
-export const PRESENCE_BUDGET = 80
+export const PRESENCE_BUDGET = 160
 export const EXPLAIN_LIMIT = 200
 
 // ---------- 基础工具（纯函数，供单测） ----------
@@ -558,7 +558,21 @@ export function renderPresenceContext(soul, config = {}, now = Date.now()) {
   if (config?.soulEnabled === false) return ''
   const d = new Date(now)
   const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
-  const text = `（现在是${weekdayOf(now)} ${time}；你${presenceActivity(now)}；${formatAway(soul.relation?.lastUserAt, now)}。）`
+  const stage = STAGES.includes(soul.relation?.stage) ? soul.relation.stage : 'stranger'
+  const firstMetAt = asNumber(soul.relation?.firstMetAt, now)
+  const days = Math.max(1, Math.ceil((now - firstMetAt) / 86_400_000))
+  const known = days <= 1 ? '刚认识' : `认识 ${days} 天`
+  const nickname = asString(config?.soulUserNickname, '').slice(0, 20) || soul.identity?.address?.nickname || ''
+  const preferred = soul.identity?.address?.userPreferred || ''
+  const relationLine = relationStageLine(stage, { nickname: nickname || preferred })
+  const notice = soul.relation?.stageNotice
+  const noticeLine = notice && now - asNumber(notice.at, 0) < 2 * 86_400_000
+    ? notice.direction === 'down'
+      ? '（你们最近有点疏远——如果合适，可以温和一点，不用刻意解释。）'
+      : `（你们的关系刚进入「${stageLabel(stage)}」——如果想表达，自然地带一句就好，不必刻意。）`
+    : ''
+  const text = [`（现在是${weekdayOf(now)} ${time}；你${presenceActivity(now)}；${formatAway(soul.relation?.lastUserAt, now)}）`,
+    `（关系：${stageLabel(stage)}，${known}。）`, relationLine, noticeLine].filter(Boolean).join('\n')
   return codepointSlice(text, PRESENCE_BUDGET)
 }
 

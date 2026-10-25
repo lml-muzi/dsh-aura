@@ -12,6 +12,9 @@
  *   compact 去重/清理/衰减、soul_fact 工具、context 事实注入、实体别名去重。
  *   v2.1 实体图：relations schema/坏值清洗/300 上限、addFact 建边、co 共现加权、
  *   1 跳召回（context / soul_recall / memory-api / snapshot）、compactRelations 衰减清理。
+ *   v2.2 记忆控制面：soul_memory 九种 action、笔记 id 迁移/更新/删除、实体删除清边、
+ *   实体合并重定向、写前 backup('memory')、memory-api POST compact/delete*、
+ *   memoryAutoCompact 自动整理开关、配置范围夹取。
  */
 import assert from 'node:assert/strict'
 import {
@@ -1198,6 +1201,369 @@ await test('context 预算压力：笔记/事实/关系/事件都多时仍 ≤24
   assert.ok(context.startsWith('（关于对方/你们，你记得：'), '笔记应最先保留')
   assert.ok(context.includes('（你记得：'), '直接事实次优先')
   assert.ok(memory.snapshot().relationCount >= 4)
+})
+
+
+// ---------- 17. soul_memory 统一记忆工具 ----------
+section('17. soul_memory：stats / search / writeNote / updateNote / deleteNote / deleteFact / deleteEntity / mergeEntities / compact')
+
+const memoryTool = () => memFake.tools.find((tool) => tool.name === 'soul_memory')
+
+await test('soul_memory 注册：action 必填、output schema json；stats 返回 counts/lastCompactDayKey/pendingDue', async () => {
+  const tool = memoryTool()
+  assert.ok(tool, 'installMemory 应注册 soul_memory')
+  assert.equal(tool.parameters.type, 'object')
+  assert.equal(tool.parameters.properties.action.type, 'string')
+  assert.ok(tool.parameters.required.includes('action'), 'action 必填')
+  // 源码里 output.schema 是 { type: 'json' }；defineTool 会归一化成任意 JSON schema。
+  assert.equal(typeof tool.output.schema, 'object')
+  memory.clear()
+  memory.addEvent(eventText(1, Date.now()))
+  memory.note('user', '用户叫木子', 0.9, Date.now() - 1000)
+  memory.upsertEntity('木子', { type: 'person' })
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.9 })
+  memory.upsertRelation({ from: '团子', to: '木子', type: 'co', weight: 0.5 })
+  const stats = await tool.execute({ action: 'stats' })
+  assert.equal(stats.ok, true)
+  assert.equal(stats.counts.events, 1)
+  assert.ok(stats.counts.notes >= 1)
+  assert.equal(stats.counts.facts, 1)
+  assert.equal(stats.counts.entities, 2)
+  assert.equal(stats.counts.relations, 1)
+  assert.equal(stats.lastCompactDayKey, '')
+  assert.equal(stats.pendingDue, 1)
+  const text = tool.output.render({}, stats).map((line) => line.text).join('\n')
+  assert.ok(text.includes('事件 1'), text)
+  assert.ok(text.includes('待办 1 条'), text)
+  const unknown = await tool.execute({ action: 'nope' })
+  assert.equal(unknown.ok, false)
+})
+
+await test('soul_memory search：四类各 ≤5，事实跳过 superseded', async () => {
+  memory.clear()
+  memory.note('user', '用户叫木子', 0.9)
+  memory.upsertEntity('木子', { type: 'person' })
+  memory.upsertEntity('团子', { type: 'pet' })
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.9 })
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '看电影', confidence: 0.9 })
+  memory.upsertRelation({ from: '团子', to: '木子', type: 'co', weight: 0.6 })
+  const found = await memoryTool().execute({ action: 'search', query: '木子' })
+  assert.equal(found.ok, true)
+  assert.ok(found.notes.some((note) => note.text.includes('木子')))
+  assert.ok(found.facts.some((fact) => fact.value === '看电影'))
+  assert.equal(found.facts.some((fact) => fact.value === '听歌'), false, 'superseded 不应出现')
+  assert.ok(found.entities.some((entity) => entity.name === '木子'))
+  assert.ok(found.relations.some((relation) => relation.fromName === '团子' || relation.toName === '团子'))
+  for (const key of ['notes', 'facts', 'entities', 'relations']) {
+    assert.ok(found[key].length <= 5, `${key} 最多 5 条`)
+  }
+  const recent = await memoryTool().execute({ action: 'search' })
+  assert.equal(recent.ok, true)
+  assert.ok(recent.entities.length >= 1, '空 query 返回最近的实体')
+})
+
+await test('soul_memory writeNote：生成稳定 id、写前备份、超长按笔记上限截断', async () => {
+  memory.clear()
+  const written = await memoryTool().execute({
+    action: 'writeNote', category: 'us', text: '你答应周末陪我看电影', importance: 0.9,
+  })
+  assert.equal(written.ok, true)
+  assert.ok(written.note && written.note.id, '应生成 id')
+  assert.equal(written.note.category, 'us')
+  const disk = memory.store.read()
+  const saved = disk.notes.us.find((note) => note.id === written.note.id)
+  assert.ok(saved, '磁盘笔记应带同一个 id')
+  assert.equal(saved.text, '你答应周末陪我看电影')
+  const long = await memoryTool().execute({ action: 'writeNote', category: 'self', text: '长'.repeat(220) })
+  assert.equal(long.ok, true)
+  assert.ok(lengthOf(long.note.text) <= NOTE_MAX_CHARS)
+  const empty = await memoryTool().execute({ action: 'writeNote', text: '   ' })
+  assert.equal(empty.ok, false)
+  const backupIds = existsSync(join(dataDir, 'backups'))
+    ? readdirSync(join(dataDir, 'backups')).filter((id) => id.endsWith('-memory'))
+    : []
+  assert.ok(backupIds.length >= 1, '写笔记前应做 memory 备份')
+  const manifest = JSON.parse(readFileSync(join(dataDir, 'backups', backupIds.at(-1), 'manifest.json'), 'utf8'))
+  assert.equal(manifest.label, 'memory')
+  assert.ok(manifest.files.some((file) => file.name === 'memory.json'))
+})
+
+await test('soul_memory updateNote：按 id / 旧文本定位；deleteNote 按 id / 文本并清 pendingDue', async () => {
+  memory.clear()
+  const made = await memoryTool().execute({
+    action: 'writeNote', category: 'user', text: '用户住在杭州', importance: 0.5,
+  })
+  const updated = await memoryTool().execute({
+    action: 'updateNote', id: made.note.id, text: '用户住在上海', importance: 0.95,
+  })
+  assert.equal(updated.ok, true)
+  assert.equal(updated.id, made.note.id)
+  assert.ok(updated.updated.includes('text') && updated.updated.includes('importance'))
+  let disk = memory.store.read()
+  let note = disk.notes.user.find((item) => item.id === made.note.id)
+  assert.equal(note.text, '用户住在上海')
+  assert.equal(note.importance, 0.95)
+  assert.equal(note.createdAt, made.note.createdAt, 'createdAt 不应被改')
+  const byText = await memoryTool().execute({ action: 'updateNote', oldText: '用户住在上海', importance: 0.7 })
+  assert.equal(byText.ok, true)
+  assert.equal(byText.id, made.note.id)
+  assert.equal((await memoryTool().execute({ action: 'updateNote', id: made.note.id })).ok, false)
+  assert.equal((await memoryTool().execute({ action: 'updateNote', text: '没有定位' })).ok, false)
+
+  const deleted = await memoryTool().execute({ action: 'deleteNote', id: made.note.id })
+  assert.equal(deleted.ok, true)
+  assert.equal(deleted.id, made.note.id)
+  disk = memory.store.read()
+  assert.equal(disk.notes.user.some((item) => item.id === made.note.id), false)
+
+  memory.note('us', '提醒你面试', 0.7, Date.now() - 1000)
+  assert.equal(memory.store.read().reflection.pendingDue.length, 1)
+  const byTextDeleted = await memoryTool().execute({ action: 'deleteNote', text: '提醒你面试' })
+  assert.equal(byTextDeleted.ok, true)
+  assert.equal(byTextDeleted.dueRemoved, 1)
+  assert.equal(memory.store.read().reflection.pendingDue.length, 0)
+  assert.equal((await memoryTool().execute({ action: 'deleteNote', text: '不存在的笔记' })).ok, false)
+})
+
+await test('旧笔记补 id：读取时写回，二次读取 id 不变', () => {
+  const dir = join(root, 'store-note-id')
+  mkdirSync(dir, { recursive: true })
+  const store = createMemoryStore({ home: dir, log: () => {} })
+  writeFileSync(store.file, JSON.stringify({
+    version: 2,
+    events: [],
+    notes: { user: [{ text: '旧笔记没有 id' }], us: [], self: [] },
+    topics: {},
+    facts: [],
+    entities: [],
+    relations: [],
+    reflection: { lastCompactDayKey: '' },
+  }), 'utf8')
+  const first = store.read()
+  const id = first.notes.user[0].id
+  assert.ok(id, '迁移时旧笔记应补 id')
+  const second = store.read()
+  assert.equal(second.notes.user[0].id, id, '第一次读取应把 id 写回磁盘')
+  const disk = JSON.parse(readFileSync(store.file, 'utf8'))
+  assert.equal(disk.notes.user[0].id, id)
+  store.dispose()
+})
+
+await test('soul_memory deleteFact / deleteEntity：事实删除；实体删除同时清关系但保留事实文本', async () => {
+  memory.clear()
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.9 })
+  const factId = memory.store.read().facts[0].id
+  const deletedFact = await memoryTool().execute({ action: 'deleteFact', id: factId })
+  assert.equal(deletedFact.ok, true)
+  assert.equal(deletedFact.deleted, true)
+  assert.equal(memory.store.read().facts.length, 0)
+  assert.equal((await memoryTool().execute({ action: 'deleteFact', id: factId })).ok, false)
+
+  memory.clear()
+  memory.upsertEntity('木子', { type: 'person' })
+  memory.upsertEntity('团子', { type: 'pet' })
+  memory.addFact({ subject: '木子', predicate: '养', value: '团子', confidence: 0.9 })
+  const entityId = memory.store.read().entities.find((entity) => entity.name === '团子').id
+  assert.ok(memory.store.read().relations.length >= 1)
+  const deletedEntity = await memoryTool().execute({ action: 'deleteEntity', id: entityId })
+  assert.equal(deletedEntity.ok, true)
+  assert.equal(deletedEntity.removedRelations, 1)
+  const disk = memory.store.read()
+  assert.equal(disk.entities.some((entity) => entity.id === entityId), false)
+  assert.equal(disk.relations.length, 0, '相关关系边应一起清掉')
+  assert.ok(disk.facts.some((fact) => fact.subject === '木子' && fact.value === '团子'), '事实文本保守保留')
+})
+
+await test('soul_memory mergeEntities：事实文本替换、关系重定向去重、别名合并、删除 from', async () => {
+  memory.clear()
+  memory.upsertEntity('木子', { type: 'person' })
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  memory.upsertEntity('咪咪', { type: 'pet', aliases: ['猫猫'] })
+  memory.addFact({ subject: '木子', predicate: '养', value: '团子', confidence: 0.9 })
+  memory.addFact({ subject: '团子', predicate: '喜欢', value: '咪咪', confidence: 0.8 })
+  memory.upsertRelation({ from: '木子', to: '团子', type: '陪', weight: 0.6 })
+  const before = memory.store.read()
+  const from = before.entities.find((entity) => entity.name === '团子')
+  const to = before.entities.find((entity) => entity.name === '咪咪')
+  const merged = await memoryTool().execute({ action: 'mergeEntities', fromId: from.id, toId: to.id })
+  assert.equal(merged.ok, true)
+  assert.ok(merged.factsUpdated >= 2)
+  const disk = memory.store.read()
+  assert.equal(disk.entities.some((entity) => entity.id === from.id), false)
+  const target = disk.entities.find((entity) => entity.id === to.id)
+  assert.ok(target.aliases.includes('团子') && target.aliases.includes('猫'), '名字/别名应并进目标')
+  assert.ok(disk.facts.every((fact) => fact.subject !== '团子' && fact.value !== '团子'))
+  assert.ok(disk.facts.some((fact) => fact.subject === '木子' && fact.value === '咪咪'))
+  assert.equal(disk.relations.some((relation) => relation.from === relation.to), false, '合并后的自环应清掉')
+  assert.ok(disk.relations.some((relation) => (
+    relation.from === resolveEntity(disk, '木子').id && relation.to === to.id
+  )), '木子→团子 应重定向成 木子→咪咪')
+  assert.equal(disk.relations.some((relation) => relation.from === from.id || relation.to === from.id), false)
+})
+
+await test('mergeEntities 纯函数：同向重复边合并权重、co 反向合并、自环丢弃', () => {
+  const draft = emptyMemory()
+  const a = upsertEntity(draft, '甲', { type: 'person' }, 1000).entity
+  const b = upsertEntity(draft, '乙', { type: 'person' }, 1000).entity
+  const c = upsertEntity(draft, '丙', { type: 'person' }, 1000).entity
+  draft.relations = [
+    { id: 'r1', from: a.id, to: b.id, type: 'co', weight: 0.3, firstSeenAt: 1, lastSeenAt: 2 },
+    { id: 'r2', from: b.id, to: a.id, type: 'co', weight: 0.5, firstSeenAt: 1, lastSeenAt: 3 },
+    { id: 'r3', from: a.id, to: b.id, type: '养', weight: 0.4, firstSeenAt: 1, lastSeenAt: 2 },
+    { id: 'r4', from: c.id, to: b.id, type: '养', weight: 0.6, firstSeenAt: 1, lastSeenAt: 4 },
+    { id: 'r5', from: a.id, to: c.id, type: '养', weight: 0.7, firstSeenAt: 1, lastSeenAt: 5 },
+  ]
+  const result = storeMod.mergeEntities(draft, b.id, c.id, 10)
+  assert.equal(result.ok, true)
+  assert.equal(draft.entities.some((entity) => entity.id === b.id), false)
+  const co = draft.relations.filter((relation) => relation.type === 'co')
+  assert.equal(co.length, 1, 'co 反向重复应合并成一条')
+  assert.equal(co[0].weight, 0.5, '权重取较大值')
+  const feed = draft.relations.filter((relation) => relation.type === '养')
+  assert.equal(feed.length, 1, '同向重复的 predicate 边应去重')
+  assert.equal(feed[0].weight, 0.7)
+  assert.equal(result.relationsDropped, 1, 'c→b 合并后自环应丢弃')
+  assert.equal(draft.relations.some((relation) => relation.from === relation.to), false)
+})
+
+await test('soul_memory compact：force 立即整理，返回 before/after', async () => {
+  memory.clear()
+  for (let index = 1; index <= 12; index += 1) {
+    memory.addEvent(eventText(index, Date.now() + index * 1000))
+  }
+  const before = memory.snapshot()
+  const result = await memoryTool().execute({ action: 'compact' })
+  assert.equal(result.ok, true)
+  assert.equal(result.before.events, 12)
+  assert.equal(result.after.events, 2, 'force 应压实最旧 10 条事件')
+  assert.ok(result.after.notes >= result.before.notes)
+  assert.equal(result.result.compacted, 10)
+  assert.equal(memory.snapshot().lastCompactDayKey, diaryMod.localDayKey(Date.now()))
+  const again = await memoryTool().execute({ action: 'compact' })
+  assert.equal(again.ok, true, '同一天 force 仍可再整理')
+  assert.equal(again.before.events, 2)
+})
+
+// ---------- 18. memory-api POST / 配置 / 自动整理开关 ----------
+section('18. memory-api POST：compact / deleteFact / deleteNote / deleteEntity；memoryAutoCompact；配置夹取')
+
+function httpResponse() {
+  return {
+    status: 0,
+    body: '',
+    writeHead(status) {
+      this.status = status
+    },
+    end(chunk) {
+      this.body = String(chunk ?? '')
+    },
+  }
+}
+
+async function postMemory(body, headers = { host: '127.0.0.1:3080' }) {
+  const registration = memFake.registrations.find((item) => item.path === '/dsh-aura/memory-api')
+  assert.ok(registration, '应注册 /dsh-aura/memory-api')
+  const response = httpResponse()
+  await registration.handler({
+    method: 'POST',
+    url: '/dsh-aura/memory-api',
+    headers,
+    body: JSON.stringify(body),
+  }, response)
+  return response
+}
+
+await test('memory-api POST compact：200 + before/after 统计 + lastCompactDayKey', async () => {
+  memory.clear()
+  for (let index = 1; index <= 12; index += 1) {
+    memory.addEvent(eventText(index, Date.now() + index * 1000))
+  }
+  const response = await postMemory({ action: 'compact' })
+  assert.equal(response.status, 200)
+  const body = JSON.parse(response.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.action, 'compact')
+  assert.equal(body.before.events, 12)
+  assert.equal(body.after.events, 2)
+  assert.equal(typeof body.before.notes, 'number')
+  assert.equal(memory.snapshot().lastCompactDayKey, diaryMod.localDayKey(Date.now()))
+})
+
+await test('memory-api POST deleteFact/deleteNote/deleteEntity；缺 id 404/400；跨站 403', async () => {
+  memory.clear()
+  memory.note('user', '用户叫木子', 0.9)
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', confidence: 0.9 })
+  memory.upsertEntity('团子', { type: 'pet' })
+  const noteId = memory.store.read().notes.user[0].id
+  const factId = memory.store.read().facts[0].id
+  const entityId = memory.store.read().entities[0].id
+
+  let response = await postMemory({ action: 'deleteFact', id: factId })
+  assert.equal(response.status, 200)
+  assert.equal(JSON.parse(response.body).deleted, true)
+  assert.equal(memory.store.read().facts.length, 0)
+
+  response = await postMemory({ action: 'deleteNote', id: noteId })
+  assert.equal(response.status, 200)
+  assert.equal(memory.store.read().notes.user.some((note) => note.id === noteId), false)
+
+  response = await postMemory({ action: 'deleteEntity', id: entityId })
+  assert.equal(response.status, 200)
+  assert.equal(memory.store.read().entities.length, 0)
+
+  response = await postMemory({ action: 'deleteFact', id: 'missing' })
+  assert.equal(response.status, 404)
+  response = await postMemory({ action: 'deleteFact' })
+  assert.equal(response.status, 400)
+  response = await postMemory({ action: 'what' })
+  assert.equal(response.status, 400)
+  response = await postMemory({ action: 'compact' }, { host: 'example.com' })
+  assert.equal(response.status, 403)
+})
+
+await test('memoryAutoCompact=false：onTurnEnd 不自动整理；打开后当天自动整理一次', () => {
+  state.writeConfig({ memoryAutoCompact: false, memoryReflectionEvery: 50 })
+  memory.clear()
+  const base = Date.now()
+  memory.onUserMessage({ text: '今天天气不错', at: base, sessionId: 'qq:auto-off' })
+  memory.onAssistantMessage({ text: '适合散步', at: base + 1000, sessionId: 'qq:auto-off' })
+  memory.onTurnEnd({ at: base + 2000, sessionId: 'qq:auto-off', reason: 'complete' })
+  assert.equal(memory.snapshot().lastCompactDayKey, '', '关闭自动整理时不应写 lastCompactDayKey')
+
+  state.writeConfig({ memoryAutoCompact: true })
+  const next = base + 60_000
+  memory.onUserMessage({ text: '晚上吃点好的', at: next, sessionId: 'qq:auto-on' })
+  memory.onAssistantMessage({ text: '好呀', at: next + 1000, sessionId: 'qq:auto-on' })
+  memory.onTurnEnd({ at: next + 2000, sessionId: 'qq:auto-on', reason: 'complete' })
+  assert.equal(memory.snapshot().lastCompactDayKey, diaryMod.localDayKey(Date.now()), '打开后当天应自动整理')
+  state.writeConfig({ memoryAutoCompact: true, memoryReflectionEvery: 3 })
+})
+
+await test('配置范围：memoryEnabled/memoryAutoCompact 持久化；events 5-40、notes 5-200、recall 1-3、reflection 1-50', () => {
+  state.writeConfig({
+    memoryEnabled: false,
+    memoryAutoCompact: false,
+    memoryMaxEvents: 999,
+    memoryMaxNotes: 1,
+    memoryRecallLimit: 9,
+    memoryReflectionEvery: 100,
+  })
+  const config = state.readConfig()
+  assert.equal(config.memoryEnabled, false)
+  assert.equal(config.memoryAutoCompact, false)
+  assert.equal(config.memoryMaxEvents, 40)
+  assert.equal(config.memoryMaxNotes, 5)
+  assert.equal(config.memoryRecallLimit, 3)
+  assert.equal(config.memoryReflectionEvery, 50)
+  state.writeConfig({
+    memoryEnabled: true,
+    memoryAutoCompact: true,
+    memoryMaxEvents: 40,
+    memoryMaxNotes: 20,
+    memoryRecallLimit: 3,
+    memoryReflectionEvery: 3,
+  })
 })
 
 

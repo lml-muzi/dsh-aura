@@ -25,22 +25,28 @@ import {
   FACT_LIMIT,
   ENTITY_LIMIT,
   RELATION_LIMIT,
+  RELATION_CO,
   FACT_TEXT_MAX,
   addFact as addFactToMemory,
   compactMemoryFacts,
   compactRelations,
   createMemoryStore,
+  deleteEntity as deleteEntityInMemory,
+  deleteNote as deleteNoteInMemory,
   emptyMemory,
   entitiesInText,
   forgetFact as forgetFactInMemory,
   hasMemoryContent,
   linkCooccurrence,
+  locateNote as locateNoteInMemory,
+  mergeEntities as mergeEntitiesInMemory,
   listEntities as listEntitiesInMemory,
   listFacts as listFactsInMemory,
   listRelations as listRelationsInMemory,
   queryEntities as queryEntitiesInMemory,
   queryFacts as queryFactsInMemory,
   relationsForEntity as relationsForEntityInMemory,
+  updateNote as updateNoteInMemory,
   upsertEntity as upsertEntityInMemory,
   upsertRelation as upsertRelationInMemory,
 } from './memory-store.js'
@@ -327,7 +333,7 @@ export function recallNotes(source, query, options = {}) {
   }
   scored.sort((a, b) => b.score - a.score)
   const result = scored.slice(0, limit).map(({ note }) => note)
-  if (result.length === 0 && queryGrams.size > 0) {
+  if (result.length === 0 && queryGrams.size > 0 && options.fallback !== false) {
     // 关键词没命中时，退而给「最重要的长期事实」（≤2 条），避免记忆段整段空掉
     return pool
       .filter((note) => asNumber(note.importance, 0.5) >= 0.75)
@@ -901,6 +907,48 @@ export function parseReflectionOutput(out) {
   }
 }
 
+/** soul_memory 工具输出的人类可读文本（真正的返回值仍是 JSON）。 */
+export function renderMemoryToolText(value) {
+  const result = asObject(value)
+  const reason = String(result.reason ?? result.error ?? '')
+  const fmtCounts = (counts) => {
+    const source = asObject(counts)
+    return `事件 ${asNumber(source.events, 0)} · 笔记 ${asNumber(source.notes, 0)}`
+      + ` · 事实 ${asNumber(source.facts, 0)} · 实体 ${asNumber(source.entities, 0)}`
+      + ` · 关系 ${asNumber(source.relations, 0)}`
+  }
+  if (result.ok === false) return `没成功：${reason || '未知原因'}`
+  if (result.before && result.after) {
+    return `整理完成：\n${fmtCounts(result.before)}\n→ ${fmtCounts(result.after)}`
+  }
+  if ('lastCompactDayKey' in result) {
+    const last = String(result.lastCompactDayKey || '')
+    return `记忆库：${fmtCounts(result.counts)}；上次整理 ${last || '还没整理'}；待办 ${asNumber(result.pendingDue, 0)} 条`
+  }
+  if (Array.isArray(result.notes) && Array.isArray(result.facts) && Array.isArray(result.entities)) {
+    const lines = []
+    for (const note of result.notes) lines.push(`- 笔记：${String(note?.text ?? '')}`)
+    for (const fact of result.facts) lines.push(`- 事实：${fact?.subject} · ${fact?.predicate} · ${fact?.value}`)
+    for (const entity of result.entities) lines.push(`- 实体：${entity?.name}`)
+    for (const relation of result.relations) lines.push(`- 关系：${relation?.fromName} → ${relation?.toName}`)
+    return lines.length > 0 ? lines.join('\n') : '（没搜到）'
+  }
+  if (result.entity && result.removedRelations !== undefined) {
+    return `删掉了实体「${result.entity.name}」，清掉 ${asNumber(result.removedRelations, 0)} 条关系`
+  }
+  if (result.deleted) return `删掉了事实卡 ${String(result.id ?? '')}`
+  if (result.note && result.removed) return `删掉了笔记：${String(result.note.text ?? '')}`
+  if (result.note && Array.isArray(result.updated)) return `已更新：${String(result.note.text ?? '')}`
+  if (result.fromName && result.toName) {
+    return `已合并「${result.fromName}」到「${result.toName}」：改事实 ${asNumber(result.factsUpdated, 0)} 条，`
+      + `迁移关系 ${asNumber(result.relationsRedirected, 0)} 条`
+  }
+  if (result.note) {
+    return `已记住：${String(result.note.text ?? '')}（id ${String(result.id ?? result.note.id ?? '')}）`
+  }
+  return '完成'
+}
+
 // ---------- 安装 ----------
 
 /**
@@ -982,6 +1030,8 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
   const localDefaults = {
     soulEnabled: true,
     emotionScope: 'qq',
+    memoryEnabled: true,
+    memoryAutoCompact: true,
     memoryMaxEvents: EVENT_MAX,
     memoryMaxNotes: NOTE_MAX,
     memoryReflectionEvery: 3,
@@ -1251,7 +1301,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       reflectBuffer.push({ ...turn, at: now })
       if (reflectBuffer.length > 12) reflectBuffer = reflectBuffer.slice(-12)
       const config = readConfig()
-      const every = clamp(asNumber(config.memoryReflectionEvery, 3), 1, 20)
+      const every = clamp(asNumber(config.memoryReflectionEvery, 3), 1, 50)
       const immediate = SELF_DISCLOSURE_RE.test(turn.userText) || CONFLICT_RE.test(turn.userText) || MAKE_UP_RE.test(turn.userText)
       if (reflectBuffer.length >= every || immediate) {
         void reflect({ reason: immediate ? 'immediate' : 'every-n' })
@@ -1267,7 +1317,9 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       }
       // 周期整理（事实/实体）每天最多跑一次；onTurnEnd 是天然触发点。
       try {
-        if ((readMemory().reflection?.lastCompactDayKey || '') !== localDayKey(now)) {
+        const autoCompactConfig = readConfig()
+        if (autoCompactConfig.memoryAutoCompact !== false
+          && (readMemory().reflection?.lastCompactDayKey || '') !== localDayKey(now)) {
           compact(false)
         }
       } catch (error) {
@@ -1692,6 +1744,74 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         return { ok: false, reason: '未知 action（add | query | list | forget）' }
       },
     }))
+    ctx.tools?.register?.(defineTool({
+      name: 'soul_memory',
+      description: '记忆库控制面：stats=统计，search=搜索笔记/事实/实体/关系，'
+        + 'writeNote/updateNote/deleteNote=管理长期笔记，deleteFact/deleteEntity=删除事实卡或实体卡，'
+        + 'mergeEntities=合并两个实体（事实与关系一起迁移），compact=立即整理。写操作前会自动备份 memory.json。',
+      parameters: {
+        action: {
+          type: 'string',
+          description: 'stats | search | writeNote | updateNote | deleteNote | deleteFact | deleteEntity | mergeEntities | compact',
+          required: true,
+        },
+        query: { type: 'string', description: 'search 关键词；为空时返回最近/最重的几条' },
+        category: { type: 'string', description: 'writeNote：user | us | self，默认 user' },
+        text: { type: 'string', description: 'writeNote 新笔记 / updateNote 新文本（≤200 字，落盘受笔记上限截断）' },
+        oldText: { type: 'string', description: 'updateNote / deleteNote 定位用的旧文本（也可改用 id）' },
+        importance: { type: 'number', description: '0..1，越重要越不容易被淘汰' },
+        id: { type: 'string', description: 'updateNote / deleteNote / deleteFact / deleteEntity 的 id' },
+        fromId: { type: 'string', description: 'mergeEntities 被合并的实体 id（也接受名字/别名）' },
+        toId: { type: 'string', description: 'mergeEntities 保留的实体 id（也接受名字/别名）' },
+        limit: { type: 'number', description: 'search 每类条数，默认 5，最多 5' },
+      },
+      output: {
+        schema: { type: 'json' },
+        render: (_args, value) => [{ type: 'text', text: renderMemoryToolText(value) }],
+      },
+      async execute(args = {}) {
+        const action = String(args?.action ?? '').trim()
+        try {
+          if (action === 'stats') return memoryStats()
+          if (action === 'search') return memorySearch(args?.query, args?.limit)
+          if (action === 'compact') {
+            await backupMemoryBeforeWrite()
+            return memoryCompact()
+          }
+          if (action === 'writeNote') {
+            await backupMemoryBeforeWrite()
+            return memoryWriteNote(args)
+          }
+          if (action === 'updateNote') {
+            await backupMemoryBeforeWrite()
+            return memoryUpdateNote(args)
+          }
+          if (action === 'deleteNote') {
+            await backupMemoryBeforeWrite()
+            return memoryDeleteNote(args)
+          }
+          if (action === 'deleteFact') {
+            await backupMemoryBeforeWrite()
+            return memoryDeleteFact(args?.id)
+          }
+          if (action === 'deleteEntity') {
+            await backupMemoryBeforeWrite()
+            return memoryDeleteEntity(args?.id)
+          }
+          if (action === 'mergeEntities') {
+            await backupMemoryBeforeWrite()
+            return memoryMergeEntities(args)
+          }
+          return {
+            ok: false,
+            reason: '未知 action（stats | search | writeNote | updateNote | deleteNote | deleteFact | deleteEntity | mergeEntities | compact）',
+          }
+        } catch (error) {
+          logger('[soul] soul_memory 失败:', error instanceof Error ? error.message : error)
+          return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+        }
+      },
+    }))
   } catch (error) {
     logger('[soul] 记忆工具注册失败:', error instanceof Error ? error.message : error)
   }
@@ -1772,6 +1892,14 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
                 entityCount: asArray(memory.entities).length,
                 relationCount: asArray(memory.relations).length,
               })
+              return
+            }
+            if (req.method === 'POST' && (route === '/' || route === '' || route === '/state')) {
+              await handleMemoryApiPost(req, res)
+              return
+            }
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
               return
             }
             sendJson(res, 404, { ok: false, error: 'not found' })
@@ -1904,6 +2032,283 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     }
   }
 
+  // ⑧.5 统一记忆控制面：soul_memory 工具与 memory-api 共用同一组实现。
+  function memoryCounts(memory = readMemory()) {
+    const noteCounts = { user: 0, us: 0, self: 0 }
+    for (const key of ['user', 'us', 'self']) noteCounts[key] = asArray(memory?.notes?.[key]).length
+    const facts = asArray(memory?.facts)
+    return {
+      events: asArray(memory?.events).length,
+      notes: noteCounts.user + noteCounts.us + noteCounts.self,
+      noteCounts,
+      facts: facts.filter((fact) => fact && !fact.supersededBy).length,
+      factsTotal: facts.length,
+      entities: asArray(memory?.entities).length,
+      relations: asArray(memory?.relations).length,
+    }
+  }
+
+  function memoryStats() {
+    const memory = readMemory()
+    return {
+      ok: true,
+      counts: memoryCounts(memory),
+      lastCompactDayKey: String(memory?.reflection?.lastCompactDayKey ?? ''),
+      pendingDue: asArray(memory?.reflection?.pendingDue).length,
+      /* dueNow 是「现在该提醒」的条数；pendingDue 是队列里全部待办。 */
+      dueNow: pendingDue().length,
+      lastReflectAt: asNumber(memory?.reflection?.lastReflectAt, 0),
+    }
+  }
+
+  /** 写操作前的备份：动态 import backup.js，失败只 warn，绝不阻塞写入。 */
+  async function backupMemoryBeforeWrite() {
+    try {
+      const backup = await import('./backup.js')
+      const snapshot = typeof backup.snapshot === 'function' ? backup.snapshot : backup.snapshotSync
+      if (typeof snapshot !== 'function') return null
+      const result = await snapshot('memory')
+      if (result && result.ok === false) {
+        logger('[soul] 记忆写前备份失败（继续写入）:', result.error)
+        return null
+      }
+      return result
+    } catch (error) {
+      logger('[soul] 记忆写前备份失败（继续写入）:', error instanceof Error ? error.message : error)
+      return null
+    }
+  }
+
+  /** 关系搜索：按 fromName / toName / type 的 token 命中；空 query 返回最近的边。 */
+  function searchRelations(memory, query, limit = 5) {
+    const views = listRelationsInMemory(memory, RELATION_LIMIT)
+    const text = String(query ?? '').trim().toLowerCase()
+    if (!text) return views.slice(0, limit)
+    const tokens = text.split(/\s+/).filter(Boolean)
+    return views.filter((relation) => {
+      const haystack = `${relation.fromName}\u0001${relation.toName}\u0001${relation.type}`.toLowerCase()
+      return tokens.every((token) => haystack.includes(token))
+    }).slice(0, limit)
+  }
+
+  /** search：笔记 / 事实 / 实体 / 关系各最多 5 条；事实跳过 superseded 和所有 fallback。 */
+  function memorySearch(query, limit = 5) {
+    const max = clamp(asNumber(limit, 5), 1, 5)
+    const now = Date.now()
+    const memory = readMemory()
+    const text = String(query ?? '').trim()
+    const notes = recallNotes(memory, text, { now, limit: max, fallback: false }).map((note) => ({
+      id: String(note?.id ?? ''),
+      category: String(note?.category ?? ''),
+      text: String(note?.text ?? ''),
+      importance: asNumber(note?.importance, 0.5),
+      updatedAt: asNumber(note?.updatedAt, 0),
+    }))
+    const facts = queryFactsInMemory(memory, text, max, now)
+    const entities = queryEntitiesInMemory(memory, text, max, now, { fallback: false })
+    const relations = searchRelations(memory, text, max)
+    return {
+      ok: true,
+      query: text,
+      notes,
+      facts,
+      entities,
+      relations,
+      counts: {
+        notes: notes.length,
+        facts: facts.length,
+        entities: entities.length,
+        relations: relations.length,
+      },
+    }
+  }
+
+  /** writeNote：text 最多接收 200 字；真正落盘仍受笔记库单条上限约束。 */
+  function memoryWriteNote(input = {}) {
+    const text = codepointSlice(String(input?.text ?? '').trim(), 200)
+    if (!text) return { ok: false, reason: 'text 为空' }
+    const category = ['user', 'us', 'self'].includes(input?.category) ? input.category : 'user'
+    const importance = input?.importance === undefined
+      ? 0.6
+      : clamp(asNumber(input.importance, 0.6), 0, 1)
+    return note(category, text, importance, 0)
+  }
+
+  /** updateNote：id 或 oldText 定位；text / importance 至少给一个。 */
+  function memoryUpdateNote(input = {}) {
+    const id = String(input?.id ?? '').trim()
+    const oldText = String(input?.oldText ?? '').trim()
+    if (!id && !oldText) return { ok: false, reason: '需要 id 或 oldText' }
+    if (input?.text === undefined && input?.importance === undefined) {
+      return { ok: false, reason: '没有要更新的字段（text / importance）' }
+    }
+    const peek = locateNoteInMemory(readMemory(), id ? { id } : { text: oldText })
+    if (!peek.ok) return peek
+    let result = { ok: false, reason: 'not-found' }
+    store.update((memory) => {
+      result = updateNoteInMemory(memory, {
+        id: id || undefined,
+        oldText: id ? undefined : oldText,
+        text: input?.text,
+        importance: input?.importance,
+      })
+      return memory
+    })
+    return result
+  }
+
+  function memoryDeleteNote(input = {}) {
+    const id = String(input?.id ?? '').trim()
+    const text = String(input?.text ?? '').trim()
+    if (!id && !text) return { ok: false, reason: '需要 id 或 text' }
+    const peek = locateNoteInMemory(readMemory(), id ? { id } : { text })
+    if (!peek.ok) return peek
+    let result = { ok: false, reason: 'not-found' }
+    store.update((memory) => {
+      result = deleteNoteInMemory(memory, id ? { id } : { text })
+      return memory
+    })
+    return result
+  }
+
+  function memoryDeleteFact(id) {
+    const key = String(id ?? '').trim()
+    if (!key) return { ok: false, reason: 'id 为空' }
+    const exists = asArray(readMemory().facts).some((fact) => fact && fact.id === key)
+    if (!exists) return { ok: false, reason: 'not-found' }
+    let forgotten = false
+    store.update((memory) => {
+      forgotten = forgetFactInMemory(memory, key)
+      return memory
+    })
+    return { ok: true, deleted: forgotten, forgotten, id: key }
+  }
+
+  function memoryDeleteEntity(id) {
+    const key = String(id ?? '').trim()
+    if (!key) return { ok: false, reason: 'id 为空' }
+    const exists = asArray(readMemory().entities).some((entity) => entity && entity.id === key)
+    if (!exists) return { ok: false, reason: 'not-found' }
+    let result = { ok: false, reason: 'not-found' }
+    store.update((memory) => {
+      result = deleteEntityInMemory(memory, key)
+      return memory
+    })
+    return result
+  }
+
+  function memoryMergeEntities(input = {}) {
+    const fromId = String(input?.fromId ?? '').trim()
+    const toId = String(input?.toId ?? '').trim()
+    if (!fromId || !toId) return { ok: false, reason: '需要 fromId 和 toId' }
+    if (fromId === toId) return { ok: false, reason: 'same-entity' }
+    let result = { ok: false, reason: 'not-found' }
+    store.update((memory) => {
+      result = mergeEntitiesInMemory(memory, fromId, toId)
+      return memory
+    })
+    return result
+  }
+
+  /** compact：强制立即整理，返回前后统计。 */
+  function memoryCompact() {
+    const before = memoryCounts()
+    const result = compact(true)
+    const after = memoryCounts()
+    return { ok: true, before, after, result }
+  }
+
+  /** memory-api POST 的请求体：支持 Node 流，也兼容测试直接塞 req.body。 */
+  async function readRequestBody(req, limit = 64 * 1024) {
+    if (req && req.body !== undefined && req.body !== null) {
+      if (typeof req.body === 'string') {
+        const text = req.body.trim()
+        return text ? JSON.parse(text) : {}
+      }
+      if (typeof req.body === 'object') return req.body
+    }
+    if (!req || typeof req[Symbol.asyncIterator] !== 'function') return {}
+    const chunks = []
+    let size = 0
+    for await (const chunk of req) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))
+      size += buffer.length
+      if (size > limit) throw new Error('请求体过大')
+      chunks.push(buffer)
+    }
+    const text = Buffer.concat(chunks).toString('utf8').trim()
+    return text ? JSON.parse(text) : {}
+  }
+
+  /** POST /dsh-aura/memory-api：{action:'compact'|'deleteFact'|'deleteNote'|'deleteEntity', id?} */
+  async function handleMemoryApiPost(req, res) {
+    let body
+    try {
+      body = await readRequestBody(req)
+    } catch (error) {
+      sendJson(res, 400, { ok: false, error: `请求体解析失败：${error instanceof Error ? error.message : String(error)}` })
+      return
+    }
+    const action = String(body?.action ?? '').trim()
+    const id = String(body?.id ?? body?.noteId ?? '').trim()
+    try {
+      if (action === 'compact') {
+        await backupMemoryBeforeWrite()
+        sendJson(res, 200, { ok: true, action, ...memoryCompact() })
+        return
+      }
+      if (action === 'deleteFact') {
+        if (!id) {
+          sendJson(res, 400, { ok: false, error: 'id required' })
+          return
+        }
+        const exists = asArray(readMemory().facts).some((fact) => fact && fact.id === id)
+        if (!exists) {
+          sendJson(res, 404, { ok: false, error: 'fact not found' })
+          return
+        }
+        await backupMemoryBeforeWrite()
+        sendJson(res, 200, { ok: true, action, ...memoryDeleteFact(id) })
+        return
+      }
+      if (action === 'deleteNote') {
+        if (!id) {
+          sendJson(res, 400, { ok: false, error: 'id required' })
+          return
+        }
+        const peek = locateNoteInMemory(readMemory(), { id })
+        if (!peek.ok) {
+          sendJson(res, peek.reason === 'ambiguous' ? 400 : 404, { ok: false, error: peek.reason })
+          return
+        }
+        await backupMemoryBeforeWrite()
+        sendJson(res, 200, { ok: true, action, ...memoryDeleteNote({ id }) })
+        return
+      }
+      if (action === 'deleteEntity') {
+        if (!id) {
+          sendJson(res, 400, { ok: false, error: 'id required' })
+          return
+        }
+        const exists = asArray(readMemory().entities).some((entity) => entity && entity.id === id)
+        if (!exists) {
+          sendJson(res, 404, { ok: false, error: 'entity not found' })
+          return
+        }
+        await backupMemoryBeforeWrite()
+        sendJson(res, 200, { ok: true, action, ...memoryDeleteEntity(id) })
+        return
+      }
+      sendJson(res, 400, {
+        ok: false,
+        error: 'unknown action（compact | deleteFact | deleteNote | deleteEntity）',
+      })
+    } catch (error) {
+      logger('[soul] memory-api POST 失败:', error instanceof Error ? error.message : error)
+      sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   function pendingDue(now = Date.now()) {
     try {
       return asArray(readMemory().reflection?.pendingDue)
@@ -2015,6 +2420,14 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       }
       return result
     },
+    stats: memoryStats,
+    search: memorySearch,
+    writeNote: memoryWriteNote,
+    updateNote: memoryUpdateNote,
+    deleteNote: memoryDeleteNote,
+    deleteFact: memoryDeleteFact,
+    deleteEntity: memoryDeleteEntity,
+    mergeEntities: memoryMergeEntities,
     extractFacts,
     reflect,
     compact,

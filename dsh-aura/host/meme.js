@@ -1247,11 +1247,6 @@ export async function initMeme({ ctx, state, log, bridge } = {}) {
         'QQ 会话：把挑中的候选 path 交给 dsh_im_return_file 发原生图片，同时把同一段 [表情: 描述] 写进回复给网页渲染；QQ 端会自动摘掉标记，只留原生图片。',
         '发完短接，让图说话；对方说正事时克制。',
       ]
-      if (mode === 'text') {
-        lines.push('当前发送方式是「纯文字」：不要发图、不要写 [表情: …] 标记，需要时只把候选描述当文字素材。')
-      } else if (mode === 'image') {
-        lines.push('当前发送方式是「图片」：挑好图必须真的发出去，不能只写文字。')
-      }
       return lines.join('\n')
     }
     try {
@@ -1264,6 +1259,22 @@ export async function initMeme({ ctx, state, log, bridge } = {}) {
       if (typeof disposer === 'function') disposers.push(disposer)
     } catch (error) {
       logger('注册提示词段失败:', error instanceof Error ? error.message : error)
+    }
+    // 发送方式是易变状态：放 runtime-context，不污染 system prompt 缓存。
+    try {
+      const modeDisposer = promptService.context?.({
+        name: 'aura:meme-mode',
+        order: 56,
+        text: () => {
+          const mode = currentSendMode()
+          if (mode === 'text') return '（表情包发送方式：纯文字。不要发图、不要写 [表情: …]，需要时只把候选描述当文字素材。）'
+          if (mode === 'image') return '（表情包发送方式：图片。挑好图必须真的发出去，不能只写文字。）'
+          return ''
+        },
+      })
+      if (typeof modeDisposer === 'function') disposers.push(modeDisposer)
+    } catch (error) {
+      logger('注册发送方式上下文失败:', error instanceof Error ? error.message : error)
     }
   }
 

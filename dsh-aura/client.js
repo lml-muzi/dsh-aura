@@ -343,6 +343,34 @@ window.__ModuleLoader__.load({
       'memory.resetConfirm': '再点一次确认清空',
       'memory.resetNotice': '记忆已清空',
       'memory.resetWarning': '会删除事件、笔记、话题和事实/实体卡，且不可恢复',
+      'memory.settings': '记忆设置',
+      'memory.enabled': '启用记忆',
+      'memory.enabled.hint': '关闭后不再把记忆注入对话上下文；已记下的内容仍保留在本地',
+      'memory.autoCompact': '自动整理',
+      'memory.autoCompact.hint': '每天第一次对话后自动整理事实卡/实体图；关闭后只能手动点「立即整理」',
+      'memory.maxEvents': '事件上限',
+      'memory.maxEvents.hint': '短期事件保留条数（5–40），超出的最旧事件会压实成笔记',
+      'memory.maxNotes': '笔记上限',
+      'memory.maxNotes.hint': '长期笔记上限（5–200）；记忆库单类硬上限为 30 条',
+      'memory.recallLimit': '召回条数',
+      'memory.recallLimit.hint': '每次注入记忆上下文时最多带几条笔记（1–3）',
+      'memory.reflectionEvery': '反思间隔',
+      'memory.reflectionEvery.hint': '每多少轮对话做一次记忆反思（1–50）',
+      'memory.unitCount': '条',
+      'memory.unitRounds': '轮',
+      'memory.save': '保存记忆设置',
+      'memory.compact': '立即整理',
+      'memory.compacting': '整理中…',
+      'memory.compactNotice': '整理完成',
+      'memory.compactBefore': '整理前：事件 {events} · 笔记 {notes} · 事实 {facts} · 实体 {entities} · 关系 {relations}',
+      'memory.compactAfter': '整理后：事件 {events} · 笔记 {notes} · 事实 {facts} · 实体 {entities} · 关系 {relations}',
+      'memory.delete': '删除',
+      'memory.deleteFactConfirm': '确定删除这张事实卡？',
+      'memory.deleteEntityConfirm': '确定删除这个实体？以它为端点的关系边会一起删除。',
+      'memory.deleted': '已删除',
+      'memory.deleteUnsupported': '这条记录没有 id，旧 Host 暂不支持删除',
+      'memory.unsaved': '记忆设置有改动，记得保存',
+      'notice.memorySettingsSaved': '记忆设置已保存',
       'section.speak': '主动搭话',
       'row.speakEnabled': '开启主动搭话',
       'row.speakEnabled.hint': '她会在你安静太久时自己开口',
@@ -568,6 +596,34 @@ window.__ModuleLoader__.load({
       'memory.resetConfirm': 'Click again to confirm',
       'memory.resetNotice': 'Memory cleared',
       'memory.resetWarning': 'Deletes events, notes, topics and fact/entity cards; cannot be undone',
+      'memory.settings': 'Memory settings',
+      'memory.enabled': 'Enable memory',
+      'memory.enabled.hint': 'When off, memory context is no longer injected; existing memories stay on disk',
+      'memory.autoCompact': 'Auto-organize',
+      'memory.autoCompact.hint': 'Runs once on the first turn of each day; off means manual "Organize now" only',
+      'memory.maxEvents': 'Event limit',
+      'memory.maxEvents.hint': 'Short-term events kept (5-40); oldest ones are compacted into notes',
+      'memory.maxNotes': 'Note limit',
+      'memory.maxNotes.hint': 'Long-term notes (5-200); the store still caps each category at 30',
+      'memory.recallLimit': 'Recall count',
+      'memory.recallLimit.hint': 'Notes injected into each memory context (1-3)',
+      'memory.reflectionEvery': 'Reflection interval',
+      'memory.reflectionEvery.hint': 'Turns between memory reflections (1-50)',
+      'memory.unitCount': 'items',
+      'memory.unitRounds': 'turns',
+      'memory.save': 'Save memory settings',
+      'memory.compact': 'Organize now',
+      'memory.compacting': 'Organizing...',
+      'memory.compactNotice': 'Organized',
+      'memory.compactBefore': 'Before: events {events} · notes {notes} · facts {facts} · entities {entities} · relations {relations}',
+      'memory.compactAfter': 'After: events {events} · notes {notes} · facts {facts} · entities {entities} · relations {relations}',
+      'memory.delete': 'Delete',
+      'memory.deleteFactConfirm': 'Delete this fact card?',
+      'memory.deleteEntityConfirm': 'Delete this entity? Relations touching it will be removed too.',
+      'memory.deleted': 'Deleted',
+      'memory.deleteUnsupported': 'This record has no id; older Hosts cannot delete it',
+      'memory.unsaved': 'Memory settings changed - remember to save',
+      'notice.memorySettingsSaved': 'Memory settings saved',
       'section.speak': 'Proactive pings',
       'row.speakEnabled': 'Enable proactive pings',
       'row.speakEnabled.hint': 'She may speak up when you have been quiet too long',
@@ -786,6 +842,10 @@ window.__ModuleLoader__.load({
 .aura-memory-entity{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
 .aura-memory-entity-type{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
 .aura-memory-entity-aliases{color:var(--dsw-alias-label-caption);font-size:11px;line-height:16px;overflow-wrap:anywhere}
+.aura-memory-delete{margin-left:auto;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;padding:0 2px;cursor:pointer}
+.aura-memory-delete:hover{color:var(--dsw-alias-state-error-primary)}
+.aura-memory-delete:disabled{opacity:.45;cursor:default}
+.aura-memory-compact-stats{display:flex;flex-direction:column;gap:2px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
 .aura-memory-relation-list{display:flex;flex-direction:column;gap:6px}
 .aura-memory-relation{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;padding:7px 9px;border-radius:8px;background:var(--dsw-alias-bg-layer-3);border:.5px solid var(--dsw-alias-border-l3);color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
 .aura-memory-relation-type{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
@@ -1395,6 +1455,30 @@ ${TRAIL_CSS}
       }
     }
 
+    function buildMemoryForm(config) {
+      const cfg = asObject(config)
+      return {
+        memoryEnabled: cfg.memoryEnabled !== false,
+        memoryAutoCompact: cfg.memoryAutoCompact !== false,
+        memoryMaxEvents: clampInt(cfg.memoryMaxEvents, 5, 40, 40),
+        memoryMaxNotes: clampInt(cfg.memoryMaxNotes, 5, 200, 20),
+        memoryRecallLimit: clampInt(cfg.memoryRecallLimit, 1, 3, 3),
+        memoryReflectionEvery: clampInt(cfg.memoryReflectionEvery, 1, 50, 3),
+      }
+    }
+
+    /** compact 接口回显的 counts → 文案占位。 */
+    function memoryCountParams(counts) {
+      const source = asObject(counts)
+      return {
+        events: Number(source.events) || 0,
+        notes: Number(source.notes) || 0,
+        facts: Number(source.facts) || 0,
+        entities: Number(source.entities) || 0,
+        relations: Number(source.relations) || 0,
+      }
+    }
+
     /** 保存后对比 Host 回显，判断字段是否真的被接受（Host 未更新时给出提示）。 */
     function payloadApplied(config, payload) {
       const cfg = asObject(config)
@@ -1686,6 +1770,9 @@ ${TRAIL_CSS}
       const [emotionBaseline, setEmotionBaseline] = React.useState(() => buildEmotionForm({}))
       const [speakForm, setSpeakForm] = React.useState(() => buildSpeakForm({}))
       const [speakBaseline, setSpeakBaseline] = React.useState(() => buildSpeakForm({}))
+      const [memoryForm, setMemoryForm] = React.useState(() => buildMemoryForm({}))
+      const [memoryBaseline, setMemoryBaseline] = React.useState(() => buildMemoryForm({}))
+      const [memoryCompactResult, setMemoryCompactResult] = React.useState(null)
       const [blocks, setBlocks] = React.useState({})
       const [resetArmed, setResetArmed] = React.useState(false)
       const [timelineOpen, setTimelineOpen] = React.useState(false)
@@ -1739,6 +1826,8 @@ ${TRAIL_CSS}
       const emotionBaselineRef = React.useRef(emotionBaseline)
       const speakRef = React.useRef(speakForm)
       const speakBaselineRef = React.useRef(speakBaseline)
+      const memoryRef = React.useRef(memoryForm)
+      const memoryBaselineRef = React.useRef(memoryBaseline)
       const blocksRef = React.useRef(blocks)
       const blockTimers = React.useRef({})
       const resetTimer = React.useRef(null)
@@ -1775,6 +1864,12 @@ ${TRAIL_CSS}
       React.useEffect(() => {
         speakBaselineRef.current = speakBaseline
       }, [speakBaseline])
+      React.useEffect(() => {
+        memoryRef.current = memoryForm
+      }, [memoryForm])
+      React.useEffect(() => {
+        memoryBaselineRef.current = memoryBaseline
+      }, [memoryBaseline])
       React.useEffect(() => {
         blocksRef.current = blocks
       }, [blocks])
@@ -1860,12 +1955,21 @@ ${TRAIL_CSS}
         setSpeakBaseline(next)
       }, [])
 
+      const syncMemory = React.useCallback((config, force) => {
+        const next = buildMemoryForm(config)
+        const untouched = draftKey(memoryRef.current) === draftKey(memoryBaselineRef.current)
+        if (!force && !untouched) return
+        setMemoryForm(next)
+        setMemoryBaseline(next)
+      }, [])
+
       const syncDrafts = React.useCallback((config, force) => {
         syncLook(config, force)
         syncSoul(config, force)
         syncEmotion(config, force)
         syncSpeak(config, force)
-      }, [syncLook, syncSoul, syncEmotion, syncSpeak])
+        syncMemory(config, force)
+      }, [syncLook, syncSoul, syncEmotion, syncSpeak, syncMemory])
 
       const flash = React.useCallback((text) => {
         setNotice(text)
@@ -2739,6 +2843,7 @@ ${TRAIL_CSS}
             if (key === 'soul') syncSoul(value.config, true)
             else if (key === 'emotion') syncEmotion(value.config, true)
             else if (key === 'speak') syncSpeak(value.config, true)
+            else if (key === 'memorySettings') syncMemory(value.config, true)
           }
           if (value && value.config && !payloadApplied(value.config, payload)) {
             failBlock(key, t('notice.configNotApplied'))
@@ -2890,6 +2995,61 @@ ${TRAIL_CSS}
         }, 4000)
       }
 
+      const saveMemory = () => {
+        void saveBlock('memorySettings', {
+          memoryEnabled: memoryForm.memoryEnabled === true,
+          memoryAutoCompact: memoryForm.memoryAutoCompact === true,
+          memoryMaxEvents: clampInt(memoryForm.memoryMaxEvents, 5, 40, 40),
+          memoryMaxNotes: clampInt(memoryForm.memoryMaxNotes, 5, 200, 20),
+          memoryRecallLimit: clampInt(memoryForm.memoryRecallLimit, 1, 3, 3),
+          memoryReflectionEvery: clampInt(memoryForm.memoryReflectionEvery, 1, 50, 3),
+        }, 'notice.memorySettingsSaved')
+      }
+
+      const compactMemory = async () => {
+        if (blockBusy('memoryCompact')) return
+        setBlock('memoryCompact', { busy: true, error: '', notice: '' })
+        try {
+          const value = await fetchJson(MEMORY_API, { action: 'compact' })
+          if (!mounted.current) return
+          setMemoryCompactResult({ before: asObject(value.before), after: asObject(value.after) })
+          flashBlock('memoryCompact', t('memory.compactNotice'))
+          void load(false)
+        } catch (error) {
+          if (mounted.current) failBlock('memoryCompact', error)
+        }
+      }
+
+      const deleteMemoryFact = async (fact) => {
+        if (blockBusy('memory') || !fact.id) return
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function'
+          && !window.confirm(t('memory.deleteFactConfirm'))) return
+        setBlock('memory', { busy: true, error: '', notice: '' })
+        try {
+          await fetchJson(MEMORY_API, { action: 'deleteFact', id: fact.id })
+          if (!mounted.current) return
+          flashBlock('memory', t('memory.deleted'))
+          void load(false)
+        } catch (error) {
+          if (mounted.current) failBlock('memory', error)
+        }
+      }
+
+      const deleteMemoryEntity = async (entity) => {
+        if (blockBusy('memory') || !entity.id) return
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function'
+          && !window.confirm(t('memory.deleteEntityConfirm'))) return
+        setBlock('memory', { busy: true, error: '', notice: '' })
+        try {
+          await fetchJson(MEMORY_API, { action: 'deleteEntity', id: entity.id })
+          if (!mounted.current) return
+          flashBlock('memory', t('memory.deleted'))
+          void load(false)
+        } catch (error) {
+          if (mounted.current) failBlock('memory', error)
+        }
+      }
+
       const runSpeakTick = async () => {
         if (blockBusy('speakTick')) return
         setBlock('speakTick', { busy: true, error: '', notice: '' })
@@ -2994,6 +3154,7 @@ ${TRAIL_CSS}
         .filter(row => !row.supersededBy && String(row.value || '').trim())
         .map((row, index) => ({
           key: String(row.id || '') || ('fact-' + index + '-' + String(row.lastSeenAt || '')),
+          id: String(row.id || ''),
           subject: String(row.subject || '').trim(),
           predicate: String(row.predicate || '').trim(),
           value: String(row.value || '').trim(),
@@ -3009,6 +3170,7 @@ ${TRAIL_CSS}
         .filter(row => String(row.name || '').trim())
         .map((row, index) => ({
           key: String(row.id || '') || ('entity-' + index + '-' + String(row.lastSeenAt || '')),
+          id: String(row.id || ''),
           name: String(row.name || '').trim(),
           type: MEMORY_ENTITY_TYPES.includes(row.type) ? row.type : 'other',
           aliases: asArray(row.aliases)
@@ -3066,6 +3228,7 @@ ${TRAIL_CSS}
       const soulDirty = draftKey(soulForm) !== draftKey(soulBaseline)
       const emotionDirty = draftKey(emotionForm) !== draftKey(emotionBaseline)
       const speakDirty = draftKey(speakForm) !== draftKey(speakBaseline)
+      const memoryDirty = draftKey(memoryForm) !== draftKey(memoryBaseline)
       const blockFeedback = key => {
         const info = asObject(blocks[key])
         if (info.error) {
@@ -3160,7 +3323,11 @@ ${TRAIL_CSS}
         h('div', { className: 'qqn-actions' },
           h(Button, {
             variant: 'primary',
-            disabled: lookBusy || !(lookDirty || personaDirty),
+            disabled: lookBusy || !(lookDirty
+              || personaForm.trailEnabled !== personaBaseline.trailEnabled
+              || personaForm.trailColor !== personaBaseline.trailColor
+              || personaForm.trailSpeed !== personaBaseline.trailSpeed
+              || personaForm.trailWidth !== personaBaseline.trailWidth),
             onClick: () => void saveLook(),
           }, lookBusy ? t('busy.look') : t('button.lookSave')),
         ),
@@ -3545,6 +3712,125 @@ ${TRAIL_CSS}
         action: soulPresent && noteCount ? h('span', null, t('memory.notesCount', { count: noteCount })) : null,
       },
         h('div', { className: 'qqn-rows' },
+          h('div', { className: 'qqn-memory-block aura-memory-settings' },
+            h('div', { className: 'qqn-look-title' }, t('memory.settings')),
+            h(Row, {
+              label: t('memory.enabled'),
+              hint: t('memory.enabled.hint'),
+              control: h('input', {
+                className: 'qqn-checkbox',
+                type: 'checkbox',
+                checked: memoryForm.memoryEnabled === true,
+                onChange: event => setMemoryForm(prev => ({ ...prev, memoryEnabled: event.target.checked })),
+              }),
+            }),
+            h(Row, {
+              label: t('memory.autoCompact'),
+              hint: t('memory.autoCompact.hint'),
+              control: h('input', {
+                className: 'qqn-checkbox',
+                type: 'checkbox',
+                checked: memoryForm.memoryAutoCompact === true,
+                onChange: event => setMemoryForm(prev => ({ ...prev, memoryAutoCompact: event.target.checked })),
+              }),
+            }),
+            h(Row, {
+              label: t('memory.maxEvents'),
+              hint: t('memory.maxEvents.hint'),
+              control: h(React.Fragment, null,
+                h('input', {
+                  className: 'qqn-input qqn-input-narrow',
+                  type: 'number',
+                  min: 5,
+                  max: 40,
+                  step: 1,
+                  value: memoryForm.memoryMaxEvents,
+                  onChange: event => setMemoryForm(prev => ({
+                    ...prev,
+                    memoryMaxEvents: event.target.value === '' ? '' : Number(event.target.value),
+                  })),
+                }),
+                h('span', { className: 'qqn-unit' }, t('memory.unitCount')),
+              ),
+            }),
+            h(Row, {
+              label: t('memory.maxNotes'),
+              hint: t('memory.maxNotes.hint'),
+              control: h(React.Fragment, null,
+                h('input', {
+                  className: 'qqn-input qqn-input-narrow',
+                  type: 'number',
+                  min: 5,
+                  max: 200,
+                  step: 1,
+                  value: memoryForm.memoryMaxNotes,
+                  onChange: event => setMemoryForm(prev => ({
+                    ...prev,
+                    memoryMaxNotes: event.target.value === '' ? '' : Number(event.target.value),
+                  })),
+                }),
+                h('span', { className: 'qqn-unit' }, t('memory.unitCount')),
+              ),
+            }),
+            h(Row, {
+              label: t('memory.recallLimit'),
+              hint: t('memory.recallLimit.hint'),
+              control: h(React.Fragment, null,
+                h('input', {
+                  className: 'qqn-input qqn-input-narrow',
+                  type: 'number',
+                  min: 1,
+                  max: 3,
+                  step: 1,
+                  value: memoryForm.memoryRecallLimit,
+                  onChange: event => setMemoryForm(prev => ({
+                    ...prev,
+                    memoryRecallLimit: event.target.value === '' ? '' : Number(event.target.value),
+                  })),
+                }),
+                h('span', { className: 'qqn-unit' }, t('memory.unitCount')),
+              ),
+            }),
+            h(Row, {
+              label: t('memory.reflectionEvery'),
+              hint: t('memory.reflectionEvery.hint'),
+              control: h(React.Fragment, null,
+                h('input', {
+                  className: 'qqn-input qqn-input-narrow',
+                  type: 'number',
+                  min: 1,
+                  max: 50,
+                  step: 1,
+                  value: memoryForm.memoryReflectionEvery,
+                  onChange: event => setMemoryForm(prev => ({
+                    ...prev,
+                    memoryReflectionEvery: event.target.value === '' ? '' : Number(event.target.value),
+                  })),
+                }),
+                h('span', { className: 'qqn-unit' }, t('memory.unitRounds')),
+              ),
+            }),
+            h('div', { className: 'qqn-actions' },
+              h(Button, {
+                variant: 'primary',
+                disabled: blockBusy('memorySettings') || !memoryDirty,
+                onClick: saveMemory,
+              }, blockBusy('memorySettings') ? t('busy.save') : t('memory.save')),
+              h(Button, {
+                disabled: blockBusy('memoryCompact'),
+                onClick: () => void compactMemory(),
+              }, blockBusy('memoryCompact') ? t('memory.compacting') : t('memory.compact')),
+            ),
+            memoryDirty ? h('div', { className: 'qqn-row-hint' }, t('memory.unsaved')) : null,
+            blockFeedback('memorySettings'),
+            blockFeedback('memoryCompact'),
+            memoryCompactResult
+              ? h('div', { className: 'aura-memory-compact-stats' },
+                  h('div', null, t('memory.compactBefore', memoryCountParams(memoryCompactResult.before))),
+                  h('div', null, t('memory.compactAfter', memoryCountParams(memoryCompactResult.after))),
+                )
+              : null,
+          ),
           h('div', { className: 'qqn-memory-block' },
             h('div', { className: 'qqn-look-title' }, t('memory.events')),
             memoryEvents.length
@@ -3569,6 +3855,13 @@ ${TRAIL_CSS}
                   h('div', { className: 'aura-memory-fact-meta' },
                     h('span', null, t('memory.factConfidence', { value: Math.round(fact.confidence * 100) })),
                     fact.lastSeenAt ? h('span', null, formatRelative(fact.lastSeenAt, t)) : null,
+                    h('button', {
+                      type: 'button',
+                      className: 'aura-memory-delete',
+                      disabled: !fact.id || blockBusy('memory'),
+                      title: fact.id ? t('memory.delete') : t('memory.deleteUnsupported'),
+                      onClick: () => void deleteMemoryFact(fact),
+                    }, t('memory.delete')),
                   ),
                 )))
               : h('div', { className: 'qqn-mood-empty' }, soulPresent ? t('memory.factsEmpty') : t('empty.soulPending')),
@@ -3585,6 +3878,13 @@ ${TRAIL_CSS}
                   entity.aliases.length
                     ? h('span', { className: 'aura-memory-entity-aliases' }, t('memory.entityAliases', { names: entity.aliases.join('、') }))
                     : null,
+                  h('button', {
+                    type: 'button',
+                    className: 'aura-memory-delete',
+                    disabled: !entity.id || blockBusy('memory'),
+                    title: entity.id ? t('memory.delete') : t('memory.deleteUnsupported'),
+                    onClick: () => void deleteMemoryEntity(entity),
+                  }, t('memory.delete')),
                 )))
               : h('div', { className: 'qqn-mood-empty' }, soulPresent ? t('memory.entitiesEmpty') : t('empty.soulPending')),
           ),
