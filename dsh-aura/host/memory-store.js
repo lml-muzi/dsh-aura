@@ -9,7 +9,9 @@
  *               firstSeenAt, lastSeenAt, supersededBy, lastDecayAt }],
  *     entities: [{ id, name, type, aliases, firstSeenAt, lastSeenAt }],
  *     relations: [{ id, from, to, type, weight, firstSeenAt, lastSeenAt }],
- *     reflection: { lastReflectAt, lastSource, userState, pendingDue, lastCompactDayKey }
+ *     digests: { [sessionId]: { lastAt, lastEventAt, turns } },
+ *     reflection: { lastReflectAt, lastSource, userState, pendingDue, lastCompactDayKey,
+ *                   lastDigestDayKey, digestCount }
  *   }
  *
  * 设计约束：
@@ -42,8 +44,12 @@ export const MEMORY_FILE = 'memory.json'
 export const EVENT_LIMIT = 40
 /** 每类笔记上限。 */
 export const NOTE_LIMIT = 30
-/** 单条笔记硬上限（码点）。 */
+/** 单条笔记硬上限（码点）：普通笔记 80，约定类 120，会话整理摘要 200。 */
 export const NOTE_TEXT_MAX = 80
+export const NOTE_PROMISE_MAX = 120
+export const NOTE_DIGEST_MAX = 200
+/** digests 里最多保留多少个会话。 */
+export const DIGEST_SESSION_LIMIT = 100
 export const TOPIC_LIMIT = 60
 export const PENDING_DUE_LIMIT = 20
 export const NOTE_CATEGORIES = Object.freeze(['user', 'us', 'self'])
@@ -123,12 +129,15 @@ export function emptyMemory() {
     facts: [],
     entities: [],
     relations: [],
+    digests: {},
     reflection: {
       lastReflectAt: 0,
       lastSource: '',
       userState: null,
       pendingDue: [],
       lastCompactDayKey: '',
+      lastDigestDayKey: '',
+      digestCount: 0,
     },
   }
 }
@@ -838,11 +847,14 @@ export function compactMemoryFacts(memory, now = Date.now()) {
 
 function normalizeNote(raw, category, now) {
   if (!raw || typeof raw !== 'object') return null
-  const text = codepointSlice(String(raw.text ?? '').trim(), NOTE_TEXT_MAX)
+  const kind = asString(raw.kind, '').slice(0, 16)
+  const textMax = kind === 'digest' ? NOTE_DIGEST_MAX : kind === 'promise' ? NOTE_PROMISE_MAX : NOTE_TEXT_MAX
+  const text = codepointSlice(String(raw.text ?? '').trim(), textMax)
   if (!text) return null
   return {
     id: asString(raw.id, '').trim() || newId('note'),
     category,
+    kind,
     text,
     importance: clamp(asNumber(raw.importance, 0.5), 0, 1),
     createdAt: asNumber(raw.createdAt, now),
@@ -870,6 +882,32 @@ function normalizeEvent(raw, now) {
     source: asString(raw.source, 'rule').slice(0, 12),
     sessionId: asString(raw.sessionId, ''),
   }
+}
+
+/**
+ * 会话整理记录：{ [sessionId]: { lastAt, lastEventAt, turns } }。
+ * 按最近活动保留前 DIGEST_SESSION_LIMIT 个会话，坏条目直接丢。
+ */
+function normalizeDigests(raw) {
+  const source = asObject(raw)
+  const entries = []
+  for (const [sessionId, value] of Object.entries(source)) {
+    const key = String(sessionId ?? '').trim().slice(0, 120)
+    if (!key) continue
+    const entry = asObject(value)
+    entries.push({
+      key,
+      lastAt: asNumber(entry.lastAt, 0),
+      lastEventAt: asNumber(entry.lastEventAt, 0),
+      turns: Math.max(0, Math.round(asNumber(entry.turns, 0))),
+    })
+  }
+  entries.sort((a, b) => Math.max(b.lastEventAt, b.lastAt) - Math.max(a.lastEventAt, a.lastAt))
+  const out = {}
+  for (const item of entries.slice(0, DIGEST_SESSION_LIMIT)) {
+    out[item.key] = { lastAt: item.lastAt, lastEventAt: item.lastEventAt, turns: item.turns }
+  }
+  return out
 }
 
 function normalizeTopics(raw) {
@@ -924,6 +962,7 @@ export function normalizeMemory(raw, now = Date.now()) {
       .slice(-NOTE_LIMIT)
   }
   base.topics = normalizeTopics(raw.topics)
+  base.digests = normalizeDigests(raw.digests)
   const factIds = new Set()
   base.facts = asArray(raw.facts)
     .map((fact) => normalizeFact(fact, now))
@@ -971,6 +1010,7 @@ export function normalizeMemory(raw, now = Date.now()) {
   const userState = reflection.userState !== undefined ? reflection.userState : raw.userState
   const pendingDue = reflection.pendingDue !== undefined ? reflection.pendingDue : raw.pendingDue
   const dayKey = asString(reflection.lastCompactDayKey, '')
+  const digestDayKey = asString(reflection.lastDigestDayKey, '')
   base.reflection = {
     lastReflectAt: asNumber(lastReflectAt, 0),
     lastSource: asString(reflection.lastSource ?? raw.lastSource, '').slice(0, 12),
@@ -979,6 +1019,8 @@ export function normalizeMemory(raw, now = Date.now()) {
       : null,
     pendingDue: normalizePendingDue(pendingDue),
     lastCompactDayKey: /^\d{4}-\d{2}-\d{2}$/.test(dayKey) ? dayKey : '',
+    lastDigestDayKey: /^\d{4}-\d{2}-\d{2}$/.test(digestDayKey) ? digestDayKey : '',
+    digestCount: Math.max(0, Math.round(asNumber(reflection.digestCount, 0))),
   }
   return base
 }
@@ -990,6 +1032,7 @@ export function hasMemoryContent(memory) {
   if (NOTE_CATEGORIES.some((key) => asArray(memory.notes?.[key]).length > 0)) return true
   if (asArray(memory.facts).length > 0 || asArray(memory.entities).length > 0) return true
   if (asArray(memory.relations).length > 0) return true
+  if (Object.keys(asObject(memory.digests)).length > 0) return true
   return Object.keys(asObject(memory.topics)).length > 0
 }
 
@@ -1109,8 +1152,11 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
         || !Array.isArray(record.facts)
         || !Array.isArray(record.entities)
         || !Array.isArray(record.relations)
+        || !record.digests || typeof record.digests !== 'object'
         || !record.reflection || typeof record.reflection !== 'object'
         || !('lastCompactDayKey' in record.reflection)
+        || !('lastDigestDayKey' in record.reflection)
+        || !('digestCount' in record.reflection)
         || notesNeedId
       )
       const memory = normalizeMemory(raw)
@@ -1247,6 +1293,7 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
         facts: asArray(memory.facts).length,
         entities: asArray(memory.entities).length,
         relations: asArray(memory.relations).length,
+        digests: Object.keys(asObject(memory.digests)).length,
         pendingDue: asArray(memory.reflection?.pendingDue).length,
         lastReflectAt: asNumber(memory.reflection?.lastReflectAt, 0),
         userState: memory.reflection?.userState ?? null,
@@ -1394,7 +1441,9 @@ export function updateNote(memory, input = {}, now = Date.now()) {
   const note = located.note
   const updated = []
   if (source.text !== undefined) {
-    const text = codepointSlice(String(source.text ?? '').trim(), NOTE_TEXT_MAX)
+    // 会话整理/约定类笔记允许更长的文本，其他笔记仍按 80 字硬上限。
+    const textMax = note.kind === 'digest' ? NOTE_DIGEST_MAX : note.kind === 'promise' ? NOTE_PROMISE_MAX : NOTE_TEXT_MAX
+    const text = codepointSlice(String(source.text ?? '').trim(), textMax)
     if (!text) return { ok: false, reason: 'empty-text' }
     note.text = text
     updated.push('text')

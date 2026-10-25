@@ -1,6 +1,6 @@
 /**
  * 记忆层（Host 侧）：短期事件流 / 长期笔记 / 话题索引 / 关键词召回 / 反思 / 记忆工具 /
- * 实体图（facts → entities → relations，1 跳召回）。
+ * 实体图（facts → entities → relations，1 跳召回）、立即记忆、会话整理（digest）。
  *
  * 设计依据：docs/aura-soul-design.md 的 C（记忆）、E.4（context order 40）、E.5.2/E.5.3（soul_note/soul_recall）。
  *
@@ -27,6 +27,8 @@ import {
   RELATION_LIMIT,
   RELATION_CO,
   FACT_TEXT_MAX,
+  NOTE_DIGEST_MAX,
+  NOTE_PROMISE_MAX,
   addFact as addFactToMemory,
   compactMemoryFacts,
   compactRelations,
@@ -85,6 +87,17 @@ export const EVENT_CONTEXT_RECENT = 2
 /** 事件超过 30 条时触发压实；每次把最旧 10 条汇总成 notes。 */
 export const EVENT_COMPACT_THRESHOLD = 30
 export const EVENT_COMPACT_BATCH = 10
+
+/** 立即记忆：约定类笔记最长 120、重要事实笔记 80；同文本/同事实 24h 内不重复写。 */
+export const IMMEDIATE_NOTE_MAX = NOTE_PROMISE_MAX
+export const DEDUP_WINDOW_MS = 86_400_000
+export const IMMEDIATE_PROMISE_RE = /记住|别忘|答应|说好|约好|约定|说定了/
+export const DIGEST_IMPORTANT_PREDICATES = Object.freeze(['称呼', '生日', '居住地', '宠物', '喜欢', '讨厌'])
+
+/** 会话整理：窗口最多 12 条事件 / 5 条新事实，摘要单条 ≤200 字。 */
+export const DIGEST_NOTE_MAX = NOTE_DIGEST_MAX
+export const DIGEST_EVENT_WINDOW = 12
+export const DIGEST_FACT_WINDOW = 5
 
 /** 话题词表（够用即可，不引入分词依赖）。 */
 export const TOPIC_VOCAB = [
@@ -240,6 +253,8 @@ export function mergeNote(notes, note, max = NOTE_MAX) {
       existing.importance = Math.max(asNumber(existing.importance, 0.5), note.importance)
       existing.updatedAt = note.updatedAt
       existing.category = note.category
+      // 长文本类型（digest/promise）优先，避免合并时把 200/120 字笔记降级成 80 字。
+      if (note.kind === 'digest' || note.kind === 'promise') existing.kind = note.kind
       if (note.dueAt) existing.dueAt = note.dueAt
       return { merged: true, note: existing }
     }
@@ -551,7 +566,7 @@ export function extractFacts(text, options = {}) {
   }
 
   // 约定：记住/答应/说好 X → us，显式 0.9
-  const promiseMatch = /(?:记住|答应|说好|约好)([^，,。！？!?\n]{1,50})/.exec(source)
+  const promiseMatch = /(?:记住|别忘|答应|说好|约好|约定|说定了)([^，,。！？!?\n]{1,50})/.exec(source)
   if (promiseMatch) {
     const value = cleanFactValue(promiseMatch[1], 40)
     if (value) {
@@ -918,6 +933,14 @@ export function renderMemoryToolText(value) {
       + ` · 关系 ${asNumber(source.relations, 0)}`
   }
   if (result.ok === false) return `没成功：${reason || '未知原因'}`
+  if (result.sessionId && result.window) {
+    const window = asObject(result.window)
+    const topics = asArray(window.topics).map((topic) => String(topic)).filter(Boolean)
+    const lines = [`会话整理完成：写了 ${result.note ? 1 : 0} 条笔记 · 事件 ${asNumber(window.events, 0)} 条 · 新增事实 ${asNumber(window.facts, 0)} 条`]
+    if (result.note && result.note.text) lines.push(`- ${String(result.note.text)}`)
+    if (topics.length > 0) lines.push(`聊到：${topics.join('、')}`)
+    return lines.join('\n')
+  }
   if (result.before && result.after) {
     return `整理完成：\n${fmtCounts(result.before)}\n→ ${fmtCounts(result.after)}`
   }
@@ -972,7 +995,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     ctx = ctxOrOptions
     options = maybeOptions || {}
   }
-  const { state, soul, log } = options
+  const { state, soul, log, timers } = options
   const logger = typeof log === 'function' ? log : (...args) => console.log('[dsh-aura]', ...args)
   const disabledApi = {
     snapshot: () => ({}),
@@ -1000,6 +1023,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     onUserMessage: () => {},
     onAssistantMessage: () => {},
     onTurnEnd: () => {},
+    digest: async () => ({ ok: false, reason: 'disabled', sessionId: '', note: null, facts: [], window: null }),
     clear: () => ({ ok: false }),
     store: null,
     memoryStore: null,
@@ -1037,6 +1061,10 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     memoryReflectionEvery: 3,
     memoryDiaryEnabled: false,
     memoryRecallLimit: 3,
+    memoryImmediate: true,
+    memorySessionDigest: true,
+    memoryDigestIdleMinutes: 360,
+    memoryDigestDailyCap: 2,
     memoryReflectionLlm: false,
     memoryProvider: '',
     memoryModel: '',
@@ -1090,6 +1118,8 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           upsertEntityInMemory(memory, entity.name, { type: entity.type, aliases: entity.aliases }, now)
         }
         for (const fact of extracted.facts) {
+          // 同一个事实 24h 内不重复写（addFact 会刷新 lastSeenAt，这里直接跳过）。
+          if (hasFreshFact(memory, fact, now)) continue
           const result = addFactToMemory(memory, { ...fact, source }, now)
           if (result?.ok) facts += 1
         }
@@ -1102,6 +1132,91 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       logger('[soul] 事实抽取写入失败:', error instanceof Error ? error.message : error)
     }
     return { facts, entities: extracted.entities.length, edges }
+  }
+
+  /**
+   * 立即记忆去重：同一段文本已经在笔记里（24h 内）就不再写。
+   * 只在立即记忆/重要事实路径使用；普通 soul_note 不受影响。
+   */
+  function findFreshNote(memory, text, now) {
+    for (const key of ['user', 'us', 'self']) {
+      for (const note of asArray(memory?.notes?.[key])) {
+        if (!note || note.text !== text) continue
+        if (now - asNumber(note.updatedAt, note.createdAt) < DEDUP_WINDOW_MS) return note
+      }
+    }
+    return null
+  }
+
+  /** 同一个事实（subject+predicate+value）24h 内不重复写。 */
+  function hasFreshFact(memory, fact, now) {
+    const subject = String(fact?.subject ?? '')
+    const predicate = String(fact?.predicate ?? '')
+    const value = String(fact?.value ?? '')
+    if (!subject || !predicate || !value) return false
+    return asArray(memory?.facts).some((item) => item && !item.supersededBy
+      && item.subject === subject && item.predicate === predicate && item.value === value
+      && now - asNumber(item.lastSeenAt, 0) < DEDUP_WINDOW_MS)
+  }
+
+  /**
+   * 重要信息立即入记忆（零 token）：
+   * - 命中「记住/别忘/答应/说好/约好/约定/说定了」→ notes.us 一条（≤120，0.9）；
+   * - 名字/生日/住址/宠物/好恶命中 → notes.user 各一条（0.8）；
+   * - 同文本 24h 内不重复写；memoryImmediate=false 时整段跳过（事实抽取不受影响）。
+   */
+  function applyImmediateNotes(text, now, config) {
+    const promiseHit = IMMEDIATE_PROMISE_RE.test(text)
+    const extracted = extractFacts(text, { subject: userFactSubject(), now })
+    const important = extracted.facts.filter((fact) => DIGEST_IMPORTANT_PREDICATES.includes(fact.predicate))
+    if (!promiseHit && important.length === 0) return { notes: 0, skipped: 0, facts: 0 }
+    const promiseFact = extracted.facts.find((fact) => fact.predicate === '约定') || null
+    const maxNotes = clamp(asNumber(config?.memoryMaxNotes, NOTE_MAX), 5, NOTE_MAX)
+    let added = 0
+    let skipped = 0
+    try {
+      store.update((memory) => {
+        if (!memory.notes || typeof memory.notes !== 'object') memory.notes = { user: [], us: [], self: [] }
+        for (const key of ['user', 'us', 'self']) {
+          if (!Array.isArray(memory.notes[key])) memory.notes[key] = []
+        }
+        const push = (category, rawText, importance, kind) => {
+          const limit = kind === 'promise' ? IMMEDIATE_NOTE_MAX : NOTE_MAX_CHARS
+          const clean = codepointSlice(String(rawText ?? '').trim(), limit)
+          if (!clean) return
+          if (findFreshNote(memory, clean, now)) {
+            skipped += 1
+            return
+          }
+          const made = {
+            id: newId('note'),
+            category,
+            kind,
+            text: clean,
+            importance: clamp(asNumber(importance, 0.6), 0, 1),
+            createdAt: now,
+            updatedAt: now,
+            hits: 0,
+            dueAt: 0,
+          }
+          const merged = mergeNote(memory.notes[category], made, maxNotes)
+          if (!merged.merged) added += 1
+        }
+        for (const fact of important) push('user', fact.text, 0.8, 'immediate')
+        if (promiseHit) {
+          const fallback = codepointSlice(
+            String(text ?? '').replace(/[\s，,。；;：:！？!?]+$/g, ''),
+            IMMEDIATE_NOTE_MAX - 5,
+          )
+          const value = promiseFact ? promiseFact.value : fallback
+          if (value) push('us', `你们约定：${value}`, 0.9, 'promise')
+        }
+        return memory
+      })
+    } catch (error) {
+      logger('[soul] 立即记忆写入失败:', error instanceof Error ? error.message : error)
+    }
+    return { notes: added, skipped, facts: important.length, promise: promiseHit }
   }
 
   // ⓪ 首次升级：soul.memory → memory.json（只发生一次，失败不阻塞启动）
@@ -1142,6 +1257,11 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
   let reflectBuffer = []
   let reflecting = false
   let lastReflectAttempt = 0
+
+  /** 会话整理定时器：sessionId → timer；新消息取消、turnEnd 重排。 */
+  const digestTimers = new Map()
+  const setTimer = timers && typeof timers.setTimeout === 'function' ? timers.setTimeout.bind(timers) : setTimeout
+  const clearTimer = timers && typeof timers.clearTimeout === 'function' ? timers.clearTimeout.bind(timers) : clearTimeout
 
   // ① 记忆 context（order 40，只对 QQ 陪伴会话）
   try {
@@ -1200,6 +1320,16 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
             .slice(0, TOPIC_MAX)
           memory.topics = Object.fromEntries(keep.map((key) => [key, memory.topics[key]]))
         }
+        // 记录会话最近活动时间（会话整理的「空闲」判定用）。
+        if (event.sessionId) {
+          if (!memory.digests || typeof memory.digests !== 'object') memory.digests = {}
+          const previous = asObject(memory.digests[event.sessionId])
+          memory.digests[event.sessionId] = {
+            lastAt: asNumber(previous.lastAt, 0),
+            lastEventAt: Math.max(asNumber(previous.lastEventAt, 0), asNumber(event.at, 0)),
+            turns: Math.max(0, Math.round(asNumber(previous.turns, 0))),
+          }
+        }
         // ring 超阈值时顺手压实最旧 10 条，避免事件无限涨。
         if (memory.events.length > EVENT_COMPACT_THRESHOLD) {
           compactEvents(memory, { threshold: EVENT_COMPACT_THRESHOLD })
@@ -1234,20 +1364,293 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     }
   }
 
+    // ②.5 会话整理（规则，零 token；手动/定时共用）
+
+  function digestIdleMs(config = readConfig()) {
+    return clamp(asNumber(config?.memoryDigestIdleMinutes, 360), 60, 1440) * 60_000
+  }
+
+  function digestDailyCap(config = readConfig()) {
+    return clamp(asNumber(config?.memoryDigestDailyCap, 2), 1, 5)
+  }
+
+  function digestDayInfo(memory, dayKey) {
+    const reflection = asObject(memory?.reflection)
+    const stored = String(reflection.lastDigestDayKey ?? '')
+    return {
+      dayKey,
+      count: stored === dayKey ? Math.max(0, Math.round(asNumber(reflection.digestCount, 0))) : 0,
+    }
+  }
+
+  /** 缺省会话：digests 里最近活动的；没有就退回最近事件里的 sessionId。 */
+  function latestSessionIdOf(memory) {
+    const digests = asObject(memory?.digests)
+    let best = ''
+    let bestAt = -1
+    for (const [sessionId, value] of Object.entries(digests)) {
+      const at = Math.max(asNumber(value?.lastEventAt, 0), asNumber(value?.lastAt, 0))
+      if (at > bestAt) {
+        bestAt = at
+        best = sessionId
+      }
+    }
+    if (best) return best
+    for (const event of asArray(memory?.events)) {
+      const sessionId = String(event?.sessionId ?? '').trim()
+      const at = asNumber(event?.at, 0)
+      if (sessionId && at > bestAt) {
+        bestAt = at
+        best = sessionId
+      }
+    }
+    return best
+  }
+
+  /** 窗口：该会话自上次 digest 之后的事件（最多 12）+ lastSeenAt 在窗口内的新事实（最多 5）。 */
+  function digestWindowOf(memory, sessionId, now) {
+    const entry = asObject(asObject(memory?.digests)[sessionId])
+    const from = asNumber(entry.lastAt, 0)
+    const events = asArray(memory?.events)
+      .filter((event) => event && String(event.sessionId ?? '') === sessionId
+        && asNumber(event.at, 0) > from && asNumber(event.at, 0) <= now)
+      .slice(-DIGEST_EVENT_WINDOW)
+    const facts = asArray(memory?.facts)
+      .filter((fact) => fact && !fact.supersededBy
+        && asNumber(fact.lastSeenAt, 0) > from && asNumber(fact.lastSeenAt, 0) <= now)
+      .sort((left, right) => asNumber(left.lastSeenAt, 0) - asNumber(right.lastSeenAt, 0))
+      .slice(-DIGEST_FACT_WINDOW)
+    return { from, events, facts }
+  }
+
+  function digestTopicsOf(events) {
+    const topics = []
+    for (const event of events) {
+      for (const topic of asArray(event?.topics)) {
+        const key = String(topic ?? '').trim().slice(0, 8)
+        if (!key || topics.includes(key)) continue
+        topics.push(key)
+        if (topics.length >= 5) return topics
+      }
+    }
+    return topics
+  }
+
+  /** 摘要文案：聊到：…；新增：…；约定：…（空段省略，总长 ≤200）。 */
+  function buildDigestText(events, facts) {
+    const parts = []
+    const topics = digestTopicsOf(events)
+    let talked = topics.join('、')
+    if (!talked && events.length > 0) {
+      talked = codepointSlice(String(events[events.length - 1]?.summary ?? '').trim(), 60)
+    }
+    if (talked) parts.push(`聊到：${talked}`)
+    const newFacts = facts.filter((fact) => fact && fact.predicate !== '约定').slice(-3)
+    if (newFacts.length > 0) {
+      parts.push(`新增：${newFacts.map((fact) => codepointSlice(String(fact.text || `${fact.subject}${fact.predicate}${fact.value}`), 36)).join('、')}`)
+    }
+    const promises = facts.filter((fact) => fact && fact.predicate === '约定')
+    if (promises.length > 0) {
+      parts.push(`约定：${promises.map((fact) => codepointSlice(String(fact.value ?? ''), 36)).join('、')}`)
+    }
+    return codepointSlice(parts.join('；'), DIGEST_NOTE_MAX)
+  }
+
+  function digestFactView(fact) {
+    return {
+      id: String(fact?.id ?? ''),
+      subject: String(fact?.subject ?? ''),
+      predicate: String(fact?.predicate ?? ''),
+      value: String(fact?.value ?? ''),
+      text: String(fact?.text ?? ''),
+      confidence: asNumber(fact?.confidence, 0),
+      lastSeenAt: asNumber(fact?.lastSeenAt, 0),
+    }
+  }
+
+  /**
+   * 整理一个会话：规则摘要 → notes.us（0.7）→ 更新 digests 与每日计数。
+   * manual=true 时忽略 memorySessionDigest 开关与每日上限（显式操作总能跑）。
+   */
+  async function digestSession(options = {}) {
+    const manual = options.manual === true
+    const now = asNumber(options.now, Date.now())
+    const config = readConfig()
+    if (!manual && config.memorySessionDigest === false) {
+      return { ok: false, reason: 'disabled', sessionId: '', note: null, facts: [], window: null }
+    }
+    const before = readMemory()
+    const sessionId = String(options.sessionId ?? '').trim() || latestSessionIdOf(before)
+    if (!sessionId) {
+      return { ok: false, reason: 'no-session', sessionId: '', note: null, facts: [], window: null }
+    }
+    const dayKey = localDayKey(now)
+    const cap = digestDailyCap(config)
+    const dayBefore = digestDayInfo(before, dayKey)
+    if (!manual && dayBefore.count >= cap) {
+      return {
+        ok: false,
+        reason: 'daily-cap',
+        sessionId,
+        note: null,
+        facts: [],
+        window: null,
+        dayKey,
+        count: dayBefore.count,
+        cap,
+      }
+    }
+    const win = digestWindowOf(before, sessionId, now)
+    const text = buildDigestText(win.events, win.facts)
+    const windowInfo = {
+      from: win.from,
+      to: now,
+      events: win.events.length,
+      facts: win.facts.length,
+      topics: digestTopicsOf(win.events),
+    }
+    if (!text) {
+      return { ok: false, reason: 'empty', sessionId, note: null, facts: [], window: windowInfo }
+    }
+    // 写前备份（失败只 warn，不阻塞整理）。
+    await backupMemoryBeforeWrite()
+    const maxNotes = clamp(asNumber(config?.memoryMaxNotes, NOTE_MAX), 5, NOTE_MAX)
+    let noteResult = null
+    let countAfter = dayBefore.count + 1
+    try {
+      store.update((memory) => {
+        if (!memory.notes || typeof memory.notes !== 'object') memory.notes = { user: [], us: [], self: [] }
+        for (const key of ['user', 'us', 'self']) {
+          if (!Array.isArray(memory.notes[key])) memory.notes[key] = []
+        }
+        const list = memory.notes.us
+        const existing = list.find((note) => note && note.text === text)
+        if (existing) {
+          existing.importance = Math.max(asNumber(existing.importance, 0.5), 0.7)
+          existing.updatedAt = now
+          noteResult = { ...existing, category: 'us', created: false }
+        } else {
+          const made = {
+            id: newId('note'),
+            category: 'us',
+            kind: 'digest',
+            text,
+            importance: 0.7,
+            createdAt: now,
+            updatedAt: now,
+            hits: 0,
+            dueAt: 0,
+          }
+          list.push(made)
+          if (list.length > maxNotes) {
+            let weakest = 0
+            let weakestScore = Infinity
+            list.forEach((item, index) => {
+              const score = asNumber(item.importance, 0.5) * 0.7 + Math.min(5, asNumber(item.hits, 0)) * 0.06
+              if (score < weakestScore) {
+                weakestScore = score
+                weakest = index
+              }
+            })
+            list.splice(weakest, 1)
+          }
+          noteResult = { ...made, category: 'us', created: true }
+        }
+        if (!memory.digests || typeof memory.digests !== 'object') memory.digests = {}
+        const previous = asObject(memory.digests[sessionId])
+        const latestEventAt = win.events.reduce((max, event) => Math.max(max, asNumber(event.at, 0)), 0)
+        memory.digests[sessionId] = {
+          lastAt: now,
+          lastEventAt: Math.max(asNumber(previous.lastEventAt, 0), latestEventAt),
+          turns: Math.max(0, Math.round(asNumber(previous.turns, 0))) + win.events.length,
+        }
+        if (!memory.reflection || typeof memory.reflection !== 'object') memory.reflection = {}
+        const dayNow = digestDayInfo(memory, dayKey)
+        memory.reflection.lastDigestDayKey = dayKey
+        memory.reflection.digestCount = dayNow.count + 1
+        countAfter = memory.reflection.digestCount
+        return memory
+      })
+    } catch (error) {
+      logger('[soul] 会话整理写入失败:', error instanceof Error ? error.message : error)
+      return { ok: false, reason: 'write-failed', sessionId, note: null, facts: [], window: windowInfo }
+    }
+    logger(`[soul] 会话整理完成(${sessionId})：${windowInfo.events} 条事件 / ${windowInfo.facts} 条事实`)
+    return {
+      ok: true,
+      sessionId,
+      note: noteResult,
+      facts: win.facts.map(digestFactView),
+      window: windowInfo,
+      dayKey,
+      count: countAfter,
+      cap,
+    }
+  }
+
+  function clearDigestTimer(sessionId) {
+    const key = String(sessionId ?? '').trim()
+    if (!key) return
+    const timer = digestTimers.get(key)
+    if (timer === undefined || timer === null) return
+    try {
+      clearTimer(timer)
+    } catch {
+      /* ignore */
+    }
+    digestTimers.delete(key)
+  }
+
+  /** turnEnd 排一个空闲定时器；新消息 / 下一次 turnEnd 会取消重排。 */
+  function scheduleDigest(sessionId) {
+    const key = String(sessionId ?? '').trim()
+    if (!key) return
+    const config = readConfig()
+    if (config.memorySessionDigest === false) {
+      clearDigestTimer(key)
+      return
+    }
+    clearDigestTimer(key)
+    const timer = setTimer(() => {
+      digestTimers.delete(key)
+      void digestSession({ sessionId: key, now: Date.now(), manual: false, reason: 'idle' })
+    }, digestIdleMs(config))
+    if (timer && typeof timer.unref === 'function') timer.unref()
+    digestTimers.set(key, timer)
+  }
+
+  function clearAllDigestTimers() {
+    for (const key of [...digestTimers.keys()]) clearDigestTimer(key)
+  }
+
   // ③ 回合配对
   function onUserMessage(payload = {}) {
     try {
       const text = String(payload.text ?? '').trim()
       if (!text) return
       const at = asNumber(payload.at, Date.now())
+      const config = readConfig()
+      const sessionId = String(payload.sessionId ?? '')
+      // 有新消息：先取消这个会话待触发的空闲整理，由下一次 turnEnd 重排。
+      clearDigestTimer(sessionId)
+      // 距上次活动已经超过空闲阈值：趁现在先补一次整理（窗口在本条消息入事件前，正好干净）。
+      if (config.memorySessionDigest !== false && sessionId) {
+        const entry = asObject(asObject(readMemory().digests)[sessionId])
+        const lastEventAt = asNumber(entry.lastEventAt, 0)
+        if (lastEventAt > 0 && at - lastEventAt >= digestIdleMs(config)) {
+          void digestSession({ sessionId, now: at, manual: false, reason: 'idle-catchup' })
+        }
+      }
       pending = {
         userText: text,
         at,
-        sessionId: String(payload.sessionId ?? ''),
+        sessionId,
         assistantText: '',
       }
       // 零 token 规则抽取：只认明确句式，写事实卡/实体卡。
       applyUserFacts(text, at, 'user')
+      // 重要信息立即入记忆（零 token）；开关关闭时只跳过新增笔记，规则事实照旧。
+      if (config.memoryImmediate !== false) applyImmediateNotes(text, at, config)
     } catch (error) {
       logger('[soul] memory onUserMessage 失败:', error instanceof Error ? error.message : error)
     }
@@ -1324,6 +1727,13 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         }
       } catch (error) {
         logger('[soul] 记忆周期整理失败:', error instanceof Error ? error.message : error)
+      }
+      // 会话整理：这一轮结束后按空闲时长排定时器；新消息会取消并重排。
+      try {
+        const sessionId = String(turn.sessionId || payload.sessionId || '')
+        if (sessionId) scheduleDigest(sessionId)
+      } catch (error) {
+        logger('[soul] 会话整理排期失败:', error instanceof Error ? error.message : error)
       }
     } catch (error) {
       logger('[soul] memory onTurnEnd 失败:', error instanceof Error ? error.message : error)
@@ -1531,6 +1941,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
             /* noop */
           }
         }
+        clearAllDigestTimers()
         try {
           store.dispose()
         } catch {
@@ -1748,13 +2159,15 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       name: 'soul_memory',
       description: '记忆库控制面：stats=统计，search=搜索笔记/事实/实体/关系，'
         + 'writeNote/updateNote/deleteNote=管理长期笔记，deleteFact/deleteEntity=删除事实卡或实体卡，'
-        + 'mergeEntities=合并两个实体（事实与关系一起迁移），compact=立即整理。写操作前会自动备份 memory.json。',
+        + 'mergeEntities=合并两个实体（事实与关系一起迁移），compact=立即整理，'
+        + 'digest=立即整理这段会话（窗口内事件+新事实 → us 摘要笔记）。写操作前会自动备份 memory.json。',
       parameters: {
         action: {
           type: 'string',
-          description: 'stats | search | writeNote | updateNote | deleteNote | deleteFact | deleteEntity | mergeEntities | compact',
+          description: 'stats | search | writeNote | updateNote | deleteNote | deleteFact | deleteEntity | mergeEntities | compact | digest',
           required: true,
         },
+        sessionId: { type: 'string', description: 'digest：要整理的会话 id；省略时取最近活动的会话' },
         query: { type: 'string', description: 'search 关键词；为空时返回最近/最重的几条' },
         category: { type: 'string', description: 'writeNote：user | us | self，默认 user' },
         text: { type: 'string', description: 'writeNote 新笔记 / updateNote 新文本（≤200 字，落盘受笔记上限截断）' },
@@ -1802,9 +2215,13 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
             await backupMemoryBeforeWrite()
             return memoryMergeEntities(args)
           }
+          if (action === 'digest') {
+            // 备份在 digestSession 内部做，这里不重复备份。
+            return digestSession({ sessionId: args?.sessionId, manual: true, reason: 'manual' })
+          }
           return {
             ok: false,
-            reason: '未知 action（stats | search | writeNote | updateNote | deleteNote | deleteFact | deleteEntity | mergeEntities | compact）',
+            reason: '未知 action（stats | search | writeNote | updateNote | deleteNote | deleteFact | deleteEntity | mergeEntities | compact | digest）',
           }
         } catch (error) {
           logger('[soul] soul_memory 失败:', error instanceof Error ? error.message : error)
@@ -1939,6 +2356,8 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         factCount: asArray(memory.facts).filter((fact) => fact && !fact.supersededBy).length,
         entityCount: asArray(memory.entities).length,
         relationCount: asArray(memory.relations).length,
+        digests: Object.keys(asObject(memory.digests)).length,
+        lastDigestDayKey: memory.reflection?.lastDigestDayKey || '',
         pendingDue: asArray(memory.reflection?.pendingDue).length,
         lastReflectAt: memory.reflection?.lastReflectAt || 0,
         lastCompactDayKey: memory.reflection?.lastCompactDayKey || '',
@@ -2252,6 +2671,16 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     const action = String(body?.action ?? '').trim()
     const id = String(body?.id ?? body?.noteId ?? '').trim()
     try {
+      if (action === 'digest') {
+        const result = await digestSession({
+          sessionId: String(body?.sessionId ?? '').trim(),
+          manual: true,
+          reason: 'manual',
+        })
+        const status = result.ok === true || result.reason === 'empty' ? 200 : 400
+        sendJson(res, status, { ...result, action })
+        return
+      }
       if (action === 'compact') {
         await backupMemoryBeforeWrite()
         sendJson(res, 200, { ok: true, action, ...memoryCompact() })
@@ -2301,7 +2730,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       }
       sendJson(res, 400, {
         ok: false,
-        error: 'unknown action（compact | deleteFact | deleteNote | deleteEntity）',
+        error: 'unknown action（compact | digest | deleteFact | deleteNote | deleteEntity）',
       })
     } catch (error) {
       logger('[soul] memory-api POST 失败:', error instanceof Error ? error.message : error)
@@ -2435,6 +2864,13 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     consumeDue,
     clear,
     addEvent: (event) => pushEvent(event),
+    /** 手动会话整理（面板按钮 / 自测）；manual=false 时走自动规则（受开关与每日上限约束）。 */
+    digest: (input = {}) => digestSession({
+      sessionId: input?.sessionId,
+      now: input?.now,
+      manual: input?.manual !== false,
+      reason: input?.manual === false ? 'auto' : 'manual',
+    }),
     onUserMessage,
     onAssistantMessage,
     onTurnEnd,
@@ -2456,6 +2892,12 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       FACT_TEXT_MAX,
       MEMORY_API_PREFIX,
       ENTITY_TYPE_LABELS,
+      IMMEDIATE_NOTE_MAX,
+      IMMEDIATE_PROMISE_RE,
+      DEDUP_WINDOW_MS,
+      DIGEST_NOTE_MAX,
+      DIGEST_EVENT_WINDOW,
+      DIGEST_FACT_WINDOW,
     },
   }
   return api

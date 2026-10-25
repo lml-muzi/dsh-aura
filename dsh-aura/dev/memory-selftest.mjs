@@ -1567,9 +1567,372 @@ await test('配置范围：memoryEnabled/memoryAutoCompact 持久化；events 5-
 })
 
 
+// ---------- 19. 立即记忆 ----------
+section('19. 立即记忆：约定 / 重要事实 / 开关 / 24h 去重')
+
+await test('约定关键词：立即写 us 笔记（≤120、0.9）+ 约定事实 0.9', () => {
+  state.writeConfig({ memoryImmediate: true, memoryReflectionEvery: 50 })
+  memory.clear()
+  const base = Date.now()
+  memory.onUserMessage({ text: '说好周末一起看电影', at: base, sessionId: 'qq:immediate' })
+  let disk = memory.store.read()
+  const note = disk.notes.us.find((item) => item.kind === 'promise')
+  assert.ok(note, '应先写一条 promise 笔记')
+  assert.equal(note.importance, 0.9)
+  assert.ok(lengthOf(note.text) <= 120)
+  assert.ok(note.text.includes('周末一起看电影'), note.text)
+  const fact = disk.facts.find((item) => item.predicate === '约定')
+  assert.ok(fact, '应有约定事实')
+  assert.equal(fact.confidence, 0.9)
+  assert.equal(fact.source, 'user')
+  for (const [index, text] of ['别忘了带伞', '我答应你早点睡', '约定好了周末爬山', '说定了别迟到'].entries()) {
+    memory.onUserMessage({ text, at: base + 1000 + index, sessionId: 'qq:immediate' })
+  }
+  disk = memory.store.read()
+  assert.ok(disk.notes.us.filter((item) => item.kind === 'promise').length >= 4)
+  assert.ok(disk.facts.filter((item) => item.predicate === '约定').length >= 4)
+})
+
+await test('名字/生日/住址/宠物/好恶：额外写 user 笔记（0.8，简短）', () => {
+  memory.clear()
+  const base = Date.now()
+  memory.onUserMessage({
+    text: '我叫木子，我生日是5月3日，我住在杭州，我养了一只猫叫团子，我喜欢听歌',
+    at: base,
+    sessionId: 'qq:important',
+  })
+  const disk = memory.store.read()
+  const notes = disk.notes.user.filter((item) => item.kind === 'immediate')
+  assert.ok(notes.length >= 5, `重要事实应各写一条笔记，实际 ${notes.length}`)
+  assert.ok(notes.every((item) => item.importance === 0.8))
+  assert.ok(notes.every((item) => lengthOf(item.text) <= 80))
+  for (const predicate of ['称呼', '生日', '居住地', '宠物', '喜欢']) {
+    assert.ok(disk.facts.some((item) => item.predicate === predicate), `应有 ${predicate} 事实`)
+  }
+  assert.ok(notes.some((item) => item.text.includes('木子')))
+  assert.ok(notes.some((item) => item.text.includes('杭州')))
+})
+
+await test('24h 去重：同文本 / 同事实不重复写；普通寒暄不写', () => {
+  memory.clear()
+  const base = Date.now()
+  memory.onUserMessage({ text: '记住给我带伞', at: base, sessionId: 'qq:dedup' })
+  const first = memory.store.read()
+  const noteCount = first.notes.us.length
+  const factCount = first.facts.length
+  memory.onUserMessage({ text: '记住给我带伞', at: base + 60_000, sessionId: 'qq:dedup' })
+  const second = memory.store.read()
+  assert.equal(second.notes.us.length, noteCount, '24h 内同一文本不重复写笔记')
+  assert.equal(second.facts.filter((item) => !item.supersededBy).length, factCount, '24h 内同一事实不重复写')
+  memory.onUserMessage({ text: '今天天气不错', at: base + 120_000, sessionId: 'qq:dedup' })
+  const third = memory.store.read()
+  assert.equal(third.notes.us.length, noteCount)
+  assert.equal(third.notes.user.length, 0)
+})
+
+await test('memoryImmediate=false：新增笔记与约定笔记跳过，已有规则事实保持', () => {
+  state.writeConfig({ memoryImmediate: false })
+  memory.clear()
+  const base = Date.now()
+  memory.onUserMessage({ text: '记住带伞，我叫木子，我养了一只猫叫团子', at: base, sessionId: 'qq:immediate-off' })
+  const disk = memory.store.read()
+  assert.equal(disk.notes.us.length, 0, '关闭立即记忆后不写约定笔记')
+  assert.equal(disk.notes.user.length, 0, '关闭立即记忆后不写重要事实笔记')
+  assert.ok(disk.facts.some((item) => item.predicate === '约定'), '规则事实抽取保持')
+  assert.ok(disk.facts.some((item) => item.predicate === '宠物'))
+  assert.ok(disk.facts.some((item) => item.predicate === '称呼'))
+  state.writeConfig({ memoryImmediate: true })
+})
+
+// ---------- 20. 会话整理 ----------
+section('20. 会话整理：手动 / 定时器 / 窗口 / 每日上限 / 空闲触发 / 落盘 / API')
+
+function makeFakeTimers() {
+  const list = []
+  return {
+    list,
+    setTimeout(fn, ms) {
+      const timer = { fn, ms, cleared: false }
+      list.push(timer)
+      return timer
+    },
+    clearTimeout(timer) {
+      if (timer) timer.cleared = true
+    },
+  }
+}
+
+const fakeTimers = makeFakeTimers()
+const memFake2 = makeFakeCtx()
+const memory2 = installMemory({ ctx: memFake2.ctx, state, soul, log: () => {}, timers: fakeTimers })
+const settle = (ms = 140) => new Promise((resolve) => setTimeout(resolve, ms))
+const memoryTool2 = () => memFake2.tools.find((tool) => tool.name === 'soul_memory')
+/** 每次定时器断言前清空观察列表（memory2 内部仍持有旧 timer，互不影响）。 */
+const resetFakeTimers = () => {
+  fakeTimers.list.length = 0
+}
+
+await test('soul_memory digest：窗口内事件/事实 → us 摘要（≤200、0.7），digests + reflection 落盘', async () => {
+  state.writeConfig({
+    memorySessionDigest: true,
+    memoryDigestIdleMinutes: 60,
+    memoryDigestDailyCap: 2,
+    memoryMaxNotes: 20,
+    memoryReflectionEvery: 50,
+    memoryAutoCompact: false,
+    memoryImmediate: true,
+  })
+  memory2.clear()
+  const base = Date.now()
+  memory2.onUserMessage({ text: '我明天要面试，对了说好周末一起看电影', at: base, sessionId: 'qq:digest' })
+  memory2.onAssistantMessage({ text: '加油', at: base + 500, sessionId: 'qq:digest' })
+  memory2.onTurnEnd({ at: base + 500, sessionId: 'qq:digest' })
+  const backupDir = join(dataDir, 'backups')
+  const backupsBefore = existsSync(backupDir)
+    ? readdirSync(backupDir).filter((id) => id.endsWith('-memory')).length
+    : 0
+  const result = await memoryTool2().execute({ action: 'digest', sessionId: 'qq:digest' })
+  const backupsAfter = existsSync(backupDir)
+    ? readdirSync(backupDir).filter((id) => id.endsWith('-memory')).length
+    : 0
+  assert.ok(backupsAfter > backupsBefore, '整理写盘前应 backup.snapshot(\'memory\')')
+  assert.equal(result.ok, true)
+  assert.equal(result.sessionId, 'qq:digest')
+  assert.ok(result.note && result.note.text, '应生成摘要笔记')
+  assert.equal(result.note.kind, 'digest')
+  assert.equal(result.note.importance, 0.7)
+  assert.ok(lengthOf(result.note.text) <= memoryMod.DIGEST_NOTE_MAX)
+  assert.ok(result.note.text.startsWith('聊到：'), result.note.text)
+  assert.ok(result.note.text.includes('约定：'), result.note.text)
+  assert.ok(result.window.events >= 1)
+  assert.ok(result.window.facts >= 1)
+  assert.ok(Array.isArray(result.facts))
+  assert.ok(result.facts.some((fact) => fact.predicate === '约定'))
+  const disk = memory2.store.read()
+  assert.ok(disk.notes.us.some((note) => note.kind === 'digest' && note.text === result.note.text))
+  const digest = disk.digests['qq:digest']
+  assert.ok(digest, 'digests 应记录该会话')
+  assert.equal(typeof digest.lastAt, 'number')
+  assert.equal(typeof digest.lastEventAt, 'number')
+  assert.equal(digest.turns, 1, '窗口内 1 条事件应计入 turns')
+  assert.equal(disk.reflection.lastDigestDayKey, diaryMod.localDayKey(Date.now()))
+  assert.equal(disk.reflection.digestCount, 1)
+  const raw = JSON.parse(readFileSync(memory2.store.file, 'utf8'))
+  assert.ok(raw.digests['qq:digest'], 'digests 应落盘')
+  assert.ok('lastAt' in raw.digests['qq:digest'])
+  assert.ok('lastEventAt' in raw.digests['qq:digest'])
+  assert.ok('turns' in raw.digests['qq:digest'])
+  const text = memoryTool2().output.render({}, result).map((line) => line.text).join('\n')
+  assert.ok(text.includes('会话整理完成'), text)
+  assert.ok(text.includes('聊到：'), text)
+})
+
+await test('digest 窗口：第二次只整理上次之后的新事件/新事实', async () => {
+  const empty = await memoryTool2().execute({ action: 'digest', sessionId: 'qq:digest' })
+  assert.equal(empty.ok, false)
+  assert.equal(empty.reason, 'empty')
+  const base = Date.now()
+  memory2.onUserMessage({ text: '我最近在忙长期记忆项目', at: base, sessionId: 'qq:digest' })
+  memory2.onAssistantMessage({ text: '听起来挺费脑', at: base + 200, sessionId: 'qq:digest' })
+  memory2.onTurnEnd({ at: base + 200, sessionId: 'qq:digest' })
+  await settle(30)
+  const result = await memoryTool2().execute({ action: 'digest', sessionId: 'qq:digest' })
+  assert.equal(result.ok, true)
+  assert.equal(result.window.events, 1, '窗口只含上次 digest 之后的事件')
+  assert.ok(result.window.facts >= 1)
+  assert.ok(result.note.text.includes('长期记忆项目') || result.note.text.includes('新增：'), result.note.text)
+  assert.equal(result.note.text.includes('周末一起看电影'), false, '旧窗口的约定不应再出现')
+  assert.equal(memory2.store.read().digests['qq:digest'].turns, 2)
+})
+
+await test('每日上限：自动整理受 memoryDigestDailyCap 限制，手动仍可整理', async () => {
+  state.writeConfig({ memorySessionDigest: true, memoryDigestDailyCap: 1, memoryDigestIdleMinutes: 60, memoryReflectionEvery: 50 })
+  memory2.clear()
+  const base = Date.now()
+  memory2.onUserMessage({ text: '今天加班到很晚', at: base, sessionId: 'qq:cap' })
+  memory2.onAssistantMessage({ text: '早点睡', at: base + 100, sessionId: 'qq:cap' })
+  memory2.onTurnEnd({ at: base + 100, sessionId: 'qq:cap' })
+  const first = await memory2.digest({ sessionId: 'qq:cap', manual: false, now: Date.now() })
+  assert.equal(first.ok, true)
+  assert.equal(memory2.store.read().reflection.digestCount, 1)
+  const t2 = Date.now()
+  memory2.onUserMessage({ text: '面试通过了', at: t2, sessionId: 'qq:cap' })
+  memory2.onAssistantMessage({ text: '恭喜', at: t2 + 100, sessionId: 'qq:cap' })
+  memory2.onTurnEnd({ at: t2 + 100, sessionId: 'qq:cap' })
+  const second = await memory2.digest({ sessionId: 'qq:cap', manual: false, now: t2 + 500 })
+  assert.equal(second.ok, false)
+  assert.equal(second.reason, 'daily-cap')
+  assert.equal(second.cap, 1)
+  assert.equal(memory2.store.read().reflection.digestCount, 1, '超上限的自动整理不计数')
+  const manual = await memory2.digest({ sessionId: 'qq:cap', manual: true, now: t2 + 1000 })
+  assert.equal(manual.ok, true, '手动整理不受每日上限限制')
+  assert.equal(memory2.store.read().reflection.digestCount, 2)
+  state.writeConfig({ memoryDigestDailyCap: 2 })
+})
+
+await test('定时器：turnEnd 排空闲定时器，新消息取消，下一次 turnEnd 重排；触发后写摘要', async () => {
+  state.writeConfig({
+    memorySessionDigest: true,
+    memoryDigestIdleMinutes: 60,
+    memoryDigestDailyCap: 5,
+    memoryReflectionEvery: 50,
+    memoryAutoCompact: false,
+  })
+  memory2.clear()
+  resetFakeTimers()
+  const base = Date.now()
+  memory2.onUserMessage({ text: '今天加班到很晚', at: base - 3000, sessionId: 'qq:timer' })
+  memory2.onAssistantMessage({ text: '早点睡', at: base - 2000, sessionId: 'qq:timer' })
+  memory2.onTurnEnd({ at: base - 2000, sessionId: 'qq:timer' })
+  const first = fakeTimers.list.filter((timer) => !timer.cleared)
+  assert.equal(first.length, 1, 'turnEnd 应排一个定时器')
+  assert.equal(first[0].ms, 60 * 60 * 1000)
+  // 新消息取消
+  memory2.onUserMessage({ text: '晚安', at: base, sessionId: 'qq:timer' })
+  assert.equal(first[0].cleared, true, '新消息应取消待触发的整理')
+  memory2.onAssistantMessage({ text: '晚安', at: base + 100, sessionId: 'qq:timer' })
+  memory2.onTurnEnd({ at: base + 100, sessionId: 'qq:timer' })
+  const next = fakeTimers.list.filter((timer) => !timer.cleared)
+  assert.equal(next.length, 1, '下一次 turnEnd 应重排')
+  next[0].fn()
+  await settle()
+  const disk = memory2.store.read()
+  const note = disk.notes.us.find((item) => item.kind === 'digest')
+  assert.ok(note, '定时器触发后应写摘要笔记')
+  assert.ok(note.text.includes('加班'), note.text)
+  assert.ok(disk.digests['qq:timer'])
+})
+
+await test('空闲触发：下次 onUserMessage 距 lastEventAt ≥ idleMinutes 时先补整理（伪时间）', async () => {
+  state.writeConfig({ memorySessionDigest: true, memoryDigestIdleMinutes: 60, memoryDigestDailyCap: 5 })
+  memory2.clear()
+  const base = Date.now()
+  memory2.store.update((memory) => {
+    memory.events.push({
+      id: 'evt-idle-old',
+      at: base - 3 * 3600_000,
+      kind: 'chat',
+      summary: '聊到加班和面试',
+      salience: 0.3,
+      topics: ['加班'],
+      source: 'rule',
+      sessionId: 'qq:idle',
+    })
+    memory.digests['qq:idle'] = {
+      lastAt: base - 4 * 3600_000,
+      lastEventAt: base - 2 * 3600_000,
+      turns: 0,
+    }
+    return memory
+  })
+  memory2.onUserMessage({ text: '我回来了', at: base, sessionId: 'qq:idle' })
+  await settle()
+  const disk = memory2.store.read()
+  const note = disk.notes.us.find((item) => item.kind === 'digest')
+  assert.ok(note, '空闲后应先补一次整理')
+  assert.ok(note.text.includes('加班'), note.text)
+  assert.ok(disk.digests['qq:idle'].lastAt > base - 4 * 3600_000, '整理后 lastAt 应前进')
+})
+
+await test('memorySessionDigest=false：不自动整理（不排定时器），手动仍可用', async () => {
+  state.writeConfig({ memorySessionDigest: false, memoryDigestIdleMinutes: 60, memoryReflectionEvery: 50, memoryAutoCompact: false })
+  memory2.clear()
+  resetFakeTimers()
+  const base = Date.now()
+  memory2.onUserMessage({ text: '最近在学画画', at: base, sessionId: 'qq:off' })
+  memory2.onAssistantMessage({ text: '挺好的', at: base + 100, sessionId: 'qq:off' })
+  memory2.onTurnEnd({ at: base + 100, sessionId: 'qq:off' })
+  assert.equal(fakeTimers.list.filter((timer) => !timer.cleared).length, 0, '关闭后不应排定时器')
+  const auto = await memory2.digest({ sessionId: 'qq:off', manual: false })
+  assert.equal(auto.ok, false)
+  assert.equal(auto.reason, 'disabled')
+  const manual = await memory2.digest({ sessionId: 'qq:off', manual: true })
+  assert.equal(manual.ok, true, '手动整理仍可用')
+  assert.ok(manual.note.text.includes('画画'), manual.note.text)
+  state.writeConfig({ memorySessionDigest: true })
+})
+
+await test('memory-api POST digest：缺省 sessionId 取最近活动会话，返回 note/facts/window', async () => {
+  memory2.clear()
+  const base = Date.now()
+  memory2.onUserMessage({ text: '我在学做菜', at: base, sessionId: 'qq:api-digest' })
+  memory2.onAssistantMessage({ text: '下次做给我看', at: base + 100, sessionId: 'qq:api-digest' })
+  memory2.onTurnEnd({ at: base + 100, sessionId: 'qq:api-digest' })
+  const registration = memFake2.registrations.find((item) => item.path === '/dsh-aura/memory-api')
+  assert.ok(registration)
+  const response = httpResponse()
+  await registration.handler({
+    method: 'POST',
+    url: '/dsh-aura/memory-api',
+    headers: { host: '127.0.0.1:3080' },
+    body: JSON.stringify({ action: 'digest' }),
+  }, response)
+  assert.equal(response.status, 200)
+  const body = JSON.parse(response.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.action, 'digest')
+  assert.equal(body.sessionId, 'qq:api-digest')
+  assert.ok(body.note && body.note.text)
+  assert.ok(Array.isArray(body.facts))
+  assert.ok(body.window && typeof body.window.events === 'number')
+  assert.equal(body.window.events, 1)
+})
+
+await test('soul_memory digest：没有会话时返回 no-session，且不写盘', async () => {
+  memory2.clear()
+  const result = await memoryTool2().execute({ action: 'digest' })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'no-session')
+  assert.equal(memory2.store.read().notes.us.length, 0)
+})
+
+// ---------- 21. 配置 ----------
+section('21. 配置：立即记忆 / 会话整理默认值、范围与持久化')
+
+await test('默认值与范围：memoryImmediate / memorySessionDigest / idle 60-1440 / cap 1-5', () => {
+  const defaults = state.DEFAULT_CONFIG
+  assert.equal(defaults.memoryImmediate, true)
+  assert.equal(defaults.memorySessionDigest, true)
+  assert.equal(defaults.memoryDigestIdleMinutes, 360)
+  assert.equal(defaults.memoryDigestDailyCap, 2)
+  state.writeConfig({
+    memoryImmediate: false,
+    memorySessionDigest: false,
+    memoryDigestIdleMinutes: 10,
+    memoryDigestDailyCap: 9,
+  })
+  let config = state.readConfig()
+  assert.equal(config.memoryImmediate, false)
+  assert.equal(config.memorySessionDigest, false)
+  assert.equal(config.memoryDigestIdleMinutes, 60, '低于下限夹到 60')
+  assert.equal(config.memoryDigestDailyCap, 5, '高于上限夹到 5')
+  state.writeConfig({
+    memoryImmediate: true,
+    memorySessionDigest: true,
+    memoryDigestIdleMinutes: 9999,
+    memoryDigestDailyCap: 0,
+  })
+  config = state.readConfig()
+  assert.equal(config.memoryImmediate, true)
+  assert.equal(config.memorySessionDigest, true)
+  assert.equal(config.memoryDigestIdleMinutes, 1440, '高于上限夹到 1440')
+  assert.equal(config.memoryDigestDailyCap, 1, '低于下限夹到 1')
+  const normalized = state.normalizeConfig({ memoryDigestIdleMinutes: 'abc', memoryDigestDailyCap: '3' })
+  assert.equal(normalized.memoryDigestIdleMinutes, 360)
+  assert.equal(normalized.memoryDigestDailyCap, 3)
+  state.writeConfig({
+    memoryImmediate: true,
+    memorySessionDigest: true,
+    memoryDigestIdleMinutes: 360,
+    memoryDigestDailyCap: 2,
+  })
+})
+
+
 // 收尾
 soulFake.dispose()
 memFake.dispose()
+memFake2.dispose()
 await new Promise((resolve) => setTimeout(resolve, 100))
 rmSync(root, { recursive: true, force: true })
 

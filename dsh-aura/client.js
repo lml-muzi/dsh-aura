@@ -348,6 +348,21 @@ window.__ModuleLoader__.load({
       'memory.enabled.hint': '关闭后不再把记忆注入对话上下文；已记下的内容仍保留在本地',
       'memory.autoCompact': '自动整理',
       'memory.autoCompact.hint': '每天第一次对话后自动整理事实卡/实体图；关闭后只能手动点「立即整理」',
+      'memory.immediate': '立即记忆',
+      'memory.immediate.hint': '聊到「记住/别忘/答应/约定」或名字/生日/住址/宠物/好恶时立刻写一条，不用等这轮结束',
+      'memory.sessionDigest': '会话整理',
+      'memory.sessionDigest.hint': '安静一段时间后自动把这段会话整理成一条摘要；关闭后仍可手动整理',
+      'memory.digestIdle': '空闲分钟',
+      'memory.digestIdle.hint': '多久没活动算空闲，到点自动整理这段会话（60–1440 分钟）',
+      'memory.digestDailyCap': '每日整理上限',
+      'memory.digestDailyCap.hint': '自动会话整理每天最多几次（1–5）',
+      'memory.digest': '整理这段会话',
+      'memory.digesting': '整理中…',
+      'memory.digestNotice': '会话整理完成',
+      'memory.digestResult': '写了 {notes} 条笔记 · 事件 {events} 条 · 新增事实 {facts} 条',
+      'memory.digestTopics': '聊到：{topics}',
+      'memory.digestEmpty': '这段没有新内容可整理',
+      'memory.digestNoSession': '还没有可整理的会话',
       'memory.maxEvents': '事件上限',
       'memory.maxEvents.hint': '短期事件保留条数（5–40），超出的最旧事件会压实成笔记',
       'memory.maxNotes': '笔记上限',
@@ -358,6 +373,8 @@ window.__ModuleLoader__.load({
       'memory.reflectionEvery.hint': '每多少轮对话做一次记忆反思（1–50）',
       'memory.unitCount': '条',
       'memory.unitRounds': '轮',
+      'memory.unitMinutes': '分钟',
+      'memory.unitTimes': '次',
       'memory.save': '保存记忆设置',
       'memory.compact': '立即整理',
       'memory.compacting': '整理中…',
@@ -601,6 +618,21 @@ window.__ModuleLoader__.load({
       'memory.enabled.hint': 'When off, memory context is no longer injected; existing memories stay on disk',
       'memory.autoCompact': 'Auto-organize',
       'memory.autoCompact.hint': 'Runs once on the first turn of each day; off means manual "Organize now" only',
+      'memory.immediate': 'Immediate memory',
+      'memory.immediate.hint': 'Writes at once when you say remember/promise, or share a name, birthday, address, pet or strong like',
+      'memory.sessionDigest': 'Session digest',
+      'memory.sessionDigest.hint': 'After a quiet spell, summarizes this conversation into one note; off still allows manual digests',
+      'memory.digestIdle': 'Idle minutes',
+      'memory.digestIdle.hint': 'How long counts as idle before digesting this session (60-1440 minutes)',
+      'memory.digestDailyCap': 'Daily digest cap',
+      'memory.digestDailyCap.hint': 'Maximum automatic session digests per day (1-5)',
+      'memory.digest': 'Digest this session',
+      'memory.digesting': 'Digesting...',
+      'memory.digestNotice': 'Session digested',
+      'memory.digestResult': 'Wrote {notes} note(s) · {events} event(s) · {facts} new fact(s)',
+      'memory.digestTopics': 'Talked about: {topics}',
+      'memory.digestEmpty': 'Nothing new in this session to digest',
+      'memory.digestNoSession': 'No session to digest yet',
       'memory.maxEvents': 'Event limit',
       'memory.maxEvents.hint': 'Short-term events kept (5-40); oldest ones are compacted into notes',
       'memory.maxNotes': 'Note limit',
@@ -611,6 +643,8 @@ window.__ModuleLoader__.load({
       'memory.reflectionEvery.hint': 'Turns between memory reflections (1-50)',
       'memory.unitCount': 'items',
       'memory.unitRounds': 'turns',
+      'memory.unitMinutes': 'min',
+      'memory.unitTimes': 'times',
       'memory.save': 'Save memory settings',
       'memory.compact': 'Organize now',
       'memory.compacting': 'Organizing...',
@@ -1464,6 +1498,10 @@ ${TRAIL_CSS}
         memoryMaxNotes: clampInt(cfg.memoryMaxNotes, 5, 200, 20),
         memoryRecallLimit: clampInt(cfg.memoryRecallLimit, 1, 3, 3),
         memoryReflectionEvery: clampInt(cfg.memoryReflectionEvery, 1, 50, 3),
+        memoryImmediate: cfg.memoryImmediate !== false,
+        memorySessionDigest: cfg.memorySessionDigest !== false,
+        memoryDigestIdleMinutes: clampInt(cfg.memoryDigestIdleMinutes, 60, 1440, 360),
+        memoryDigestDailyCap: clampInt(cfg.memoryDigestDailyCap, 1, 5, 2),
       }
     }
 
@@ -1773,6 +1811,7 @@ ${TRAIL_CSS}
       const [memoryForm, setMemoryForm] = React.useState(() => buildMemoryForm({}))
       const [memoryBaseline, setMemoryBaseline] = React.useState(() => buildMemoryForm({}))
       const [memoryCompactResult, setMemoryCompactResult] = React.useState(null)
+      const [memoryDigestResult, setMemoryDigestResult] = React.useState(null)
       const [blocks, setBlocks] = React.useState({})
       const [resetArmed, setResetArmed] = React.useState(false)
       const [timelineOpen, setTimelineOpen] = React.useState(false)
@@ -3003,6 +3042,10 @@ ${TRAIL_CSS}
           memoryMaxNotes: clampInt(memoryForm.memoryMaxNotes, 5, 200, 20),
           memoryRecallLimit: clampInt(memoryForm.memoryRecallLimit, 1, 3, 3),
           memoryReflectionEvery: clampInt(memoryForm.memoryReflectionEvery, 1, 50, 3),
+          memoryImmediate: memoryForm.memoryImmediate !== false,
+          memorySessionDigest: memoryForm.memorySessionDigest !== false,
+          memoryDigestIdleMinutes: clampInt(memoryForm.memoryDigestIdleMinutes, 60, 1440, 360),
+          memoryDigestDailyCap: clampInt(memoryForm.memoryDigestDailyCap, 1, 5, 2),
         }, 'notice.memorySettingsSaved')
       }
 
@@ -3017,6 +3060,31 @@ ${TRAIL_CSS}
           void load(false)
         } catch (error) {
           if (mounted.current) failBlock('memoryCompact', error)
+        }
+      }
+
+      const digestMemory = async () => {
+        if (blockBusy('memoryDigest')) return
+        setBlock('memoryDigest', { busy: true, error: '', notice: '' })
+        try {
+          const value = await fetchJson(MEMORY_API, { action: 'digest' })
+          if (!mounted.current) return
+          setMemoryDigestResult({
+            sessionId: String(value && value.sessionId ? value.sessionId : ''),
+            note: asObject(value && value.note),
+            facts: Array.isArray(value && value.facts) ? value.facts : [],
+            window: asObject(value && value.window),
+          })
+          flashBlock('memoryDigest', t('memory.digestNotice'))
+          void load(false)
+        } catch (error) {
+          if (!mounted.current) return
+          const message = errorMessage(error)
+          if (message === 'empty' || message === 'no-session') {
+            flashBlock('memoryDigest', t(message === 'empty' ? 'memory.digestEmpty' : 'memory.digestNoSession'))
+          } else {
+            failBlock('memoryDigest', error)
+          }
         }
       }
 
@@ -3735,6 +3803,64 @@ ${TRAIL_CSS}
               }),
             }),
             h(Row, {
+              label: t('memory.immediate'),
+              hint: t('memory.immediate.hint'),
+              control: h('input', {
+                className: 'qqn-checkbox',
+                type: 'checkbox',
+                checked: memoryForm.memoryImmediate !== false,
+                onChange: event => setMemoryForm(prev => ({ ...prev, memoryImmediate: event.target.checked })),
+              }),
+            }),
+            h(Row, {
+              label: t('memory.sessionDigest'),
+              hint: t('memory.sessionDigest.hint'),
+              control: h('input', {
+                className: 'qqn-checkbox',
+                type: 'checkbox',
+                checked: memoryForm.memorySessionDigest !== false,
+                onChange: event => setMemoryForm(prev => ({ ...prev, memorySessionDigest: event.target.checked })),
+              }),
+            }),
+            h(Row, {
+              label: t('memory.digestIdle'),
+              hint: t('memory.digestIdle.hint'),
+              control: h(React.Fragment, null,
+                h('input', {
+                  className: 'qqn-input qqn-input-narrow',
+                  type: 'number',
+                  min: 60,
+                  max: 1440,
+                  step: 1,
+                  value: memoryForm.memoryDigestIdleMinutes,
+                  onChange: event => setMemoryForm(prev => ({
+                    ...prev,
+                    memoryDigestIdleMinutes: event.target.value === '' ? '' : Number(event.target.value),
+                  })),
+                }),
+                h('span', { className: 'qqn-unit' }, t('memory.unitMinutes')),
+              ),
+            }),
+            h(Row, {
+              label: t('memory.digestDailyCap'),
+              hint: t('memory.digestDailyCap.hint'),
+              control: h(React.Fragment, null,
+                h('input', {
+                  className: 'qqn-input qqn-input-narrow',
+                  type: 'number',
+                  min: 1,
+                  max: 5,
+                  step: 1,
+                  value: memoryForm.memoryDigestDailyCap,
+                  onChange: event => setMemoryForm(prev => ({
+                    ...prev,
+                    memoryDigestDailyCap: event.target.value === '' ? '' : Number(event.target.value),
+                  })),
+                }),
+                h('span', { className: 'qqn-unit' }, t('memory.unitTimes')),
+              ),
+            }),
+            h(Row, {
               label: t('memory.maxEvents'),
               hint: t('memory.maxEvents.hint'),
               control: h(React.Fragment, null,
@@ -3820,14 +3946,34 @@ ${TRAIL_CSS}
                 disabled: blockBusy('memoryCompact'),
                 onClick: () => void compactMemory(),
               }, blockBusy('memoryCompact') ? t('memory.compacting') : t('memory.compact')),
+              h(Button, {
+                disabled: blockBusy('memoryDigest'),
+                onClick: () => void digestMemory(),
+              }, blockBusy('memoryDigest') ? t('memory.digesting') : t('memory.digest')),
             ),
             memoryDirty ? h('div', { className: 'qqn-row-hint' }, t('memory.unsaved')) : null,
             blockFeedback('memorySettings'),
             blockFeedback('memoryCompact'),
+            blockFeedback('memoryDigest'),
             memoryCompactResult
               ? h('div', { className: 'aura-memory-compact-stats' },
                   h('div', null, t('memory.compactBefore', memoryCountParams(memoryCompactResult.before))),
                   h('div', null, t('memory.compactAfter', memoryCountParams(memoryCompactResult.after))),
+                )
+              : null,
+            memoryDigestResult
+              ? h('div', { className: 'aura-memory-compact-stats' },
+                  h('div', null, t('memory.digestResult', {
+                    notes: memoryDigestResult.note && memoryDigestResult.note.text ? 1 : 0,
+                    events: Number(memoryDigestResult.window.events) || 0,
+                    facts: memoryDigestResult.facts.length,
+                  })),
+                  memoryDigestResult.note && memoryDigestResult.note.text
+                    ? h('div', null, memoryDigestResult.note.text)
+                    : null,
+                  Array.isArray(memoryDigestResult.window.topics) && memoryDigestResult.window.topics.length
+                    ? h('div', null, t('memory.digestTopics', { topics: memoryDigestResult.window.topics.join('、') }))
+                    : null,
                 )
               : null,
           ),

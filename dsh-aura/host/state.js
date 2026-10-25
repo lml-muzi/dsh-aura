@@ -100,6 +100,10 @@ export const DEFAULT_CONFIG = {
   memoryReflectionEvery: 3,
   memoryDiaryEnabled: false,
   memoryRecallLimit: 3,
+  memoryImmediate: true,
+  memorySessionDigest: true,
+  memoryDigestIdleMinutes: 360,
+  memoryDigestDailyCap: 2,
 
   // ---- 主动搭话（speak） ----
   speakEnabled: false,
@@ -147,6 +151,8 @@ const INT_RANGES = {
   memoryMaxNotes: [5, 200],
   memoryReflectionEvery: [1, 50],
   memoryRecallLimit: [1, 3],
+  memoryDigestIdleMinutes: [60, 1440],
+  memoryDigestDailyCap: [1, 5],
   speakIntervalMinutes: [5, 1440],
   speakCooldownMinutes: [0, 1440],
   speakDailyCap: [0, 10],
@@ -170,6 +176,7 @@ const FLOAT_RANGES = {
 const BOOL_FIELDS = new Set([
   'autoConnect', 'splitEnabled', 'soulEnabled', 'soulGrowthReflection', 'emotionEnabled',
   'emotionGuardOnNegative', 'memoryEnabled', 'memoryAutoCompact', 'memoryDiaryEnabled',
+  'memoryImmediate', 'memorySessionDigest',
   'speakEnabled', 'speakDryRun', 'speakStickerEnabled', 'proactiveEnabled',
 ])
 
