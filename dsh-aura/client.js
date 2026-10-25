@@ -19,6 +19,8 @@ window.__ModuleLoader__.load({
     const MEME_BASE = '/dsh-aura/memes'
     /** 人设 Host API（收编 dsh-soul）。 */
     const PERSONA_API = '/dsh-aura/persona-api'
+    /** 人设保存成功后广播的 window 事件：光轨等常驻组件据此立即刷新配置。 */
+    const PERSONA_SAVED_EVENT = 'aura:persona-saved'
     const MEME_TAG_LABELS = {
       angry: '生气',
       happy: '开心',
@@ -558,6 +560,36 @@ window.__ModuleLoader__.load({
     /** Fallback dictionary: Chinese, so the panel reads correctly even before locale registration. */
     const FALLBACK = ZH
 
+    /* ---------------- 输入框光轨样式（运行时与面板共用同一份字符串） ----------------
+       光轨组件挂在输入框卡片上、面板可能根本没打开，所以这份 CSS 会由 apply() 单独
+       注入一个常驻 <style>；同时它也被拼进下面的面板 CSS，避免两份实现漂移。 */
+    const TRAIL_CSS = `
+.aura-trail-svg{position:absolute;display:block;pointer-events:none;contain:strict;overflow:hidden;margin:0;padding:0;border:0}
+.aura-trail-anchor{position:absolute;inset:0 0 auto;height:0;pointer-events:none}
+.aura-trail-layer{fill:none;stroke:var(--aura-trail-color,#679EFE);stroke-width:2.5;stroke-linecap:butt;animation-name:aura-trail-run-0;animation-duration:3.6s;animation-timing-function:linear;animation-iteration-count:infinite}
+.aura-trail-layer[data-layer="0"]{opacity:1;stroke-linecap:round}
+.aura-trail-layer[data-layer="1"]{animation-name:aura-trail-run-1;opacity:.87}
+.aura-trail-layer[data-layer="2"]{animation-name:aura-trail-run-2;opacity:.74}
+.aura-trail-layer[data-layer="3"]{animation-name:aura-trail-run-3;opacity:.61}
+.aura-trail-layer[data-layer="4"]{animation-name:aura-trail-run-4;opacity:.47}
+.aura-trail-layer[data-layer="5"]{animation-name:aura-trail-run-5;opacity:.34}
+.aura-trail-layer[data-layer="6"]{animation-name:aura-trail-run-6;opacity:.21}
+.aura-trail-layer[data-layer="7"]{animation-name:aura-trail-run-7;opacity:.08}
+@keyframes aura-trail-run-0{from{stroke-dashoffset:0px}to{stroke-dashoffset:-100px}}
+@keyframes aura-trail-run-1{from{stroke-dashoffset:2.2px}to{stroke-dashoffset:-97.8px}}
+@keyframes aura-trail-run-2{from{stroke-dashoffset:4.4px}to{stroke-dashoffset:-95.6px}}
+@keyframes aura-trail-run-3{from{stroke-dashoffset:6.6px}to{stroke-dashoffset:-93.4px}}
+@keyframes aura-trail-run-4{from{stroke-dashoffset:8.8px}to{stroke-dashoffset:-91.2px}}
+@keyframes aura-trail-run-5{from{stroke-dashoffset:11px}to{stroke-dashoffset:-89px}}
+@keyframes aura-trail-run-6{from{stroke-dashoffset:13.2px}to{stroke-dashoffset:-86.8px}}
+@keyframes aura-trail-run-7{from{stroke-dashoffset:15.4px}to{stroke-dashoffset:-84.6px}}
+[data-aura-trail-speed="slow"] .aura-trail-layer{animation-duration:4.8s}
+[data-aura-trail-speed="fast"] .aura-trail-layer{animation-duration:2.4s}
+[data-aura-trail-width="thin"] .aura-trail-layer{stroke-width:1.5}
+[data-aura-trail-width="thick"] .aura-trail-layer{stroke-width:4}
+[data-aura-trail="off"] .aura-trail-svg{display:none}
+[data-composer-card][data-aura-trail="on"]{--dsw-elevation-stroke-color:transparent}
+`
     /** Tokens-only stylesheet, namespaced so it cannot collide with host styles. */
     const CSS = `
 .qqn-page{width:100%;height:100%;min-width:0;min-height:0;display:flex;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);font-size:14px;line-height:1.6;overflow:hidden}
@@ -725,6 +757,7 @@ window.__ModuleLoader__.load({
 .aura-persona-history-row{flex-direction:column}
 .aura-persona-history-row .qqn-button{align-self:flex-end}
 }
+${TRAIL_CSS}
 `
 
     function interpolate(text, params) {
@@ -1240,6 +1273,21 @@ window.__ModuleLoader__.load({
     function personaColorOf(value) {
       const text = String(value || '').trim()
       return /^#[0-9a-fA-F]{6}$/.test(text) ? text.toUpperCase() : PERSONA_TRAIL_COLOR_DEFAULT
+    }
+
+    /**
+     * 人设落盘成功后通知订阅者（输入框光轨等）立即刷新，不必等下一轮 15s 轮询。
+     * 用 window 事件而不是共享 store：光轨常驻在 composer 里，人设页可能从未打开过。
+     */
+    function notifyPersonaSaved() {
+      if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return
+      if (typeof CustomEvent !== 'function') return
+      try {
+        window.dispatchEvent(new CustomEvent(PERSONA_SAVED_EVENT))
+      } catch (error) {
+        // 派发失败不影响保存结果
+        console.warn('[dsh-aura] 人设已保存事件派发失败：', error)
+      }
     }
 
     function buildPersonaForm(config) {
@@ -1909,6 +1957,7 @@ window.__ModuleLoader__.load({
         let savedConfig = null
         try {
           const value = await fetchJson(PERSONA_API + '/save', { config: payload })
+          notifyPersonaSaved()
           if (!mounted.current) return
           savedConfig = applyPersonaConfig(value && value.config)
           if (value && Array.isArray(value.changed) && value.changed.length === 0) flashPersona('没有需要保存的改动')
@@ -1931,6 +1980,7 @@ window.__ModuleLoader__.load({
         let resetConfig = null
         try {
           const value = await fetchJson(PERSONA_API + '/reset', {})
+          notifyPersonaSaved()
           if (!mounted.current) return
           resetConfig = applyPersonaConfig(value && value.config)
           flashPersona('已重置为默认人设')
@@ -1951,6 +2001,7 @@ window.__ModuleLoader__.load({
         let appliedConfig = null
         try {
           const value = await fetchJson(PERSONA_API + '/preset/apply', { id: personaPresetId })
+          notifyPersonaSaved()
           if (!mounted.current) return
           appliedConfig = applyPersonaConfig(value && value.config)
           flashPersona('预设已应用')
@@ -1977,9 +2028,11 @@ window.__ModuleLoader__.load({
           // /preset/save 拍的是“已保存配置”的快照；草稿有改动时先落盘，避免另存为拿到旧人设。
           if (personaDirty) {
             const saved = await fetchJson(PERSONA_API + '/save', { config: personaPayload() })
+            notifyPersonaSaved()
             if (saved && saved.config) applyPersonaConfig(saved.config)
           }
           const value = await fetchJson(PERSONA_API + '/preset/save', { name })
+          notifyPersonaSaved()
           if (!mounted.current) return
           if (value && value.saved) setPersonaPresetId(String(value.saved))
           setPersonaPresetName('')
@@ -2020,6 +2073,7 @@ window.__ModuleLoader__.load({
         let undoneConfig = null
         try {
           const value = await fetchJson(PERSONA_API + '/history/undo', { index })
+          notifyPersonaSaved()
           if (!mounted.current) return
           undoneConfig = applyPersonaConfig(value && value.config)
           flashPersona('已撤销')
@@ -3504,6 +3558,328 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ---------------- 输入框光轨（Agent 回复中时输入框边框流光） ----------------
+       匀速原理：沿「卡片边框」画一个 SVG 圆角矩形，pathLength 归一化到 100，用
+       stroke-dashoffset 线性推进 —— 按弧长运动，圆角与直边线速度一致。渐隐拖尾：
+       8 层等长 dash 依次错位、透明度递减叠加，头部各层重叠最亮、向后递减；所有层
+       共用同一时长，整体仍严格匀速。描边中心线压在宿主边框盒边缘（外半圈由
+       TRAIL_PAD 外扩盒容纳），光轨开启时隐藏宿主自身细边框，边界上只留一条线。
+
+       ⚠️ 隔离不变量：环是「写在宿主内部、尺寸随宿主变化」的绝对定位元素。一旦它
+       进入宿主布局流（样式被更具体选择器或 !important 覆盖），就会闭合成尺寸正
+       反馈环（卡片变高 → ResizeObserver → 改 SVG → 再变高 …）。故用三层手段保证
+       它绝不参与宿主任何尺寸测量：
+         1) 挂载点优先选卡片内那个 position:absolute;height:0 的 overlay 锚点；
+         2) 关键几何（position/left/top/width/height/contain）全部内联；
+         3) contain:strict + 墨迹收进自身盒内，尺寸/布局/绘制与外部彻底隔离。 */
+
+    const TRAIL_DASH = 12
+    const TRAIL_LAYERS = 8
+    const TRAIL_LAYER_STEP = 2.2
+    const TRAIL_RADIUS = 22
+    const TRAIL_COLOR_FALLBACK = '#679EFE'
+    const TRAIL_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/
+    const TRAIL_SPEED_VALUES = ['slow', 'normal', 'fast']
+    const TRAIL_WIDTH_VALUES = ['thin', 'normal', 'thick']
+    /** 最粗描边（4px）的一半：外盒每边外扩这么多，描边外半圈才落在 SVG 自身盒内。 */
+    const TRAIL_PAD = 2
+    /** 失控熔断：输入框卡片不可能到这个量级，命中即停止同步并隐藏。 */
+    const TRAIL_MAX_SIDE = 20000
+    /** 配置轮询间隔；人设页保存成功会 dispatch 事件，无需等这一轮。 */
+    const TRAIL_POLL_MS = 15000
+    const TRAIL_DEFAULT_CONFIG = Object.freeze({
+      enabled: true,
+      color: TRAIL_COLOR_FALLBACK,
+      speed: 'slow',
+      width: 'thin',
+    })
+
+    /** 颜色容错：输入中途（如只打了 #6）回退默认色；统一大写好与调色板取值比较。 */
+    function safeTrailColor(value) {
+      if (typeof value !== 'string') return TRAIL_COLOR_FALLBACK
+      const text = value.trim()
+      return TRAIL_COLOR_PATTERN.test(text) ? text.toUpperCase() : TRAIL_COLOR_FALLBACK
+    }
+
+    function trailOption(value, allowed, fallback) {
+      const text = String(value || '')
+      return allowed.includes(text) ? text : fallback
+    }
+
+    /** 从 /dsh-aura/persona-api/state 的 payload 取光轨四项；取不到就退回默认。 */
+    function trailConfigOf(payload) {
+      const data = payload && typeof payload === 'object' ? payload : null
+      const cfg = data && data.config && typeof data.config === 'object' ? data.config : null
+      if (!cfg) return TRAIL_DEFAULT_CONFIG
+      return {
+        enabled: cfg.trailEnabled !== false,
+        color: safeTrailColor(cfg.trailColor),
+        speed: trailOption(cfg.trailSpeed, TRAIL_SPEED_VALUES, 'slow'),
+        width: trailOption(cfg.trailWidth, TRAIL_WIDTH_VALUES, 'thin'),
+      }
+    }
+
+    function createSvgNode(tag, attrs) {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', tag)
+      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value)
+      return node
+    }
+
+    /** 构建拖尾环；层数、dash 长度与错位步长与 CSS keyframes 一一对应。 */
+    function buildTrailSvg() {
+      const svg = createSvgNode('svg', { class: 'aura-trail-svg', 'aria-hidden': 'true' })
+      for (let layer = 0; layer < TRAIL_LAYERS; layer++) {
+        svg.appendChild(createSvgNode('rect', {
+          class: 'aura-trail-layer',
+          'data-layer': String(layer),
+          fill: 'none',
+          pathLength: '100',
+          'stroke-dasharray': `${TRAIL_DASH} ${100 - TRAIL_DASH}`,
+          'stroke-dashoffset': String(layer * TRAIL_LAYER_STEP),
+        }))
+      }
+      return svg
+    }
+
+    /** 外盒相对挂载锚点的偏移：锚点与宿主 padding box 原点重合，故减去边框宽与 PAD。 */
+    function trailBoxOffset(host) {
+      let borderLeft = 0
+      let borderTop = 0
+      try {
+        const style = typeof globalThis.getComputedStyle === 'function' ? globalThis.getComputedStyle(host) : null
+        if (style) {
+          borderLeft = parseFloat(style.borderLeftWidth) || 0
+          borderTop = parseFloat(style.borderTopWidth) || 0
+        }
+      } catch {
+        // 取不到计算样式按无边框处理（DSH 输入框卡片 border:0）
+      }
+      return { left: -borderLeft - TRAIL_PAD, top: -borderTop - TRAIL_PAD }
+    }
+
+    /** 让环与宿主「边框盒」逐像素对齐；尺寸未变时不重复写样式。 */
+    function sizeTrailSvg(svg, host, width, height) {
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false
+      const boxWidth = width + TRAIL_PAD * 2
+      const boxHeight = height + TRAIL_PAD * 2
+      const offset = trailBoxOffset(host)
+      const key = `${width}x${height}@${offset.left},${offset.top}`
+      if (svg.dataset.trailKey === key) return false
+      svg.dataset.trailKey = key
+      svg.style.left = `${offset.left}px`
+      svg.style.top = `${offset.top}px`
+      svg.style.width = `${boxWidth}px`
+      svg.style.height = `${boxHeight}px`
+      svg.setAttribute('viewBox', `0 0 ${boxWidth} ${boxHeight}`)
+      for (const rect of svg.querySelectorAll('.aura-trail-layer')) {
+        rect.setAttribute('x', String(TRAIL_PAD))
+        rect.setAttribute('y', String(TRAIL_PAD))
+        rect.setAttribute('width', String(width))
+        rect.setAttribute('height', String(height))
+        rect.setAttribute('rx', String(TRAIL_RADIUS))
+      }
+      return true
+    }
+
+    /** 解析环在卡片内的挂载点：优先「卡片直接子元素的零高度容器」。 */
+    function resolveTrailMountPoint(card, anchor) {
+      if (anchor && anchor.parentElement === card) return anchor
+      const parent = anchor && anchor.parentElement
+      if (!parent) return card
+      let node = parent
+      while (node !== card && node.parentElement && node.parentElement !== card) node = node.parentElement
+      if (node !== card && node.parentElement === card) return node
+      return card
+    }
+
+    /** 把环挂到卡片（内部锚点）上并跟随宿主尺寸；返回 { svg, setVisible, unmount }。 */
+    function mountTrailRing(host, anchor) {
+      const svg = buildTrailSvg()
+      // 关键几何内联：样式表若把 position 覆盖回常规流，环会触发尺寸正反馈，
+      // 后果是整页布局被撑爆，所以不能只依赖类规则
+      svg.style.cssText = [
+        'position:absolute',
+        'display:none',
+        'pointer-events:none',
+        'contain:strict',
+        'overflow:hidden',
+        'margin:0',
+        'padding:0',
+        'border:0',
+        'transform:none',
+        'animation:none',
+        'max-width:none',
+        'max-height:none',
+      ].join(';')
+      ;(anchor || host).appendChild(svg)
+
+      let stopped = false
+      let observer = null
+      let geometryChecked = false
+
+      // 停用并留下线索：与其画出错位图形或拖垮布局，不如安静退出
+      const disable = reason => {
+        stopped = true
+        svg.style.display = 'none'
+        if (observer) observer.disconnect()
+        if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+          console.warn('[dsh-aura] 已停用输入框光轨：' + reason)
+        }
+      }
+
+      const sync = () => {
+        if (stopped) return
+        // 用 offsetWidth/Height（边框盒）而非 clientWidth/Height（内边距盒）
+        const width = host.offsetWidth
+        const height = host.offsetHeight
+        if (width > TRAIL_MAX_SIDE || height > TRAIL_MAX_SIDE) {
+          disable('输入框尺寸异常（疑似尺寸正反馈）')
+          return
+        }
+        if (!sizeTrailSvg(svg, host, width, height)) return
+        if (geometryChecked) return
+        geometryChecked = true
+        // 自检：样式表若把 position 改回常规流，环就会重新参与宿主排版，此时主动停用
+        if (typeof globalThis.getComputedStyle !== 'function') return
+        let position = 'absolute'
+        try {
+          position = globalThis.getComputedStyle(svg).position
+        } catch {
+          return
+        }
+        if (position !== 'absolute') disable('光轨样式被第三方样式表覆盖（position: ' + position + '）')
+      }
+
+      sync()
+      if (typeof ResizeObserver === 'function') {
+        observer = new ResizeObserver(sync)
+        observer.observe(host)
+      } else if (typeof globalThis.addEventListener === 'function') {
+        globalThis.addEventListener('resize', sync)
+      }
+      if (stopped && observer) observer.disconnect()
+
+      // 显隐也走内联，不只靠 [data-aura-trail="off"] 规则
+      const setVisible = visible => {
+        if (stopped) return
+        svg.style.display = visible ? 'block' : 'none'
+      }
+
+      return {
+        svg,
+        setVisible,
+        unmount: () => {
+          stopped = true
+          if (observer) observer.disconnect()
+          else if (typeof globalThis.removeEventListener === 'function') globalThis.removeEventListener('resize', sync)
+          svg.remove()
+        },
+      }
+    }
+
+    /** 光轨样式必须常驻（面板没打开时光轨也在动）：注入一次，随插件卸载移除。 */
+    let trailStyleEl = null
+
+    function ensureTrailStyle() {
+      if (typeof document === 'undefined' || trailStyleEl) return trailStyleEl
+      try {
+        const el = document.createElement('style')
+        el.id = 'aura-trail-style'
+        el.textContent = TRAIL_CSS
+        ;(document.head || document.documentElement).appendChild(el)
+        trailStyleEl = el
+      } catch (error) {
+        console.warn('[dsh-aura] 光轨样式注入失败：', error)
+      }
+      return trailStyleEl
+    }
+
+    function disposeTrailStyle() {
+      if (trailStyleEl && trailStyleEl.parentNode) trailStyleEl.parentNode.removeChild(trailStyleEl)
+      trailStyleEl = null
+    }
+
+    /**
+     * 输入框光轨运行时：注册在 conversation.input.overlay（输入框卡片内部）。
+     * 组件本身不渲染可见内容 —— 它在最近的 [data-composer-card] 上挂一层 SVG 环，
+     * 用会话运行态（SessionSnapshot.running）+ 光轨开关控制显隐；没有卡片时安静不挂载。
+     */
+    function AuraTrail(props) {
+      const useSession = props && props.useSession
+      const running = typeof useSession === 'function'
+        ? useSession(snapshot => snapshot.running === true)
+        : false
+      const [trail, setTrail] = React.useState(TRAIL_DEFAULT_CONFIG)
+      const anchorRef = React.useRef(null)
+      const mountedRef = React.useRef(null)
+
+      // 配置来源：人设 Host 的 config.trailXxx。面板没打开也要跟上，所以组件自己轮询；
+      // 人设页保存成功时 dispatch 'aura:persona-saved'，这里立刻补一次，不必等下一轮。
+      React.useEffect(() => {
+        let alive = true
+        const refresh = async () => {
+          try {
+            const value = await fetchJson(PERSONA_API + '/state')
+            if (alive) setTrail(trailConfigOf(value))
+          } catch {
+            // 取不到就保持默认配置，安静不报错
+          }
+        }
+        void refresh()
+        const timer = setInterval(() => { void refresh() }, TRAIL_POLL_MS)
+        const onSaved = () => { void refresh() }
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+          window.addEventListener(PERSONA_SAVED_EVENT, onSaved)
+        }
+        return () => {
+          alive = false
+          clearInterval(timer)
+          if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+            window.removeEventListener(PERSONA_SAVED_EVENT, onSaved)
+          }
+        }
+      }, [])
+
+      // 挂环：锚点 → closest('[data-composer-card]')，避免全局查询误命中
+      React.useEffect(() => {
+        const anchor = anchorRef.current
+        if (!anchor) return undefined
+        const card = typeof anchor.closest === 'function' ? anchor.closest('[data-composer-card]') : null
+        if (!card) return undefined
+        const mountPoint = resolveTrailMountPoint(card, anchor)
+        const mounted = mountTrailRing(card, mountPoint)
+        mountedRef.current = { card, mounted }
+        // 效果在首帧绘制后执行：先置隐藏，避免挂载瞬间闪出一帧光轨
+        card.setAttribute('data-aura-trail', 'off')
+        mounted.setVisible(false)
+        return () => {
+          const current = mountedRef.current
+          mountedRef.current = null
+          if (!current) return
+          current.mounted.unmount()
+          current.card.removeAttribute('data-aura-trail')
+          current.card.removeAttribute('data-aura-trail-speed')
+          current.card.removeAttribute('data-aura-trail-width')
+          current.card.style.removeProperty('--aura-trail-color')
+        }
+      }, [])
+
+      // 显隐与外观：只有「Agent 回复中 + 光轨开关开启」才显示
+      React.useEffect(() => {
+        const current = mountedRef.current
+        if (!current) return
+        const { card, mounted } = current
+        const visible = running === true && trail.enabled === true
+        card.setAttribute('data-aura-trail', visible ? 'on' : 'off')
+        card.setAttribute('data-aura-trail-speed', trail.speed)
+        card.setAttribute('data-aura-trail-width', trail.width)
+        card.style.setProperty('--aura-trail-color', trail.color)
+        mounted.setVisible(visible)
+      }, [running, trail])
+
+      return h('span', { ref: anchorRef, className: 'aura-trail-anchor', hidden: true, 'aria-hidden': true })
+    }
+
     /* ---------------- 聊天内联 [表情: 描述] 渲染（独立于 dsh-meme） ---------------- */
     const MEME_INLINE_RE = /\[表情[:：]\s*([^\]]+)\](?:\((https?:\/\/[^\s)]+)\))?/g
     const MEME_INLINE_TEST = /\[表情[:：]\s*([^\]]+)\](?:\((https?:\/\/[^\s)]+)\))?/
@@ -4011,6 +4387,22 @@ window.__ModuleLoader__.load({
         } else {
           createInlineMemeRenderer().start()
         }
+
+        // 输入框光轨：常驻样式 + 卡片内 overlay 槽位。
+        // 槽位注册在 ctx.slots.inject 里，插件 dispose 时由 slots 自己清理。
+        if (typeof ctx.effect === 'function') {
+          ctx.effect(() => {
+            ensureTrailStyle()
+            return () => disposeTrailStyle()
+          }, 'dsh-aura: input trail styles')
+        } else {
+          ensureTrailStyle()
+        }
+        ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({
+          name: 'conversation.input.overlay',
+          id: 'aura-trail',
+          order: 50,
+        }, AuraTrail))
 
         ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main',
