@@ -172,7 +172,7 @@ window.__ModuleLoader__.load({
     /** 简体中文文案（也是缺词时的兜底）。 */
     const ZH = {
       'title': 'Aura',
-      'subtitle': 'Aura · 自研 QQ 渠道 · 原生表情图 · 正则拆句 · 情绪与主动打扰',
+      'subtitle': 'Aura · 灵魂与关系 · 情绪与成长 · 记忆与日记 · 原生表情包',
       'status.online': '已连接',
       'status.offline': '未连接',
       'status.unconfigured': '未配置',
@@ -241,7 +241,7 @@ window.__ModuleLoader__.load({
       'error.load': '读取状态失败',
       'error.connect': '连接失败',
       'loading': '正在读取状态…',
-      'note.footer': '表情包由 send_meme 选图：QQ 端用 dsh_im_return_file 发原生图片，网页端用 [表情: 描述] 内联渲染；每条入站消息最多回复 5 条；被动回复窗口过期后主动消息可能被拒绝。',
+      'note.footer': '灵魂身份全局注入，情绪与记忆只在 QQ 会话；表情包由 send_meme 选图，QQ 发原生图、网页内联渲染；每条入站消息最多回复 5 条，被动窗口过期后主动消息可能被拒绝。',
       'section.appearance': '外观',
       'row.displayName': '显示名',
       'row.displayName.hint': '左侧栏入口和面板标题都用这个名字（1–24 字）',
@@ -334,6 +334,9 @@ window.__ModuleLoader__.load({
       'memory.entity.place': '地点',
       'memory.entity.project': '项目',
       'memory.entity.other': '其他',
+      'memory.relations': '关系',
+      'memory.relationsEmpty': '还没有关系；多聊聊人和事，她会自己连起来',
+      'memory.relationWeight': '{value}%',
       'memory.empty': '还没有记忆',
       'memory.emptyHint': '她会在聊天中慢慢记下值得记住的事',
       'memory.reset': '清空记忆',
@@ -394,7 +397,7 @@ window.__ModuleLoader__.load({
     /** English copy. */
     const EN = {
       'title': 'Aura',
-      'subtitle': 'Aura · self-hosted QQ channel · native sticker images · regex split replies · mood and proactive pings',
+      'subtitle': 'Aura · soul and bond · emotion and growth · memory and diary · native stickers',
       'status.online': 'Connected',
       'status.offline': 'Disconnected',
       'status.unconfigured': 'Not configured',
@@ -463,7 +466,7 @@ window.__ModuleLoader__.load({
       'error.load': 'Could not read status',
       'error.connect': 'Connection failed',
       'loading': 'Reading status…',
-      'note.footer': 'Stickers are picked by send_meme: on QQ, dsh_im_return_file sends native images; on the web, [表情: 描述] renders inline; each inbound message gets at most 5 replies; once the passive-reply window closes, proactive messages may be rejected.',
+      'note.footer': 'Soul identity is global; emotion and memory apply to QQ sessions only. send_meme picks stickers (native on QQ, inline on web); each inbound message gets at most 5 replies, and proactive messages may be rejected once the passive window closes.',
       'section.appearance': 'Appearance',
       'row.displayName': 'Display name',
       'row.displayName.hint': 'Shown on the sidebar entry and as the panel title (1–24 chars)',
@@ -556,6 +559,9 @@ window.__ModuleLoader__.load({
       'memory.entity.place': 'Place',
       'memory.entity.project': 'Project',
       'memory.entity.other': 'Other',
+      'memory.relations': 'Relations',
+      'memory.relationsEmpty': 'No relations yet - mention people and things and she will link them',
+      'memory.relationWeight': '{value}%',
       'memory.empty': 'No memory yet',
       'memory.emptyHint': 'She will remember what is worth remembering as you talk',
       'memory.reset': 'Clear memory',
@@ -780,6 +786,10 @@ window.__ModuleLoader__.load({
 .aura-memory-entity{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
 .aura-memory-entity-type{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
 .aura-memory-entity-aliases{color:var(--dsw-alias-label-caption);font-size:11px;line-height:16px;overflow-wrap:anywhere}
+.aura-memory-relation-list{display:flex;flex-direction:column;gap:6px}
+.aura-memory-relation{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;padding:7px 9px;border-radius:8px;background:var(--dsw-alias-bg-layer-3);border:.5px solid var(--dsw-alias-border-l3);color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
+.aura-memory-relation-type{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.aura-memory-relation-weight{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
 .qqn-chip-list{display:flex;flex-wrap:wrap;gap:6px}
 .qqn-tag{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:11px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .qqn-log-list{display:flex;flex-direction:column;padding:6px 0}
@@ -1457,6 +1467,7 @@ ${TRAIL_CSS}
         return {
           facts: Array.isArray(value?.facts) ? value.facts : [],
           entities: Array.isArray(value?.entities) ? value.entities : [],
+          relations: Array.isArray(value?.relations) ? value.relations : [],
         }
       } catch {
         return null
@@ -1467,7 +1478,7 @@ ${TRAIL_CSS}
     function mergeMemoryCards(value, cards) {
       if (!cards || !value || typeof value !== 'object') return value
       const soul = asObject(value.soul)
-      const hasCards = cards.facts.length > 0 || cards.entities.length > 0
+      const hasCards = cards.facts.length > 0 || cards.entities.length > 0 || cards.relations.length > 0
       if (Object.keys(soul).length === 0 && !hasCards) return value
       const memory = asObject(soul.memory)
       if ((!Array.isArray(memory.facts) || memory.facts.length === 0) && cards.facts.length > 0) {
@@ -1479,6 +1490,11 @@ ${TRAIL_CSS}
         memory.entities = cards.entities
       } else if (!Array.isArray(memory.entities)) {
         memory.entities = []
+      }
+      if ((!Array.isArray(memory.relations) || memory.relations.length === 0) && cards.relations.length > 0) {
+        memory.relations = cards.relations
+      } else if (!Array.isArray(memory.relations)) {
+        memory.relations = []
       }
       soul.memory = memory
       value.soul = soul
@@ -2645,6 +2661,16 @@ ${TRAIL_CSS}
             setAppearance(value.config)
             syncLook(value.config, true)
           }
+          const trailValue = await fetchJson(PERSONA_API + '/save', {
+            config: {
+              trailEnabled: personaForm.trailEnabled === true,
+              trailColor: personaForm.trailColor,
+              trailSpeed: personaForm.trailSpeed,
+              trailWidth: personaForm.trailWidth,
+            },
+          })
+          if (trailValue && trailValue.config) syncPersona(trailValue.config, true)
+          notifyPersonaSaved()
           setLookNotice(t('notice.lookSaved'))
           if (lookTimer.current !== null) clearTimeout(lookTimer.current)
           lookTimer.current = setTimeout(() => {
@@ -2993,6 +3019,30 @@ ${TRAIL_CSS}
         }))
         .sort((left, right) => right.lastSeenAt - left.lastSeenAt)
         .slice(0, 12)
+      /* ---- 关系（实体图边；面板最多 12 条，weight 高的在前；空状态给提示） ---- */
+      const memoryEntitiesById = new Map()
+      for (const row of asArray(memory.entities).map(item => asObject(item))) {
+        const id = String(row.id || '').trim()
+        if (id) memoryEntitiesById.set(id, String(row.name || '').trim())
+      }
+      const memoryRelations = asArray(memory.relations)
+        .map(row => asObject(row))
+        .filter(row => String(row.from || '').trim() && String(row.to || '').trim() && row.from !== row.to)
+        .map((row, index) => {
+          const weight = Number.isFinite(Number(row.weight))
+            ? Math.max(0, Math.min(1, Number(row.weight)))
+            : 0
+          return {
+            key: String(row.id || '') || ('relation-' + index + '-' + String(row.lastSeenAt || '')),
+            fromName: String(row.fromName || memoryEntitiesById.get(String(row.from)) || row.from).trim(),
+            toName: String(row.toName || memoryEntitiesById.get(String(row.to)) || row.to).trim(),
+            typeLabel: String(row.type || '').trim() || 'co',
+            weight,
+            lastSeenAt: timeOf(row.lastSeenAt || row.firstSeenAt),
+          }
+        })
+        .sort((left, right) => (right.weight - left.weight) || (right.lastSeenAt - left.lastSeenAt))
+        .slice(0, 12)
       /* ---- 成长：她自己长出来的部分（只读；宿主暂未开放编辑 HTTP） ---- */
       const growthAll = rowsNewest(soulData.growth, 'at')
       const growthTotal = growthAll.length
@@ -3110,7 +3160,7 @@ ${TRAIL_CSS}
         h('div', { className: 'qqn-actions' },
           h(Button, {
             variant: 'primary',
-            disabled: lookBusy || !lookDirty,
+            disabled: lookBusy || !(lookDirty || personaDirty),
             onClick: () => void saveLook(),
           }, lookBusy ? t('busy.look') : t('button.lookSave')),
         ),
@@ -3537,6 +3587,20 @@ ${TRAIL_CSS}
                     : null,
                 )))
               : h('div', { className: 'qqn-mood-empty' }, soulPresent ? t('memory.entitiesEmpty') : t('empty.soulPending')),
+          ),
+          h('div', { className: 'qqn-memory-block' },
+            h('div', { className: 'qqn-look-title' }, t('memory.relations')),
+            memoryRelations.length
+              ? h('div', { className: 'aura-memory-relation-list' }, memoryRelations.map(relation => h('div', {
+                  key: relation.key,
+                  className: 'aura-memory-relation',
+                },
+                  h('span', { className: 'aura-memory-relation-from' }, relation.fromName),
+                  h('span', { className: 'aura-memory-relation-type' }, '—' + relation.typeLabel + '→'),
+                  h('span', { className: 'aura-memory-relation-to' }, relation.toName),
+                  h('span', { className: 'aura-memory-relation-weight' }, t('memory.relationWeight', { value: Math.round(relation.weight * 100) })),
+                )))
+              : h('div', { className: 'qqn-mood-empty' }, soulPresent ? t('memory.relationsEmpty') : t('empty.soulPending')),
           ),
           h('div', { className: 'qqn-memory-block' },
             h('div', { className: 'qqn-look-title' }, t('memory.notes')),
@@ -4080,7 +4144,7 @@ ${TRAIL_CSS}
         h('div', { className: 'qqn-rows' },
           h(Row, {
             label: '光轨动画',
-            hint: '聊天里流动的光轨；跟上面的灵魂开关一起生效',
+            hint: '聊天里流动的光轨；跟灵魂总开关一起生效',
             control: h('input', {
               className: 'qqn-checkbox',
               type: 'checkbox',
@@ -4253,7 +4317,7 @@ ${TRAIL_CSS}
           h('div', { className: 'qqn-rows' },
             h(Row, {
               label: '光轨动画',
-              hint: '聊天里流动的光轨；跟上面的灵魂开关一起生效',
+              hint: '聊天里流动的光轨；跟灵魂总开关一起生效',
               control: h('input', {
                 className: 'qqn-checkbox',
                 type: 'checkbox',
@@ -4415,8 +4479,8 @@ ${TRAIL_CSS}
         ['emotion', '情绪'],
         ['memory', '记忆'],
         ['diary', '日记'],
-        ['meme', '表情包'],
         ['speak', '主动'],
+        ['meme', '表情包'],
         ['appearance', '外观'],
         ['connect', '连接'],
         ['debug', '调试'],
@@ -4438,13 +4502,13 @@ ${TRAIL_CSS}
               header,
               pollError ? h('div', { className: 'qqn-error' }, t('error.load') + '：' + pollError) : null,
               tabNav,
-              tab === 'soul' ? h(React.Fragment, null, soulSection, soulContentSection, soulPreviewSection, growthSection, trailSection, soulActions, blockFeedback('soul')) : null,
+              tab === 'soul' ? h(React.Fragment, null, soulSection, soulContentSection, soulPreviewSection, growthSection, soulActions, blockFeedback('soul')) : null,
               tab === 'emotion' ? h(React.Fragment, null, emotionSection, relationSection) : null,
               tab === 'memory' ? memorySection : null,
               tab === 'diary' ? diarySection : null,
               tab === 'meme' ? memeSection : null,
               tab === 'speak' ? speakSection : null,
-              tab === 'appearance' ? appearanceSection : null,
+              tab === 'appearance' ? h(React.Fragment, null, appearanceSection, trailSection) : null,
               tab === 'connect' ? h(React.Fragment, null,
                 h(Section, { title: t('section.status') },
                   statusRows,

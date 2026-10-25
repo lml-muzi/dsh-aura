@@ -322,7 +322,10 @@ export function normalizeSoul(raw, now = Date.now()) {
   return s
 }
 
-/** soul 内不再持有短期记忆；这里只留空壳，兼容面板/旧调用方（v2 也补上 facts/entities）。 */
+/**
+ * soul 内不再持有短期记忆；这里只留空壳，兼容面板/旧调用方。
+ * v2 补 facts/entities；relations（实体图边）也留空数组，老调用方读 .relations 不会拿到 undefined。
+ */
 export function emptyMemoryState() {
   return {
     events: [],
@@ -330,6 +333,7 @@ export function emptyMemoryState() {
     topics: {},
     facts: [],
     entities: [],
+    relations: [],
     pendingDue: [],
     lastReflectAt: 0,
     lastCompactDayKey: '',
@@ -344,6 +348,7 @@ function hasMemoryData(memory) {
     if (asArray(memory.notes?.[key]).length > 0) return true
   }
   if (asArray(memory.facts).length > 0 || asArray(memory.entities).length > 0) return true
+  if (asArray(memory.relations).length > 0) return true
   return Object.keys(asObject(memory.topics)).length > 0
 }
 

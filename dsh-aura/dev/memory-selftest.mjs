@@ -10,6 +10,8 @@
  *   soul_note/soul_recall/pendingDue 行为、diary 注入 getMemoryStore 读 events；
  *   v2：v1→v2 迁移、facts/entities 上限、addFact 合并/取代、queryFacts、规则抽取、
  *   compact 去重/清理/衰减、soul_fact 工具、context 事实注入、实体别名去重。
+ *   v2.1 实体图：relations schema/坏值清洗/300 上限、addFact 建边、co 共现加权、
+ *   1 跳召回（context / soul_recall / memory-api / snapshot）、compactRelations 衰减清理。
  */
 import assert from 'node:assert/strict'
 import {
@@ -42,9 +44,11 @@ const {
   MEMORY_VERSION,
   FACT_LIMIT,
   ENTITY_LIMIT,
+  RELATION_LIMIT,
   createMemoryStore,
   emptyMemory,
   normalizeMemory,
+  resolveEntity,
 } = storeMod
 const {
   EVENT_MAX,
@@ -55,14 +59,18 @@ const {
   addFact,
   compactEvents,
   compactMemoryFacts,
+  compactRelations,
   extractFacts,
   forgetFact,
   installMemory,
   listEntities,
   listFacts,
+  listRelations,
   queryFacts,
+  relationsForEntity,
   renderMemoryContext,
   upsertEntity,
+  upsertRelation,
 } = memoryMod
 
 const lengthOf = (text) => Array.from(String(text ?? '')).length
@@ -916,6 +924,282 @@ await test('snapshot 带 facts/entities，且事实不含 superseded', () => {
   assert.ok(snap.factCount >= snap.facts.length)
   assert.ok(snap.entities.every(entity => Array.isArray(entity.aliases)))
 })
+
+// ---------- 13. 关系图 schema ----------
+section('13. relations schema：v1 补 []、坏值清洗、上限 300')
+
+await test('relations：v1 补 []、悬空/自环清掉、co 反向合并、权重限幅', () => {
+  assert.deepEqual(normalizeMemory({ version: 1, events: [], notes: {}, topics: {} }).relations, [])
+  const draft = emptyMemory()
+  const a = upsertEntity(draft, '木子', { type: 'person' }, 1000).entity
+  const b = upsertEntity(draft, '团子', { type: 'pet', aliases: ['猫'] }, 1000).entity
+  const normalized = normalizeMemory({
+    version: 2,
+    entities: [a, b],
+    relations: [
+      { id: 'r1', from: a.id, to: b.id, type: '养', weight: 0.8, firstSeenAt: 10, lastSeenAt: 20 },
+      { id: 'r2', from: a.id, to: 'missing-entity', type: '养', weight: 0.9 },
+      { id: 'r3', from: a.id, to: a.id, type: '自己', weight: 0.9 },
+      { id: 'r4', from: b.id, to: a.id, type: 'co', weight: 3 },
+      { id: 'r5', from: a.id, to: b.id, type: 'co', weight: 0.2 },
+      { id: 'r6', from: a.id, to: b.id, type: '别名', weight: 'x' },
+    ],
+  }, 2000)
+  assert.equal(normalized.relations.some(rel => rel.id === 'r2'), false, '悬空边应清掉')
+  assert.equal(normalized.relations.some(rel => rel.id === 'r3'), false, '自环应清掉')
+  const co = normalized.relations.filter(rel => rel.type === 'co')
+  assert.equal(co.length, 1, '反向重复的 co 边应合并成一条')
+  assert.equal(co[0].weight, 1, 'weight 超界应限幅到 1')
+  const badWeight = normalized.relations.find(rel => rel.id === 'r6')
+  assert.equal(badWeight.weight, 0.8, '坏 weight 回默认 0.8')
+  const kept = normalized.relations.find(rel => rel.id === 'r1')
+  assert.equal(kept.firstSeenAt, 10)
+  assert.equal(kept.lastSeenAt, 20)
+  assert.equal(kept.from, a.id, 'from/to 应是 entity id')
+})
+
+await test('memory.json 写读 relations；超过 300 条先删 weight 最低、最旧的', () => {
+  const dir = join(root, 'store-relations')
+  const store = createMemoryStore({ home: dir, log: () => {} })
+  const draft = emptyMemory()
+  const a = upsertEntity(draft, '甲', { type: 'person' }, 1000).entity
+  const b = upsertEntity(draft, '乙', { type: 'person' }, 1000).entity
+  draft.relations = Array.from({ length: RELATION_LIMIT + 5 }, (_, index) => ({
+    id: `rel-${index}`,
+    from: a.id,
+    to: b.id,
+    type: `t${index}`,
+    weight: 0.2 + (index % 5) * 0.05,
+    firstSeenAt: index,
+    lastSeenAt: index,
+  }))
+  store.write(draft)
+  const disk = JSON.parse(readFileSync(store.file, 'utf8'))
+  assert.equal(disk.relations.length, RELATION_LIMIT)
+  const loaded = store.read()
+  assert.equal(loaded.relations.length, RELATION_LIMIT)
+  const keptIds = new Set(loaded.relations.map(rel => rel.id))
+  assert.ok(['rel-0', 'rel-5', 'rel-10', 'rel-15', 'rel-20'].every(id => !keptIds.has(id)), '应删最轻且最旧的 5 条')
+  assert.ok(keptIds.has('rel-24'), '较新的低权重边应保留')
+  assert.equal(store.stats().relations, RELATION_LIMIT)
+
+  // store 级便捷方法：upsertRelation / listRelations / relationsForEntity / compactRelations
+  const manual = store.upsertRelation({ from: a.id, to: b.id, type: '手动', weight: 0.5 }, 9999)
+  assert.equal(manual.ok, true)
+  assert.equal(store.listRelations(5)[0].type, '手动')
+  assert.ok(store.relationsForEntity('甲').some(rel => rel.type === '手动'))
+  assert.equal(store.relationsForEntity('不存在').length, 0)
+  const compacted = store.compactRelations(Date.now())
+  assert.equal(typeof compacted.relationsPruned, 'number')
+  assert.equal(typeof compacted.relationsDecayed, 'number')
+  store.dispose()
+})
+
+// ---------- 14. 建边：自动 + 手动 ----------
+section('14. 建边：addFact predicate 边 / co 共现边 / 重复加权 / 别名')
+
+await test('addFact 建边：subject 和 value 都能解析到实体时落一条 predicate 边（0.8）', () => {
+  const graph = emptyMemory()
+  upsertEntity(graph, '木子', { type: 'person' }, 1000)
+  upsertEntity(graph, '团子', { type: 'pet', aliases: ['猫'] }, 1000)
+  const added = addFact(graph, { subject: '木子', predicate: '养', value: '团子' }, 2000)
+  assert.equal(added.created, true)
+  assert.ok(added.relation, '应返回建出的关系边')
+  assert.equal(graph.relations.length, 1)
+  const relation = graph.relations[0]
+  assert.equal(relation.type, '养')
+  assert.equal(relation.weight, 0.8)
+  assert.equal(relation.from, resolveEntity(graph, '木子').id)
+  assert.equal(relation.to, resolveEntity(graph, '团子').id)
+  assert.equal(relation.firstSeenAt, 2000)
+  addFact(graph, { subject: '木子', predicate: '养', value: '团子' }, 3000)
+  assert.equal(graph.relations.length, 1, '同一条边不重复')
+  const unresolved = addFact(graph, { subject: '陌生人', predicate: '喜欢', value: '团子' }, 4000)
+  assert.equal(unresolved.ok, true)
+  assert.equal(unresolved.relation, null, 'subject 解析不到实体就不建边')
+  assert.equal(graph.relations.length, 1)
+  // 手动建边：名字/别名都能解析，未知实体返回 ok:false
+  const manual = upsertRelation(graph, { from: '猫', to: '木子', type: '喜欢', weight: 0.5 }, 5000)
+  assert.equal(manual.ok, true)
+  assert.equal(manual.created, true)
+  assert.equal(manual.relation.from, resolveEntity(graph, '团子').id)
+  assert.equal(upsertRelation(graph, { from: '团子', to: '不存在', type: '养' }).ok, false)
+})
+
+await test('co 边：事件摘要里的实体两两建边，重复出现 +0.1，上限 1', () => {
+  memory.clear()
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  memory.upsertEntity('杭州', { type: 'place' })
+  memory.upsertEntity('木子', { type: 'person' })
+  const base = Date.now()
+  memory.addEvent({ id: 'evt-co-1', at: base - 30000, kind: 'chat', summary: '木子带团子回杭州', topics: [], sessionId: 'qq:co' })
+  let graph = memory.store.read()
+  const coEdges = listRelations(graph, 10).filter(rel => rel.type === 'co')
+  assert.equal(coEdges.length, 3, '三个实体两两三条 co 边')
+  const petEdge = coEdges.find(rel => rel.fromName === '团子' && rel.toName === '木子')
+  assert.ok(petEdge, '团子 → 木子 应有 co 边')
+  assert.equal(petEdge.weight, 0.3, 'co 边从 0.3 起')
+  const aliasEdges = relationsForEntity(graph, '猫')
+  assert.equal(aliasEdges.length, 2, '别名「猫」应解析到团子的两条边')
+  assert.ok(aliasEdges.every(rel => rel.fromName === '团子' || rel.toName === '团子'))
+
+  memory.addEvent({ id: 'evt-co-2', at: base - 20000, kind: 'chat', summary: '团子和木子又聊到杭州', topics: [], sessionId: 'qq:co' })
+  graph = memory.store.read()
+  const bumped = relationsForEntity(graph, '团子').find(rel => rel.fromName === '木子' || rel.toName === '木子')
+  assert.equal(bumped.weight, 0.4, '重复出现 +0.1')
+
+  for (let index = 0; index < 9; index += 1) {
+    memory.addEvent({
+      id: `evt-co-x${index}`,
+      at: base - 10000 + index * 100,
+      kind: 'chat',
+      summary: '木子团子杭州',
+      topics: [],
+      sessionId: `qq:co-${index}`,
+    })
+  }
+  graph = memory.store.read()
+  const capped = relationsForEntity(graph, '团子')
+  assert.ok(capped.every(rel => rel.weight <= 1), 'weight 不应超过 1')
+  assert.ok(capped.some(rel => rel.weight === 1), '反复出现应到 1')
+})
+
+await test('onUserMessage：同一句话里的实体自动建 co 边（0.3 起）', () => {
+  memory.clear()
+  memory.onUserMessage({ text: '我养了一只猫叫团子，我住在杭州', at: Date.now(), sessionId: 'qq:co-user' })
+  const graph = memory.store.read()
+  const co = listRelations(graph, 10).find(rel => rel.type === 'co')
+  assert.ok(co, '团子与杭州应建 co 边')
+  assert.deepEqual([co.fromName, co.toName].sort(), ['团子', '杭州'].sort())
+  assert.equal(co.weight, 0.3)
+  assert.ok(graph.facts.some(fact => fact.predicate === '宠物' && fact.value === '团子'))
+})
+
+// ---------- 15. 1 跳召回 ----------
+section('15. 1 跳召回：context / soul_recall / memory-api / snapshot')
+
+await test('renderMemoryContext：命中实体 → 关系边 → 邻居事实，预算仍 ≤240', () => {
+  memory.clear()
+  memory.upsertEntity('木子', { type: 'person' })
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', text: '木子喜欢听歌', confidence: 0.9 })
+  const linked = memory.upsertRelation({ from: '团子', to: '木子', type: 'co', weight: 0.6 })
+  assert.equal(linked.ok, true)
+  // 用别名「猫咪」查：命中团子，但「木子喜欢听歌」不是直接命中，才走 1 跳。
+  const context = memory.renderContext(Date.now(), { lastUserText: '猫咪' })
+  assert.ok(context.includes('（关联：团子（宠物）→ 木子）'), context)
+  assert.ok(context.includes('（顺着关系想起：木子喜欢听歌）'), context)
+  assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET, `预算应 ≤${MEMORY_CONTEXT_BUDGET}，实际 ${lengthOf(context)}`)
+})
+
+await test('soul_recall 带 relations / relatedFacts，渲染出关系与关联事实', async () => {
+  memory.clear()
+  memory.upsertEntity('木子', { type: 'person' })
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  memory.addFact({ subject: '木子', predicate: '喜欢', value: '听歌', text: '木子喜欢听歌', confidence: 0.9 })
+  memory.upsertRelation({ from: '团子', to: '木子', type: 'co', weight: 0.6 })
+  const recallTool = memFake.tools.find(tool => tool.name === 'soul_recall')
+  assert.ok(recallTool)
+  const recalled = await recallTool.execute({ query: '团子' })
+  assert.ok(Array.isArray(recalled.relations))
+  assert.equal(recalled.relations.length, 1)
+  assert.equal(recalled.relations[0].fromName, '团子')
+  assert.equal(recalled.relations[0].toName, '木子')
+  assert.equal(recalled.relations[0].weight, 0.6)
+  assert.ok(recalled.relatedFacts.some(fact => fact.value === '听歌'))
+  const lines = recallTool.output.render({}, recalled)
+  const text = lines.map(line => line.text).join('\n')
+  assert.ok(text.includes('关系：团子（宠物）→ 木子'), text)
+  assert.ok(text.includes('关联事实：木子 · 喜欢 · 听歌'), text)
+})
+
+await test('memory-api/state 返回 relations（≤50）与 relationCount；snapshot 也带', async () => {
+  memory.clear()
+  memory.upsertEntity('木子', { type: 'person' })
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  memory.upsertEntity('杭州', { type: 'place' })
+  memory.upsertRelation({ from: '团子', to: '木子', type: 'co', weight: 0.6 })
+  memory.upsertRelation({ from: '木子', to: '杭州', type: '住在', weight: 0.8 })
+  const registration = memFake.registrations.find(item => item.path === '/dsh-aura/memory-api')
+  assert.ok(registration)
+  const response = {
+    status: 0,
+    body: '',
+    writeHead(status) {
+      this.status = status
+    },
+    end(chunk) {
+      this.body = String(chunk ?? '')
+    },
+  }
+  await registration.handler({
+    method: 'GET',
+    url: '/dsh-aura/memory-api/state?limit=12',
+    headers: { host: '127.0.0.1:3080' },
+  }, response)
+  assert.equal(response.status, 200)
+  const body = JSON.parse(response.body)
+  assert.equal(Array.isArray(body.relations), true)
+  assert.equal(body.relations.length, 2)
+  assert.ok(body.relations.length <= 50)
+  assert.ok(body.relations.every(rel => rel.fromName && rel.toName && rel.type))
+  assert.equal(body.relationCount, 2)
+  assert.ok(body.relations.some(rel => rel.fromName === '木子' && rel.toName === '杭州' && rel.type === '住在'))
+  const snap = memory.snapshot()
+  assert.equal(Array.isArray(snap.relations), true)
+  assert.equal(snap.relationCount, 2)
+  assert.ok(snap.relations.some(rel => rel.fromName === '团子' && rel.toName === '木子'))
+})
+
+// ---------- 16. 关系整理 / 预算压力 ----------
+section('16. compactRelations 衰减清理 / context 预算压力')
+
+await test('compactRelations：清悬空与自环、co 90 天减半、低于 0.15 删除', () => {
+  const now = Date.now()
+  const day = 86_400_000
+  const graph = emptyMemory()
+  const a = upsertEntity(graph, '木子', { type: 'person' }, now).entity
+  const b = upsertEntity(graph, '团子', { type: 'pet' }, now).entity
+  graph.relations = [
+    { id: 'r-keep', from: a.id, to: b.id, type: 'co', weight: 0.4, firstSeenAt: now - 200 * day, lastSeenAt: now - 100 * day },
+    { id: 'r-drop', from: b.id, to: a.id, type: 'co', weight: 0.2, firstSeenAt: now - 200 * day, lastSeenAt: now - 200 * day },
+    { id: 'r-dangling', from: a.id, to: 'gone', type: '养', weight: 0.9, firstSeenAt: now, lastSeenAt: now },
+    { id: 'r-self', from: a.id, to: a.id, type: '自己', weight: 0.9, firstSeenAt: now, lastSeenAt: now },
+    { id: 'r-fresh', from: a.id, to: b.id, type: '养', weight: 0.8, firstSeenAt: now, lastSeenAt: now },
+  ]
+  const result = compactRelations(graph, now)
+  assert.equal(graph.relations.some(rel => rel.id === 'r-dangling'), false)
+  assert.equal(graph.relations.some(rel => rel.id === 'r-self'), false)
+  assert.equal(graph.relations.find(rel => rel.id === 'r-keep').weight, 0.2, '90 天没更新的 co 边减半')
+  assert.equal(graph.relations.some(rel => rel.id === 'r-drop'), false, '减半后 <0.15 应删除')
+  assert.equal(graph.relations.find(rel => rel.id === 'r-fresh').weight, 0.8, '新边不衰减')
+  assert.equal(result.relationsDecayed, 2)
+  assert.equal(result.relationsPruned, 3)
+})
+
+await test('context 预算压力：笔记/事实/关系/事件都多时仍 ≤240，笔记优先', () => {
+  memory.clear()
+  for (let index = 0; index < 5; index += 1) {
+    memory.note('user', `笔记内容${index}-${'很长'.repeat(6)}`, 0.6 + index * 0.05)
+  }
+  memory.upsertEntity('木子', { type: 'person' })
+  memory.upsertEntity('团子', { type: 'pet', aliases: ['猫'] })
+  for (let index = 0; index < 6; index += 1) {
+    memory.addFact({ subject: '木子', predicate: `爱好${index}`, value: `兴趣${index}`, text: `木子爱好${index}是兴趣${index}` })
+  }
+  for (let index = 0; index < 4; index += 1) {
+    memory.upsertRelation({ from: '团子', to: '木子', type: `边${index}`, weight: 0.8 })
+  }
+  for (let index = 0; index < 6; index += 1) {
+    memory.addEvent(eventText(index, Date.now() + index * 1000))
+  }
+  const context = memory.renderContext(Date.now(), { lastUserText: '木子' })
+  assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET, `预算应 ≤${MEMORY_CONTEXT_BUDGET}，实际 ${lengthOf(context)}`)
+  assert.ok(context.startsWith('（关于对方/你们，你记得：'), '笔记应最先保留')
+  assert.ok(context.includes('（你记得：'), '直接事实次优先')
+  assert.ok(memory.snapshot().relationCount >= 4)
+})
+
 
 // 收尾
 soulFake.dispose()

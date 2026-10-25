@@ -8,6 +8,7 @@
  *     facts: [{ id, subject, predicate, value, text, confidence, source,
  *               firstSeenAt, lastSeenAt, supersededBy, lastDecayAt }],
  *     entities: [{ id, name, type, aliases, firstSeenAt, lastSeenAt }],
+ *     relations: [{ id, from, to, type, weight, firstSeenAt, lastSeenAt }],
  *     reflection: { lastReflectAt, lastSource, userState, pendingDue, lastCompactDayKey }
  *   }
  *
@@ -16,7 +17,8 @@
  * - 写盘统一 tmp + rename（本机文件系统不允许 hardlink）。
  * - 读到坏 JSON 时先把原文件备份成 memory.json.corrupt（已存在则加时间戳），再回退空记忆；
  *   绝不静默覆盖用户还能人工抢救的文件。
- * - v1 读取时自动补 facts/entities 并写回一次（损坏文件不写回）。
+ * - v1 读取时自动补 facts/entities 并写回一次（损坏文件不写回）；relations 缺失同样补 []。
+ * - 关系边 from/to 只认 entity id：坏值（悬空/自环/重复）在归一化时清掉。
  * - 首次升级：memory.json 不存在且旧 soul.memory 有内容时迁移一次，迁移前备份（失败只 warn），
  *   写完后清掉 soul.memory，之后 soul.json 不再存短期记忆。
  * - 本模块不注册定时器、不依赖 Cordis；纯 Host 侧文件存储，方便自测与以后复用。
@@ -59,6 +61,19 @@ export const ENTITY_ALIAS_MAX = 8
 export const FACT_SOURCES = Object.freeze(['user', 'aura', 'reflection'])
 export const ENTITY_TYPES = Object.freeze(['person', 'pet', 'place', 'project', 'other'])
 /** 周期整理：多久没被确认的事实开始衰减、已取代事实保留多久、无关联实体保留多久。 */
+/**
+ * 关系边（实体图）上限与阈值。
+ * - from/to 用 entity id，名字/别名只用于解析与展示。
+ * - co（共现）边无向：同一对实体只留一条，重复出现 +0.1。
+ */
+export const RELATION_LIMIT = 300
+export const RELATION_TYPE_MAX = 16
+export const RELATION_CO = 'co'
+export const RELATION_FACT_WEIGHT = 0.8
+export const RELATION_CO_BASE = 0.3
+export const RELATION_CO_STEP = 0.1
+export const RELATION_CO_DECAY_DAYS = 90
+export const RELATION_WEIGHT_MIN = 0.15
 export const FACT_DECAY_AFTER_DAYS = 30
 export const FACT_DECAY_PER_DAY = 0.02
 export const FACT_CONFIDENCE_FLOOR = 0.3
@@ -107,6 +122,7 @@ export function emptyMemory() {
     topics: {},
     facts: [],
     entities: [],
+    relations: [],
     reflection: {
       lastReflectAt: 0,
       lastSource: '',
@@ -237,6 +253,20 @@ export function addFact(memory, input = {}, now = Date.now()) {
     String(input.text ?? '').trim() || `${subject}${predicate}${value}`,
     FACT_TEXT_MAX,
   )
+  // 事实卡同时落一条关系边：subject 和 value 都能解析到实体（名字/别名）时。
+  // 解析失败（常见：subject 是昵称但还没建实体）就安静跳过，不影响事实写入。
+  const linkRelation = () => {
+    const fromEntity = resolveEntity(memory, subject)
+    const toEntity = resolveEntity(memory, value)
+    if (!fromEntity || !toEntity || fromEntity.id === toEntity.id) return null
+    const linked = upsertRelation(memory, {
+      from: fromEntity.id,
+      to: toEntity.id,
+      type: predicate,
+      weight: RELATION_FACT_WEIGHT,
+    }, at)
+    return linked && linked.ok ? linked.relation : null
+  }
   const active = memory.facts.filter((fact) => fact && !fact.supersededBy
     && fact.subject === subject && fact.predicate === predicate)
   const sameValue = active.find((fact) => fact.value === value)
@@ -246,7 +276,7 @@ export function addFact(memory, input = {}, now = Date.now()) {
     sameValue.lastDecayAt = at
     if (source === 'user' && sameValue.source !== 'user') sameValue.source = source
     if (Array.from(text).length > Array.from(String(sameValue.text ?? '')).length) sameValue.text = text
-    return { ok: true, fact: sameValue, created: false, merged: true, superseded: 0 }
+    return { ok: true, fact: sameValue, created: false, merged: true, superseded: 0, relation: linkRelation() }
   }
   const inherited = active.reduce((max, fact) => Math.max(max, asNumber(fact.confidence, 0)), 0)
   const fact = {
@@ -270,7 +300,7 @@ export function addFact(memory, input = {}, now = Date.now()) {
   }
   memory.facts.push(fact)
   pruneFacts(memory)
-  return { ok: true, fact, created: true, merged: false, superseded: active.length }
+  return { ok: true, fact, created: true, merged: false, superseded: active.length, relation: linkRelation() }
 }
 
 const TOKEN_STOP = new Set(Array.from('的了吗呢吧啊呀哦嗯我你他她它在是有和就不都很还也这那么怎什'))
@@ -436,6 +466,272 @@ export function queryEntities(memory, query, limit = 2, now = Date.now(), option
     return options && options.fallback === false ? [] : listEntities(memory, max)
   }
   return scored.slice(0, max).map((item) => item.entity)
+}
+
+// ---------- 关系图（实体之间的边） ----------
+
+function relationType(value) {
+  return codepointSlice(String(value ?? '').trim(), RELATION_TYPE_MAX) || RELATION_CO
+}
+
+function normalizeRelation(raw, now, entityIds) {
+  if (!raw || typeof raw !== 'object') return null
+  const type = relationType(raw.type)
+  const from = asString(raw.from, '').trim()
+  const to = asString(raw.to, '').trim()
+  if (!from || !to || from === to) return null
+  // from/to 必须是已知 entity id；悬空边直接丢弃（compactRelations 也会清）。
+  if (entityIds && (!entityIds.has(from) || !entityIds.has(to))) return null
+  const firstSeenAt = asNumber(raw.firstSeenAt, now)
+  return {
+    id: asString(raw.id, '').trim() || newId('rel'),
+    from,
+    to,
+    type,
+    weight: clamp(asNumber(raw.weight, RELATION_FACT_WEIGHT), 0, 1),
+    firstSeenAt,
+    lastSeenAt: Math.max(firstSeenAt, asNumber(raw.lastSeenAt, firstSeenAt)),
+  }
+}
+
+/** 关系边超上限时裁剪：先删 weight 最低的，再删最久没更新的。 */
+export function pruneRelations(memory) {
+  if (!memory || typeof memory !== 'object') return 0
+  const relations = asArray(memory.relations)
+  if (relations.length <= RELATION_LIMIT) {
+    memory.relations = relations
+    return 0
+  }
+  const ranked = relations.slice().sort((a, b) => {
+    const weightDelta = asNumber(a?.weight, 0) - asNumber(b?.weight, 0)
+    if (weightDelta !== 0) return weightDelta
+    return asNumber(a?.lastSeenAt, 0) - asNumber(b?.lastSeenAt, 0)
+  })
+  const remove = new Set(ranked.slice(0, relations.length - RELATION_LIMIT))
+  memory.relations = relations.filter((relation) => !remove.has(relation))
+  return remove.size
+}
+
+/** 按 entity id / 名字 / 别名找实体（只认精确匹配，不做模糊）。 */
+export function resolveEntity(memory, nameOrId) {
+  const key = String(nameOrId ?? '').trim()
+  if (!key) return null
+  const entities = asArray(memory?.entities).filter((entity) => entity && entity.name)
+  const byId = entities.find((entity) => entity.id === key)
+  if (byId) return byId
+  const lower = key.toLowerCase()
+  return entities.find((entity) => String(entity.name ?? '').toLowerCase() === lower
+    || asArray(entity.aliases).some((alias) => String(alias ?? '').toLowerCase() === lower)) || null
+}
+
+/**
+ * 文本里出现的实体（名字/别名子串命中）。
+ * 单字名（如「猫」）噪声太大，只认 ≥2 字的；同一实体只算一次。
+ */
+export function entitiesInText(memory, text) {
+  const haystack = String(text ?? '').trim().toLowerCase()
+  const found = []
+  if (!haystack) return found
+  for (const entity of asArray(memory?.entities)) {
+    if (!entity || !entity.name) continue
+    const names = [entity.name, ...asArray(entity.aliases)]
+      .map((name) => String(name ?? '').trim())
+      .filter((name) => Array.from(name).length >= 2)
+    if (names.length === 0) continue
+    if (names.some((name) => haystack.includes(name.toLowerCase()))) found.push(entity)
+  }
+  return found
+}
+
+/**
+ * 写入/加权一条关系边（原地修改 memory）。
+ * - from/to 可以是 entity id，也可以是名字/别名；解析不到就返回 ok:false；
+ * - 同 from+to+type 的边只保留一条：weight 取较大值，firstSeenAt 取更早，lastSeenAt 刷新。
+ * 返回 { ok, relation, created, reason? }。
+ */
+export function upsertRelation(memory, input = {}, now = Date.now()) {
+  if (!memory || typeof memory !== 'object' || !input || typeof input !== 'object') {
+    return { ok: false, reason: 'empty' }
+  }
+  if (!Array.isArray(memory.relations)) memory.relations = []
+  const at = asNumber(now, Date.now())
+  const type = relationType(input.type)
+  const fromEntity = resolveEntity(memory, input.from)
+  const toEntity = resolveEntity(memory, input.to)
+  if (!fromEntity || !toEntity) return { ok: false, reason: 'unknown-entity' }
+  if (fromEntity.id === toEntity.id) return { ok: false, reason: 'self' }
+  const weight = clamp(asNumber(input.weight, RELATION_FACT_WEIGHT), 0, 1)
+  // co 边无向：同一对实体反向重复也只留一条（保留先写入的方向）。
+  const existing = memory.relations.find((relation) => {
+    if (!relation || relation.type !== type) return false
+    if (type === RELATION_CO) {
+      return (relation.from === fromEntity.id && relation.to === toEntity.id)
+        || (relation.from === toEntity.id && relation.to === fromEntity.id)
+    }
+    return relation.from === fromEntity.id && relation.to === toEntity.id
+  })
+  if (existing) {
+    existing.weight = clamp(Math.max(asNumber(existing.weight, 0), weight), 0, 1)
+    existing.firstSeenAt = Math.min(asNumber(existing.firstSeenAt, at), at)
+    existing.lastSeenAt = Math.max(asNumber(existing.lastSeenAt, 0), at)
+    return { ok: true, relation: existing, created: false }
+  }
+  const relation = {
+    id: newId('rel'),
+    from: fromEntity.id,
+    to: toEntity.id,
+    type,
+    weight,
+    firstSeenAt: at,
+    lastSeenAt: at,
+  }
+  memory.relations.push(relation)
+  pruneRelations(memory)
+  return { ok: true, relation, created: true }
+}
+
+function entityIndex(memory) {
+  const map = new Map()
+  for (const entity of asArray(memory?.entities)) {
+    if (entity && entity.id) map.set(entity.id, entity)
+  }
+  return map
+}
+
+/** 给面板/文案用的关系视图：边两端带名字和类型。 */
+function relationView(index, relation) {
+  const from = index.get(relation.from)
+  const to = index.get(relation.to)
+  return {
+    id: relation.id,
+    from: relation.from,
+    to: relation.to,
+    type: relation.type,
+    weight: asNumber(relation.weight, 0),
+    firstSeenAt: asNumber(relation.firstSeenAt, 0),
+    lastSeenAt: asNumber(relation.lastSeenAt, 0),
+    fromName: from ? String(from.name ?? '') : '',
+    fromType: from ? String(from.type ?? 'other') : 'other',
+    toName: to ? String(to.name ?? '') : '',
+    toType: to ? String(to.type ?? 'other') : 'other',
+  }
+}
+
+/** 最重/最新的关系边（跳过悬空边）。 */
+export function listRelations(memory, limit = 50) {
+  const max = clamp(limit, 1, RELATION_LIMIT)
+  const index = entityIndex(memory)
+  return asArray(memory?.relations)
+    .filter((relation) => relation && index.has(relation.from) && index.has(relation.to)
+      && relation.from !== relation.to)
+    .map((relation) => relationView(index, relation))
+    .sort((a, b) => {
+      const weightDelta = b.weight - a.weight
+      if (weightDelta !== 0) return weightDelta
+      return b.lastSeenAt - a.lastSeenAt
+    })
+    .slice(0, max)
+}
+
+/** 某个实体（id/名字/别名）的 1 跳关系边。 */
+export function relationsForEntity(memory, nameOrId, options = {}) {
+  const entity = resolveEntity(memory, nameOrId)
+  if (!entity) return []
+  const opts = options && typeof options === 'object' ? options : {}
+  // 注意：clamp(undefined, …) 会退化成下限，这里必须显式给默认 8。
+  const max = clamp(opts.limit === undefined ? 8 : opts.limit, 1, 20)
+  const index = entityIndex(memory)
+  return asArray(memory?.relations)
+    .filter((relation) => relation && (relation.from === entity.id || relation.to === entity.id)
+      && index.has(relation.from) && index.has(relation.to))
+    .map((relation) => relationView(index, relation))
+    .sort((a, b) => {
+      const weightDelta = b.weight - a.weight
+      if (weightDelta !== 0) return weightDelta
+      return b.lastSeenAt - a.lastSeenAt
+    })
+    .slice(0, max)
+}
+
+/**
+ * 关系图整理（原地修改 memory）：
+ * - 清悬空实体边 / 自环 / 坏边；
+ * - co 边 90 天没更新 weight 减半（四舍五入到 0.001）；
+ * - 低于 0.15 的边删除；
+ * - 最后按 300 上限裁剪。
+ */
+export function compactRelations(memory, now = Date.now()) {
+  const result = { relationsPruned: 0, relationsDecayed: 0 }
+  if (!memory || typeof memory !== 'object') return result
+  const at = asNumber(now, Date.now())
+  const ids = new Set(asArray(memory.entities).filter((entity) => entity && entity.id).map((entity) => entity.id))
+  const kept = []
+  for (const relation of asArray(memory.relations)) {
+    if (!relation || !relation.from || !relation.to) {
+      result.relationsPruned += 1
+      continue
+    }
+    if (relation.from === relation.to || !ids.has(relation.from) || !ids.has(relation.to)) {
+      result.relationsPruned += 1
+      continue
+    }
+    let weight = clamp(asNumber(relation.weight, 0), 0, 1)
+    if (relation.type === RELATION_CO
+      && at - asNumber(relation.lastSeenAt, at) > RELATION_CO_DECAY_DAYS * DAY_MS) {
+      weight = Math.round(weight * 0.5 * 1000) / 1000
+      result.relationsDecayed += 1
+    }
+    if (weight < RELATION_WEIGHT_MIN) {
+      result.relationsPruned += 1
+      continue
+    }
+    relation.weight = weight
+    kept.push(relation)
+  }
+  memory.relations = kept
+  result.relationsPruned += pruneRelations(memory)
+  return result
+}
+
+/**
+ * 同一段文本里出现的多个实体两两建/加 co 边：
+ * 首次 0.3，之后每出现一次 +0.1（上限 1），每次出现都刷新 lastSeenAt。
+ * entities 可以是实体对象、id 或名字。
+ */
+export function linkCooccurrence(memory, entities, now = Date.now()) {
+  if (!memory || typeof memory !== 'object') return { edges: 0 }
+  const at = asNumber(now, Date.now())
+  const unique = []
+  const seen = new Set()
+  for (const item of asArray(entities)) {
+    const entity = typeof item === 'string'
+      ? resolveEntity(memory, item)
+      : (item && item.id ? item : resolveEntity(memory, item?.name))
+    if (!entity || !entity.id || seen.has(entity.id)) continue
+    seen.add(entity.id)
+    unique.push(entity)
+  }
+  if (unique.length < 2) return { edges: 0 }
+  let edges = 0
+  for (let i = 0; i < unique.length; i += 1) {
+    for (let j = i + 1; j < unique.length; j += 1) {
+      const existing = asArray(memory.relations).find((relation) => relation
+        && relation.type === RELATION_CO
+        && ((relation.from === unique[i].id && relation.to === unique[j].id)
+          || (relation.from === unique[j].id && relation.to === unique[i].id)))
+      const next = existing
+        ? Math.min(1, Math.round((asNumber(existing.weight, RELATION_CO_BASE) + RELATION_CO_STEP) * 1000) / 1000)
+        : RELATION_CO_BASE
+      const linked = upsertRelation(memory, {
+        from: unique[i].id,
+        to: unique[j].id,
+        type: RELATION_CO,
+        weight: next,
+      }, at)
+      if (linked.ok) edges += 1
+    }
+  }
+  return { edges }
 }
 
 // ---------- 周期整理 ----------
@@ -648,6 +944,28 @@ export function normalizeMemory(raw, now = Date.now()) {
       return true
     })
   pruneEntities(base)
+  // relations：from/to 必须是已知 entity id；同一条边（from+to+type）归一化时合并。
+  // 用 pruneEntities 之后的 id 集合，避免实体超上限被裁掉后留下悬空边。
+  const liveEntityIds = new Set(base.entities.map((entity) => entity.id))
+  const relationSeen = new Map()
+  for (const rawRelation of asArray(raw.relations)) {
+    const relation = normalizeRelation(rawRelation, now, liveEntityIds)
+    if (!relation) continue
+    const ends = relation.type === RELATION_CO
+      ? [relation.from, relation.to].sort().join('\u0001')
+      : `${relation.from}\u0001${relation.to}`
+    const key = `${ends}\u0001${relation.type}`
+    const existing = relationSeen.get(key)
+    if (!existing) {
+      relationSeen.set(key, relation)
+      continue
+    }
+    existing.weight = Math.max(asNumber(existing.weight, 0), asNumber(relation.weight, 0))
+    existing.firstSeenAt = Math.min(asNumber(existing.firstSeenAt, relation.firstSeenAt), relation.firstSeenAt)
+    existing.lastSeenAt = Math.max(asNumber(existing.lastSeenAt, 0), asNumber(relation.lastSeenAt, 0))
+  }
+  base.relations = [...relationSeen.values()]
+  pruneRelations(base)
   const reflection = asObject(raw.reflection)
   const lastReflectAt = reflection.lastReflectAt !== undefined ? reflection.lastReflectAt : raw.lastReflectAt
   const userState = reflection.userState !== undefined ? reflection.userState : raw.userState
@@ -671,6 +989,7 @@ export function hasMemoryContent(memory) {
   if (asArray(memory.events).length > 0) return true
   if (NOTE_CATEGORIES.some((key) => asArray(memory.notes?.[key]).length > 0)) return true
   if (asArray(memory.facts).length > 0 || asArray(memory.entities).length > 0) return true
+  if (asArray(memory.relations).length > 0) return true
   return Object.keys(asObject(memory.topics)).length > 0
 }
 
@@ -787,6 +1106,7 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
         asNumber(record.version, 0) < MEMORY_VERSION
         || !Array.isArray(record.facts)
         || !Array.isArray(record.entities)
+        || !Array.isArray(record.relations)
         || !record.reflection || typeof record.reflection !== 'object'
         || !('lastCompactDayKey' in record.reflection)
       )
@@ -863,9 +1183,39 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
     },
 
     compactFacts(now = Date.now()) {
-      let result = { factsMerged: 0, factsPruned: 0, factsDecayed: 0, entitiesPruned: 0 }
+      let result = {
+        factsMerged: 0, factsPruned: 0, factsDecayed: 0, entitiesPruned: 0,
+        relationsPruned: 0, relationsDecayed: 0,
+      }
       api.update((memory) => {
-        result = compactMemoryFacts(memory, now)
+        result = { ...compactMemoryFacts(memory, now), ...compactRelations(memory, now) }
+        return memory
+      })
+      return result
+    },
+
+    /** 关系边便捷入口（v2.1 实体图）。 */
+    upsertRelation(input = {}, now = Date.now()) {
+      let result = { ok: false }
+      api.update((memory) => {
+        result = upsertRelation(memory, input, now)
+        return memory
+      })
+      return result
+    },
+
+    listRelations(limit = 50) {
+      return listRelations(api.read(), limit)
+    },
+
+    relationsForEntity(nameOrId, options = {}) {
+      return relationsForEntity(api.read(), nameOrId, options)
+    },
+
+    compactRelations(now = Date.now()) {
+      let result = { relationsPruned: 0, relationsDecayed: 0 }
+      api.update((memory) => {
+        result = compactRelations(memory, now)
         return memory
       })
       return result
@@ -893,6 +1243,7 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
         topics: Object.keys(asObject(memory.topics)).length,
         facts: asArray(memory.facts).length,
         entities: asArray(memory.entities).length,
+        relations: asArray(memory.relations).length,
         pendingDue: asArray(memory.reflection?.pendingDue).length,
         lastReflectAt: asNumber(memory.reflection?.lastReflectAt, 0),
         userState: memory.reflection?.userState ?? null,
@@ -929,6 +1280,7 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
         topics: legacy?.topics,
         facts: legacy?.facts,
         entities: legacy?.entities,
+        relations: legacy?.relations,
         reflection: {
           lastReflectAt: legacy?.lastReflectAt,
           lastSource: legacy?.lastSource,
@@ -965,6 +1317,7 @@ export function createMemoryStore({ home, log, snapshotSync, fileName = MEMORY_F
         topics: Object.keys(candidate.topics).length,
         facts: candidate.facts.length,
         entities: candidate.entities.length,
+        relations: candidate.relations.length,
         pendingDue: candidate.reflection.pendingDue.length,
         backup: backup && backup.id ? backup.id : '',
         cleared,

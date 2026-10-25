@@ -1,5 +1,6 @@
 /**
- * 记忆层（Host 侧）：短期事件流 / 长期笔记 / 话题索引 / 关键词召回 / 反思 / 记忆工具。
+ * 记忆层（Host 侧）：短期事件流 / 长期笔记 / 话题索引 / 关键词召回 / 反思 / 记忆工具 /
+ * 实体图（facts → entities → relations，1 跳召回）。
  *
  * 设计依据：docs/aura-soul-design.md 的 C（记忆）、E.4（context order 40）、E.5.2/E.5.3（soul_note/soul_recall）。
  *
@@ -23,37 +24,50 @@ import {
   MEMORY_VERSION,
   FACT_LIMIT,
   ENTITY_LIMIT,
+  RELATION_LIMIT,
   FACT_TEXT_MAX,
   addFact as addFactToMemory,
   compactMemoryFacts,
+  compactRelations,
   createMemoryStore,
   emptyMemory,
+  entitiesInText,
   forgetFact as forgetFactInMemory,
   hasMemoryContent,
+  linkCooccurrence,
   listEntities as listEntitiesInMemory,
   listFacts as listFactsInMemory,
+  listRelations as listRelationsInMemory,
   queryEntities as queryEntitiesInMemory,
   queryFacts as queryFactsInMemory,
+  relationsForEntity as relationsForEntityInMemory,
   upsertEntity as upsertEntityInMemory,
+  upsertRelation as upsertRelationInMemory,
 } from './memory-store.js'
 
 export const SUMMARY_MAX = 80
-/** 记忆上下文总预算：v2 从 180 提到 240（事实卡/实体卡也进来）。 */
+/** 记忆上下文总预算：v2 从 180 提到 240（事实卡/实体卡/1 跳关系也进来）。 */
 export const MEMORY_CONTEXT_BUDGET = 240
 export const MEMORY_CONTEXT_BUDGET_MAX = 260
-/** 面板事实/实体卡只读接口（web.js 的 /state 不透传新字段，这里另开一个小路由）。 */
+/** 面板事实/实体卡/关系只读接口（web.js 的 /state 不透传新字段，这里另开一个小路由）。 */
 export const MEMORY_API_PREFIX = '/dsh-aura/memory-api'
 
 /** 事实卡 / 实体卡纯函数从存储层导出（memory.js 是公共入口）。 */
 export {
   addFactToMemory as addFact,
   compactMemoryFacts,
+  compactRelations,
+  entitiesInText,
   forgetFactInMemory as forgetFact,
+  linkCooccurrence,
   listEntitiesInMemory as listEntities,
   listFactsInMemory as listFacts,
+  listRelationsInMemory as listRelations,
   queryEntitiesInMemory as queryEntities,
   queryFactsInMemory as queryFacts,
+  relationsForEntityInMemory as relationsForEntity,
   upsertEntityInMemory as upsertEntity,
+  upsertRelationInMemory as upsertRelation,
 }
 
 export const NOTE_MAX_CHARS = 80
@@ -542,10 +556,71 @@ export function extractFacts(text, options = {}) {
   return result
 }
 
+/** 关系边文案：团子（宠物）—养→ 木子；co 共现边用「→」。 */
+function relationText(relation) {
+  const fromLabel = `${relation.fromName}（${ENTITY_TYPE_LABELS[relation.fromType] || '其他'}）`
+  const arrow = relation.type === 'co' ? '→ ' : `—${relation.type}→ `
+  return `${fromLabel}${arrow}${relation.toName}`
+}
+
+/** 事实卡的 subject/value 是否命中某个实体名（1 跳召回用）。 */
+function factTouchesEntity(fact, name) {
+  const key = String(name ?? '').trim().toLowerCase()
+  if (!key) return false
+  const subject = String(fact.subject ?? '').trim().toLowerCase()
+  const value = String(fact.value ?? '').trim().toLowerCase()
+  return subject === key || subject.includes(key) || value === key || value.includes(key)
+}
+
+/**
+ * 1 跳召回：query 命中的实体 → 它的关系边 → 邻居实体的相关事实。
+ * 默认关系 3 条 / 关联事实 2 条（soul_recall 放宽到 6/3），可用 options 覆盖。
+ * 只认真正命中的实体（fallback:false），不拿“最近实体”凑边，避免把无关记忆带进来。
+ */
+function recallOneHop(memory, query, options = {}) {
+  const now = asNumber(options.now, Date.now())
+  const hits = queryEntitiesInMemory(memory, query, 2, now, { fallback: false })
+  const relations = []
+  const seenRelations = new Set()
+  // 同一对实体只讲一条：typed 边（养/喜欢/住在）weight 更高，会先于 co 边出现。
+  const seenPairs = new Set()
+  const neighbors = new Map()
+  for (const entity of hits) {
+    for (const relation of relationsForEntityInMemory(memory, entity.id, { limit: 4 })) {
+      if (seenRelations.has(relation.id)) continue
+      seenRelations.add(relation.id)
+      const pairKey = [relation.from, relation.to].sort().join('|')
+      if (seenPairs.has(pairKey)) continue
+      seenPairs.add(pairKey)
+      relations.push(relation)
+      const otherId = relation.from === entity.id ? relation.to : relation.from
+      const otherName = relation.from === entity.id ? relation.toName : relation.fromName
+      if (otherName) neighbors.set(otherId, otherName)
+    }
+  }
+  const relationLimit = clamp(asNumber(options.relationLimit, 3), 1, 10)
+  const factLimit = clamp(asNumber(options.factLimit, 2), 0, 6)
+  const topRelations = relations.slice(0, relationLimit)
+  const facts = []
+  if (neighbors.size > 0 && factLimit > 0) {
+    const excluded = new Set(asArray(options.excludeFacts).map((fact) => fact?.id))
+    const names = [...neighbors.values()]
+    for (const fact of asArray(memory?.facts)) {
+      if (!fact || fact.supersededBy || excluded.has(fact.id)) continue
+      if (facts.some((item) => item.id === fact.id)) continue
+      if (!names.some((name) => factTouchesEntity(fact, name))) continue
+      facts.push(fact)
+      if (facts.length >= factLimit) break
+    }
+  }
+  return { relations: topRelations, facts }
+}
+
 /**
  * 记忆上下文段（context order 40）。
  * source 优先是 memoryStore（read()），也兼容旧 soul 对象/句柄。
- * 预算 ≤240；只放最近 2 条事件 + 检索 top 3 笔记 + top 3 事实 + top 2 实体。
+ * 总预算 ≤240，优先级：笔记 → 直接事实/实体 → 1 跳关系/关联事实 → 最近事件 → 念头 → 话题。
+ * 任一优先级放不下就跳过（后面的更靠后），最后再按预算硬截断。
  */
 export function renderMemoryContext(source, config = {}, options = {}) {
   if (config?.soulEnabled === false) return ''
@@ -554,13 +629,28 @@ export function renderMemoryContext(source, config = {}, options = {}) {
   const query = String(options.lastUserText ?? soul?.relation?.lastUserText ?? '')
   const limit = clamp(asNumber(config?.memoryRecallLimit, 3), 1, 3)
   const memory = memoryOf(source)
+  const budget = Math.min(MEMORY_CONTEXT_BUDGET_MAX, Math.max(0, MEMORY_CONTEXT_BUDGET))
   const parts = []
-
-  const notes = recallNotes(memory, query, { limit, now })
-  if (notes.length > 0) {
-    parts.push(`（关于对方/你们，你记得：${notes.map((note) => note.text).join('；')}）`)
+  let used = 0
+  const pushPart = (text) => {
+    const value = String(text ?? '')
+    if (!value) return false
+    const length = codepointLength(value)
+    // 第一段（笔记）允许超预算：后面统一 codepointSlice 截断，
+    // 否则笔记一长，整段上下文会变成空串。
+    if (parts.length > 0 && used + length > budget) return false
+    parts.push(value)
+    used += length
+    return true
   }
 
+  // ① 笔记（最高优先级）
+  const notes = recallNotes(memory, query, { limit, now })
+  if (notes.length > 0) {
+    pushPart(`（关于对方/你们，你记得：${notes.map((note) => note.text).join('；')}）`)
+  }
+
+  // ② 直接事实 + 命中实体
   const facts = queryFactsInMemory(memory, query, 3, now)
   const entities = queryEntitiesInMemory(memory, query, 2, now)
   if (facts.length > 0 || entities.length > 0) {
@@ -568,26 +658,35 @@ export function renderMemoryContext(source, config = {}, options = {}) {
     for (const entity of entities) {
       bits.push(`${entity.name}（${ENTITY_TYPE_LABELS[entity.type] || '其他'}）`)
     }
-    parts.push(`（你记得：${bits.join('；')}）`)
+    pushPart(`（你记得：${bits.join('；')}）`)
   }
 
+  // ③ 1 跳：关系边 + 邻居实体相关事实
+  const hop = recallOneHop(memory, query, { now, excludeFacts: facts })
+  if (hop.relations.length > 0) {
+    pushPart(`（关联：${hop.relations.map(relationText).join('；')}）`)
+  }
+  if (hop.facts.length > 0) {
+    pushPart(`（顺着关系想起：${hop.facts.map((fact) => fact.text).join('；')}）`)
+  }
+
+  // ④ 最近事件
   const recent = recentEvents(memory, EVENT_CONTEXT_RECENT)
   if (recent.length > 0) {
-    parts.push(`（最近：${recent.map((event) => event.summary).join('；')}）`)
+    pushPart(`（最近：${recent.map((event) => event.summary).join('；')}）`)
   }
 
   const pendingThought = soul?.speak?.pendingThought
   if (pendingThought && typeof pendingThought === 'object' && asNumber(pendingThought.expiresAt, 0) > now) {
     const thought = String(pendingThought.text ?? pendingThought.summary ?? '').trim()
-    if (thought) parts.push(`（你上次想说但没说出口的念头：${thought.slice(0, 80)}）`)
+    if (thought) pushPart(`（你上次想说但没说出口的念头：${thought.slice(0, 80)}）`)
   }
 
   const topics = recentTopics(memory, 3, now)
-  if (topics.length > 0 && parts.join('').length < 120) {
-    parts.push(`（最近聊过：${topics.map((item) => item.key).join('、')}）`)
+  if (topics.length > 0 && used < 120) {
+    pushPart(`（最近聊过：${topics.map((item) => item.key).join('、')}）`)
   }
 
-  const budget = Math.min(MEMORY_CONTEXT_BUDGET_MAX, Math.max(0, MEMORY_CONTEXT_BUDGET))
   return codepointSlice(parts.join(''), budget)
 }
 
@@ -839,11 +938,16 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     forgetFact: () => false,
     upsertEntity: () => ({ ok: false }),
     listEntities: () => [],
+    listRelations: () => [],
+    relationsForEntity: () => [],
+    upsertRelation: () => ({ ok: false }),
+    compactRelations: () => ({ relationsPruned: 0, relationsDecayed: 0 }),
     extractFacts: () => ({ facts: [], entities: [] }),
     reflect: async () => ({ ok: false }),
     compact: () => ({
       compacted: 0, notesAdded: 0, eventsLeft: 0,
       factsMerged: 0, factsPruned: 0, factsDecayed: 0, entitiesPruned: 0,
+      relationsPruned: 0, relationsDecayed: 0,
     }),
     onUserMessage: () => {},
     onAssistantMessage: () => {},
@@ -913,13 +1017,23 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     return codepointSlice(nickname, 24)
   }
 
-  /** 用户消息 → 事实卡/实体卡（零 token；规则没命中就不写盘）。 */
+  /** 用户消息 → 事实卡/实体卡 + 实体共现边（零 token；都没命中就不写盘）。 */
   function applyUserFacts(text, now = Date.now(), source = 'user') {
     const extracted = extractFacts(text, { subject: userFactSubject(), now })
-    if (extracted.facts.length === 0 && extracted.entities.length === 0) {
-      return { facts: 0, entities: 0 }
+    const hasFacts = extracted.facts.length > 0 || extracted.entities.length > 0
+    if (!hasFacts) {
+      // 规则没抽到东西时，还要确认这句话是否提到了 ≥2 个已知实体（co 边）；
+      // 都没提到就不写盘，保持“没内容不动磁盘”。
+      let mentioned = []
+      try {
+        mentioned = entitiesInText(store.read(), text)
+      } catch {
+        mentioned = []
+      }
+      if (mentioned.length < 2) return { facts: 0, entities: 0, edges: 0 }
     }
     let facts = 0
+    let edges = 0
     try {
       store.update((memory) => {
         for (const entity of extracted.entities) {
@@ -929,12 +1043,15 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           const result = addFactToMemory(memory, { ...fact, source }, now)
           if (result?.ok) facts += 1
         }
+        // 同一段话里出现的多个实体两两建 co 边（首次 0.3，再次 +0.1）。
+        const coEntities = entitiesInText(memory, text)
+        if (coEntities.length > 1) edges = linkCooccurrence(memory, coEntities, now).edges
         return memory
       })
     } catch (error) {
       logger('[soul] 事实抽取写入失败:', error instanceof Error ? error.message : error)
     }
-    return { facts, entities: extracted.entities.length }
+    return { facts, entities: extracted.entities.length, edges }
   }
 
   // ⓪ 首次升级：soul.memory → memory.json（只发生一次，失败不阻塞启动）
@@ -1037,6 +1154,9 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         if (memory.events.length > EVENT_COMPACT_THRESHOLD) {
           compactEvents(memory, { threshold: EVENT_COMPACT_THRESHOLD })
         }
+        // 同一事件摘要里出现的实体两两建 co 边（首次 0.3，重复出现 +0.1，上限 1）。
+        const coEntities = entitiesInText(memory, event.summary)
+        if (coEntities.length > 1) linkCooccurrence(memory, coEntities, event.at)
         return memory
       })
       return stored
@@ -1465,16 +1585,37 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           for (const entity of Array.isArray(value?.entities) ? value.entities : []) {
             lines.push(`- 实体：${entity.name}（${ENTITY_TYPE_LABELS[entity.type] || '其他'}）`)
           }
+          for (const relation of Array.isArray(value?.relations) ? value.relations : []) {
+            lines.push(`- 关系：${relationText(relation)}`)
+          }
+          for (const fact of Array.isArray(value?.relatedFacts) ? value.relatedFacts : []) {
+            lines.push(`- 关联事实：${fact.subject} · ${fact.predicate} · ${fact.value}`)
+          }
           return [{ type: 'text', text: lines.length > 0 ? lines.join('\n') : '（想不起来了）' }]
         },
       },
       async execute(args = {}) {
         const items = recall(args?.query, { category: args?.category, limit: args?.limit })
         const memory = readMemory()
+        const now = Date.now()
         const limit = clamp(asNumber(args?.limit, 5), 1, 5)
-        const facts = queryFactsInMemory(memory, args?.query, limit, Date.now())
-        const entities = queryEntitiesInMemory(memory, args?.query, 3, Date.now(), { fallback: false })
-        return { items, count: items.length, facts, entities }
+        const facts = queryFactsInMemory(memory, args?.query, limit, now)
+        const entities = queryEntitiesInMemory(memory, args?.query, 3, now, { fallback: false })
+        // soul_recall 是给人看的回忆：关联事实即使同时命中也保留（不同召回路径），
+        // 条数比 context 宽松一点（relations 6 / 关联事实 3）。
+        const hop = recallOneHop(memory, args?.query, {
+          now,
+          relationLimit: 6,
+          factLimit: 3,
+        })
+        return {
+          items,
+          count: items.length,
+          facts,
+          entities,
+          relations: hop.relations,
+          relatedFacts: hop.facts,
+        }
       },
     }))
     ctx.tools?.register?.(defineTool({
@@ -1625,8 +1766,11 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
                 ok: true,
                 facts: listFactsInMemory(memory, limit),
                 entities: listEntitiesInMemory(memory, limit),
+                // 关系边最多 50 条（面板够用，也不至于把 payload 撑大）。
+                relations: listRelationsInMemory(memory, 50),
                 factCount: asArray(memory.facts).filter((fact) => fact && !fact.supersededBy).length,
                 entityCount: asArray(memory.entities).length,
+                relationCount: asArray(memory.relations).length,
               })
               return
             }
@@ -1663,8 +1807,10 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           ...entity,
           aliases: asArray(entity.aliases).slice(),
         })),
+        relations: listRelationsInMemory(memory, 20),
         factCount: asArray(memory.facts).filter((fact) => fact && !fact.supersededBy).length,
         entityCount: asArray(memory.entities).length,
+        relationCount: asArray(memory.relations).length,
         pendingDue: asArray(memory.reflection?.pendingDue).length,
         lastReflectAt: memory.reflection?.lastReflectAt || 0,
         lastCompactDayKey: memory.reflection?.lastCompactDayKey || '',
@@ -1712,6 +1858,8 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       factsPruned: 0,
       factsDecayed: 0,
       entitiesPruned: 0,
+      relationsPruned: 0,
+      relationsDecayed: 0,
       skipped: false,
     }
     try {
@@ -1733,6 +1881,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         })
         if (!memory.reflection || typeof memory.reflection !== 'object') memory.reflection = {}
         const facts = compactMemoryFacts(memory, now)
+        const relations = compactRelations(memory, now)
         result = {
           compacted: events.compacted,
           notesAdded: events.notesAdded,
@@ -1741,6 +1890,8 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           factsPruned: facts.factsPruned,
           factsDecayed: facts.factsDecayed,
           entitiesPruned: facts.entitiesPruned,
+          relationsPruned: relations.relationsPruned,
+          relationsDecayed: relations.relationsDecayed,
           skipped: false,
         }
         memory.reflection.lastCompactDayKey = dayKey
@@ -1837,6 +1988,33 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       return result
     },
     listEntities: (limit = 50) => listEntitiesInMemory(readMemory(), clamp(asNumber(limit, 50), 1, ENTITY_LIMIT)),
+    listRelations: (limit = 50) => listRelationsInMemory(readMemory(), clamp(asNumber(limit, 50), 1, RELATION_LIMIT)),
+    relationsForEntity: (nameOrId, options = {}) => relationsForEntityInMemory(readMemory(), nameOrId, options),
+    upsertRelation: (input = {}) => {
+      let result = { ok: false }
+      try {
+        store.update((memory) => {
+          result = upsertRelationInMemory(memory, input, Date.now())
+          return memory
+        })
+      } catch (error) {
+        logger('[soul] upsertRelation 失败:', error instanceof Error ? error.message : error)
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      }
+      return result
+    },
+    compactRelations: (now = Date.now()) => {
+      let result = { relationsPruned: 0, relationsDecayed: 0 }
+      try {
+        store.update((memory) => {
+          result = compactRelations(memory, now)
+          return memory
+        })
+      } catch (error) {
+        logger('[soul] compactRelations 失败:', error instanceof Error ? error.message : error)
+      }
+      return result
+    },
     extractFacts,
     reflect,
     compact,
@@ -1861,6 +2039,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       MEMORY_VERSION,
       FACT_LIMIT,
       ENTITY_LIMIT,
+      RELATION_LIMIT,
       FACT_TEXT_MAX,
       MEMORY_API_PREFIX,
       ENTITY_TYPE_LABELS,
