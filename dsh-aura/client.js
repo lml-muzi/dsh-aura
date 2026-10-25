@@ -1327,7 +1327,15 @@ ${TRAIL_CSS}
 
     function buildEmotionForm(config) {
       const cfg = asObject(config)
-      return { expressionStyle: styleOf(cfg.expressionStyle) }
+      return {
+        expressionStyle: styleOf(cfg.expressionStyle),
+        emotionScope: cfg.emotionScope === 'all' ? 'all' : 'qq',
+        emotionDecayValenceHours: clampInt(cfg.emotionDecayValenceHours, 1, 72, 3),
+        emotionDecayArousalMinutes: clampInt(cfg.emotionDecayArousalMinutes, 5, 1440, 45),
+        emotionDecayEnergyHours: clampInt(cfg.emotionDecayEnergyHours, 1, 72, 6),
+        emotionRecheckEvery: clampInt(cfg.emotionRecheckEvery, 0, 100, 8),
+        emotionGuardOnNegative: cfg.emotionGuardOnNegative !== false,
+      }
     }
 
     function buildSpeakForm(config) {
@@ -2720,7 +2728,15 @@ ${TRAIL_CSS}
       }
 
       const saveEmotion = () => {
-        void saveBlock('emotion', { expressionStyle: styleOf(emotionForm.expressionStyle) }, 'notice.emotionSaved')
+        void saveBlock('emotion', {
+          expressionStyle: styleOf(emotionForm.expressionStyle),
+          emotionScope: emotionForm.emotionScope === 'all' ? 'all' : 'qq',
+          emotionDecayValenceHours: clampInt(emotionForm.emotionDecayValenceHours, 1, 72, 3),
+          emotionDecayArousalMinutes: clampInt(emotionForm.emotionDecayArousalMinutes, 5, 1440, 45),
+          emotionDecayEnergyHours: clampInt(emotionForm.emotionDecayEnergyHours, 1, 72, 6),
+          emotionRecheckEvery: clampInt(emotionForm.emotionRecheckEvery, 0, 100, 8),
+          emotionGuardOnNegative: emotionForm.emotionGuardOnNegative !== false,
+        }, 'notice.emotionSaved')
       }
 
       const saveSpeak = () => {
@@ -3256,6 +3272,68 @@ ${TRAIL_CSS}
                 onClick: () => setEmotionForm(prev => ({ ...prev, expressionStyle: style })),
               }, t('style.' + style))),
             ),
+          }),
+          h(Row, {
+            label: '作用范围',
+            hint: '只在 QQ 陪伴会话，还是所有会话都注入情绪',
+            control: h('select', {
+              className: 'qqn-input',
+              value: emotionForm.emotionScope,
+              onChange: event => setEmotionForm(prev => ({ ...prev, emotionScope: event.target.value })),
+            },
+              h('option', { value: 'qq' }, '仅 QQ 会话'),
+              h('option', { value: 'all' }, '所有会话'),
+            ),
+          }),
+          h(Row, {
+            label: '愉悦半衰期',
+            hint: '多少小时回落到一半（1–72）',
+            control: h('input', {
+              className: 'qqn-input qqn-input-narrow',
+              type: 'number', min: 1, max: 72,
+              value: emotionForm.emotionDecayValenceHours,
+              onChange: event => setEmotionForm(prev => ({ ...prev, emotionDecayValenceHours: event.target.value })),
+            }),
+          }),
+          h(Row, {
+            label: '唤醒半衰期',
+            hint: '多少分钟回落到一半（5–1440）',
+            control: h('input', {
+              className: 'qqn-input qqn-input-narrow',
+              type: 'number', min: 5, max: 1440,
+              value: emotionForm.emotionDecayArousalMinutes,
+              onChange: event => setEmotionForm(prev => ({ ...prev, emotionDecayArousalMinutes: event.target.value })),
+            }),
+          }),
+          h(Row, {
+            label: '精力半衰期',
+            hint: '多少小时回落到一半（1–72）',
+            control: h('input', {
+              className: 'qqn-input qqn-input-narrow',
+              type: 'number', min: 1, max: 72,
+              value: emotionForm.emotionDecayEnergyHours,
+              onChange: event => setEmotionForm(prev => ({ ...prev, emotionDecayEnergyHours: event.target.value })),
+            }),
+          }),
+          h(Row, {
+            label: 'LLM 复核间隔',
+            hint: '每多少轮让模型复核一次情绪，0 = 关闭',
+            control: h('input', {
+              className: 'qqn-input qqn-input-narrow',
+              type: 'number', min: 0, max: 100,
+              value: emotionForm.emotionRecheckEvery,
+              onChange: event => setEmotionForm(prev => ({ ...prev, emotionRecheckEvery: event.target.value })),
+            }),
+          }),
+          h(Row, {
+            label: '负面情绪守卫',
+            hint: '强负面时对高风险工具加确认，不跳过工具',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: emotionForm.emotionGuardOnNegative !== false,
+              onChange: event => setEmotionForm(prev => ({ ...prev, emotionGuardOnNegative: event.target.checked })),
+            }),
           }),
           lastChange.text || lastChange.at
             ? h('div', { className: 'qqn-mood-note' },
