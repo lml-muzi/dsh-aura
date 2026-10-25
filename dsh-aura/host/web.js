@@ -204,6 +204,52 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
           json(res, 200, { ok: true, pausedHours: hours, result })
           return
         }
+        if (req.method === 'GET' && route === '/debug/loader') {
+          const loader = ctx.get?.('loader')
+          let entries = []
+          try { entries = loader?.entries?.() ?? [] } catch { entries = [] }
+          const summary = entries.map(entry => ({
+            name: entry?.options?.name,
+            baseUrl: entry?.options?.baseUrl,
+            keys: entry?.options ? Object.keys(entry.options) : [],
+          }))
+          const aura = entries.find(entry => String(entry?.options?.name || '') === 'dsh-aura')
+          const info = { ok: true, total: entries.length, hasLoader: !!loader, aura: !!aura, names: summary.filter(item => String(item.name || '').includes('aura')) }
+          if (aura) {
+            info.auraOptions = Object.fromEntries(Object.entries(aura.options || {}).filter(([, value]) => typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'))
+            const internal = loader?.internal
+            info.hasInternal = !!internal && typeof internal.resolveSync === 'function'
+            info.internalVersion = internal?.version
+            if (info.hasInternal) {
+              try {
+                const baseUrl = aura.options?.baseUrl || loader?.baseUrl || import.meta.url
+                const result = internal.version === 'v2'
+                  ? internal.resolveSync(baseUrl, { specifier: 'dsh-aura', attributes: {} })
+                  : internal.resolveSync('dsh-aura', baseUrl, {})
+                info.resolve = result && { url: result.url, version: result.version }
+              } catch (error) {
+                info.resolveError = error instanceof Error ? error.message : String(error)
+              }
+              try {
+                info.profileBase = loader?.baseUrl
+              } catch { /* ignore */ }
+            }
+          }
+          json(res, 200, info)
+          return
+        }
+        if (req.method === 'GET' && route === '/debug/client') {
+          const modules = ctx.get?.('clientModules')
+          const graph = modules?.graph?.()
+          json(res, 200, {
+            ok: true,
+            path: modules?.clientPath?.('dsh-aura'),
+            entries: graph?.entries?.map(entry => ({ id: entry.id, url: entry.url, rev: entry.rev })),
+            batches: graph?.batches,
+            rev: graph?.rev,
+          })
+          return
+        }
         if (req.method === 'POST' && route === '/debug/media') {
           // 本机调试：把一张图/文件按“当前 QQ 被动回复上下文”发出去，验证媒体链路。
           const body = await readBody(req)

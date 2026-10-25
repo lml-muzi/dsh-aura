@@ -42,6 +42,39 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  // ---- 客户端模块自愈 ----
+  // clientModules 会把「解析失败的包」缓存成 null；我们的部署方式是 remove+install 换目录，
+  // 安装空档里它可能刚好扫到一次并缓存失败。之后即使装好也不会再解析，表现就是左侧栏入口消失。
+  // 这里清掉本包的缓存项并重新 flush 一次（字段和 flush 都是公开的）。
+  function healClientModules(label) {
+    try {
+      const modules = ctx.get?.('clientModules')
+      if (!modules || typeof modules.flush !== 'function') return false
+      let changed = false
+      for (const key of [...(modules.pkgMeta?.keys?.() ?? [])]) {
+        if (String(key).includes('dsh-aura')) {
+          modules.pkgMeta.delete(key)
+          changed = true
+        }
+      }
+      for (const [key, value] of [...(modules.sources ?? [])]) {
+        if (value?.loaderName === 'dsh-aura') {
+          modules.sources.delete(key)
+          changed = true
+        }
+      }
+      modules.dirty?.add?.('dsh-aura')
+      const errors = []
+      modules.flush(error => errors.push(error))
+      const ok = modules.graph?.()?.entries?.some(entry => entry.id === 'dsh-aura') === true
+      log(`[aura] 客户端模块自愈（${label}）：cleared=${changed} ok=${ok} errors=${errors.length}`)
+      return ok
+    } catch (error) {
+      log('[aura] 客户端模块自愈失败:', error instanceof Error ? error.message : error)
+      return false
+    }
+  }
+
   // ---- 灵魂层：soul 是唯一观察 session/event 的地方，emotion/memory 订阅它的事件 ----
   const soul = installSoul(ctx, { state, log })
   const disposers = []
@@ -121,6 +154,12 @@ export function apply(ctx, config = {}) {
   }
 
   registerPanelApi(ctx, { state, service, soul, emotion, memory, speak, bridge, log })
+
+  // 安装空档可能污染 clientModules 缓存：稍后自愈两次，第一次成功就不再试
+  if (!healClientModules('immediate')) {
+    setTimeout(() => { healClientModules('retry-1.5s') }, 1500)
+    setTimeout(() => { healClientModules('retry-6s') }, 6000)
+  }
 
   const cfg = state.readConfig()
   if (cfg.autoConnect !== false && cfg.appId && cfg.appSecret) {
