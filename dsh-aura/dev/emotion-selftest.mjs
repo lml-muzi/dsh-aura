@@ -440,11 +440,11 @@ const emotionApi = installEmotion(ctx, {
   log: () => {},
 })
 
-await test('context order 30 已注册，qq_mood 工具已注册', () => {
+await test('context order 30 已注册，soul_mood 工具已注册', () => {
   assert.equal(contexts.length, 1)
   assert.equal(contexts[0].order, 30)
   assert.equal(contexts[0].name, 'aura:emotion')
-  assert.ok(tools.some((tool) => tool.name === 'qq_mood'))
+  assert.ok(tools.some((tool) => tool.name === 'soul_mood'))
 })
 
 await test('snapshot 返回四维 + label + baseline + trend + history(40) + lastChange', () => {

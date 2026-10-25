@@ -1936,12 +1936,7 @@ export function initPersona({ ctx, state, log } = {}) {
     warn('[aura] 人设 API 注册失败:', (error && error.message) || error)
   }
 
-  // 3) Agent 工具 set_persona。
-  try {
-    addDisposer(installPersonaTool(ctx, warn))
-  } catch (error) {
-    warn('[aura] set_persona 工具安装失败:', (error && error.message) || error)
-  }
+  // 3) set_persona 工具已移除：表达方式并入灵魂自由内容，留着只会误用。
 
   function dispose() {
     if (disposed) return

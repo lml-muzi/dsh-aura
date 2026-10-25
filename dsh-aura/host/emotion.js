@@ -876,11 +876,11 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
     }
   }
 
-  // ⑥ qq_mood 工具（模型自报，最终表达权；带限幅与频率约束）
+  // ⑥ soul_mood 工具（模型自报，最终表达权；带限幅与频率约束）
   let lastMoodTurn = -999
   try {
     ctx.tools?.register?.(defineTool({
-      name: 'qq_mood',
+      name: 'soul_mood',
       description: '更新你自己此刻的情绪（这是你的最终表达权）。情绪被这段对话推动时调用；不必每轮都调，明显变化时才调。'
         + '传 cause 说明原因；数值会被限幅，情绪也会随时间自然回落。',
       parameters: {
@@ -890,6 +890,17 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
         energy: { type: 'number', description: '精力 0..1' },
         label: { type: 'string', description: '可选：中文 2~4 字情绪词，如"感动""心虚"' },
         cause: { type: 'string', description: '必填：≤40 字，什么让你这样', required: true },
+        settle: {
+          type: 'object',
+          description: '可选：把这次感受沉淀进长期基线（每维最多 ±0.05/次，每天最多 2 次）',
+          additionalProperties: false,
+          properties: {
+            valence: { type: 'number', description: '愉悦 -1..1' },
+            arousal: { type: 'number', description: '唤醒 0..1' },
+            affection: { type: 'number', description: '亲近 0..1' },
+            energy: { type: 'number', description: '精力 0..1' },
+          },
+        },
       },
       output: {
         schema: { type: 'json' },
@@ -898,7 +909,13 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
       async execute(args = {}) {
         const text = typeof args?.cause === 'string' ? args.cause.trim() : ''
         if (!text) return { ok: false, reason: '缺少 cause：请说明是什么让你有这样的情绪' }
+        const settle = args && typeof args.settle === 'object' && !Array.isArray(args.settle) ? args.settle : null
         const current = readSoul()
+        if (settle) {
+          const shifts = Array.isArray(current.emotion.baselineShifts) ? current.emotion.baselineShifts : []
+          const recent = shifts.filter((at) => Number(at) > Date.now() - 86_400_000)
+          if (recent.length >= 2) return { ok: false, reason: '长期基线每天最多沉淀 2 次，今天先这样' }
+        }
         const turn = Number(current.relation.turns) || 0
         if (turn - lastMoodTurn < 2 && lastMoodTurn >= 0) {
           return { ok: false, reason: '调得太频繁了，下一轮再说' }
@@ -938,11 +955,50 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
         current.emotion.mood.updatedAt = now
         current.emotion.source = 'self'
         regulateEmotion(current, { userPresent: true })
+        // 自报也进历史曲线（权重 0.6，低于事件驱动），但不动长期基线
+        pushHistory(current.emotion, {
+          at: now,
+          valence: Number(t.valence) || 0,
+          arousal: Number(t.arousal) || 0.2,
+          affection: Number(current.emotion.affection) || 0.5,
+          energy: Number(current.emotion.drive.energy) || 0.7,
+          label: t.label,
+          cause: t.cause,
+          weight: 0.6,
+        })
+        let baselineShift = null
+        if (settle) {
+          const limitsBase = { valence: [-1, 1], arousal: [0, 1], affection: [0, 1], energy: [0, 1] }
+          const base = baselineOf(current.emotion, {}, now)
+          let moved = false
+          for (const key of ['valence', 'arousal', 'affection', 'energy']) {
+            if (typeof settle[key] !== 'number' || !Number.isFinite(settle[key])) continue
+            const [lo, hi] = limitsBase[key]
+            const target = clamp(settle[key], lo, hi)
+            const delta = clamp(target - base[key], -0.05, 0.05)
+            if (Math.abs(delta) < 0.0005) continue
+            base[key] = clamp(base[key] + delta, lo, hi)
+            moved = true
+          }
+          if (moved) {
+            base.updatedAt = now
+            current.emotion.baseline = base
+            const shifts = Array.isArray(current.emotion.baselineShifts) ? current.emotion.baselineShifts : []
+            current.emotion.baselineShifts = [...shifts.filter((at) => Number(at) > now - 86_400_000), now]
+            baselineShift = {
+              valence: Math.round(base.valence * 100) / 100,
+              arousal: Math.round(base.arousal * 100) / 100,
+              affection: Math.round(base.affection * 100) / 100,
+              energy: Math.round(base.energy * 100) / 100,
+            }
+          }
+        }
         soul.saveSoon()
         soul.explain({ at: now, kind: 'emotion', source: 'self', label: t.label, cause: t.cause })
         return {
           ok: true,
           label: t.label,
+          baseline: baselineShift,
           state: {
             valence: Math.round((Number(t.valence) || 0) * 100) / 100,
             arousal: Math.round((Number(t.arousal) || 0) * 100) / 100,
@@ -953,7 +1009,7 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
       },
     }))
   } catch (error) {
-    logger('[soul] qq_mood 工具注册失败:', error instanceof Error ? error.message : error)
+    logger('[soul] soul_mood 工具注册失败:', error instanceof Error ? error.message : error)
   }
 
   // ⑦ 安全守卫：强负面 + 风险工具 → 追加确认（fail-closed，只加确认不跳过）

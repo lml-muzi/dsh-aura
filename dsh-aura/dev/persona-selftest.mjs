@@ -229,13 +229,12 @@ await test('section 停用后无论灵魂开关都不注入', async () => {
   await persona.setConfig({ enabled: false })
 })
 
-await test('HTTP 注册为 /dsh-aura/persona-api 前缀；set_persona 工具已注册', () => {
+await test('HTTP 注册为 /dsh-aura/persona-api 前缀；set_persona 工具已移除', () => {
   assert.ok(captured.routes)
   assert.equal(captured.routes.kind, 'prefix')
   assert.equal(captured.routes.path, '/dsh-aura/persona-api')
   assert.equal(typeof captured.routes.handler, 'function')
-  assert.equal(captured.tools.length, 1)
-  assert.equal(captured.tools[0].name, 'set_persona')
+  assert.equal(captured.tools.length, 0)
 })
 
 section('5. 人设预设')
@@ -317,62 +316,9 @@ await test('自建预设只快照风格 / 特质 / 长度 / 语言 / 自定义�
   assert.equal(persona.snapshot().presets['我的预设'], undefined)
 })
 
-section('6. set_persona 工具（审批 / 待确认提议）')
-await test('确认模式下审批允许 → 直接落盘', async () => {
-  await persona.setConfig({ requireToolConfirmation: true, style: 'professional' })
-  let calls = 0
-  approvalService = {
-    config: { policy: 'ask' },
-    async request(request) {
-      calls += 1
-      assert.equal(request.toolName, 'set_persona')
-      return 'allowed-once'
-    },
-  }
-  const tool = captured.tools[0]
-  const result = await tool.execute({ style: 'humorous' }, { agent: { session: {}, ctx: fakeCtx } })
-  assert.equal(result.ok, true)
-  assert.equal(calls, 1)
-  assert.equal(persona.getConfig().style, 'humorous')
-})
-
-await test('审批不可用 → 返回 pending 提议且不落盘，可确认', async () => {
-  approvalService = {
-    config: { policy: 'ask' },
-    async request() {
-      return 'cancelled'
-    },
-  }
-  const tool = captured.tools[0]
-  const result = await tool.execute({ style: 'casual' }, { agent: { session: {}, ctx: fakeCtx } })
-  assert.equal(result.ok, false)
-  assert.equal(result.pending, true)
-  assert.ok(result.proposal)
-  assert.equal(result.proposal.changes.style, 'casual')
-  assert.equal(persona.getConfig().style, 'humorous')
-  assert.ok(persona.getPendingProposal())
-  assert.equal(persona.snapshot().pendingProposal.changes.style, 'casual')
-
-  const confirmed = await persona.confirmPendingProposal()
-  assert.equal(confirmed.ok, true)
-  assert.equal(persona.getConfig().style, 'casual')
-  assert.equal(persona.getPendingProposal(), null)
-})
-
-await test('待确认提议可拒绝', async () => {
-  approvalService = null
-  const tool = captured.tools[0]
-  const result = await tool.execute({ emoji: 'less' }, { agent: { session: {}, ctx: fakeCtx } })
-  assert.equal(result.pending, true)
-  const rejected = persona.rejectPendingProposal()
-  assert.equal(rejected.ok, true)
-  assert.equal(rejected.rejected, true)
-  assert.equal(persona.getPendingProposal(), null)
-  await persona.setConfig({ requireToolConfirmation: false })
-})
-
 section('7. HTTP 路由')
 await test('GET /state 返回 config/presets/presetList/historyCount/configError', async () => {
+  await persona.setConfig({ style: 'casual' })
   const res = fakeRes()
   await captured.routes.handler(fakeReq('GET', '/dsh-aura/persona-api/state'), res)
   assert.equal(res.out.status, 200)
