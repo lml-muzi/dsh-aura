@@ -926,6 +926,43 @@ export function initLife(options = {}) {
     return { ok: true, action: 'status', ...lifeSnapshot(life, now) }
   }
 
+  // ---- 分享欲钩子：生活里发生了什么值得说的事，就往 speak 塞一条 pendingShare ----
+  // 只在 speakShareEnabled !== false 且 speak 提供了 queueShare 时生效；失败不影响生活状态。
+  function shareSpeak() {
+    try {
+      if (readConfig().speakShareEnabled === false) return null
+    } catch {
+      return null
+    }
+    const speak = typeof options.getSpeak === 'function' ? options.getSpeak() : null
+    return speak && typeof speak.queueShare === 'function' ? speak : null
+  }
+
+  function queueLifeShare(text, reason) {
+    const speak = shareSpeak()
+    if (!speak) return
+    try {
+      speak.queueShare({ text, reason, strength: 0.6, ttlMinutes: 120, source: 'life' })
+    } catch (error) {
+      logger('[life] 分享欲入队失败:', errorText(error))
+    }
+  }
+
+  function shareForPlan(result) {
+    if (!result || result.ok !== true) return
+    const state = str(result.state)
+    const activity = sliceCodepoints(str(life.activity).trim(), 40)
+    const worth = Boolean(activity) || state === 'play' || state === 'out' || state === 'rest'
+    if (!worth) return
+    const phrase = { awake: '醒着', work: '在忙', play: '在玩', rest: '在休息', sleep: '在睡', out: '在外面' }[state] || state
+    queueLifeShare(activity ? `我现在${phrase}，${activity}。` : `我现在${phrase}，想跟你说一声。`, `life:plan:${state}`)
+  }
+
+  function shareForWake(result) {
+    if (!result || result.ok !== true || result.woke !== true || result.resumed === true) return
+    queueLifeShare('我刚醒了。', 'life:wake')
+  }
+
   function plan(args = {}) {
     if (closed) return { ok: false, reason: 'life 已卸载' }
     const now = nowFn()
@@ -933,6 +970,7 @@ export function initLife(options = {}) {
     if (result.ok) {
       saveNow()
       emit('plan', { type: 'plan', at: now, state: life.state, source: life.source })
+      shareForPlan(result)
     }
     return result
   }
@@ -945,6 +983,7 @@ export function initLife(options = {}) {
     if (result.ok && (result.woke || result.resumed)) {
       saveNow()
       emit(result.resumed ? 'resume-sleep' : 'wake', { type: result.resumed ? 'resume-sleep' : 'wake', ...result, at: now })
+      shareForWake(result)
     }
     return result
   }

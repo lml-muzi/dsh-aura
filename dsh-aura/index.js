@@ -89,7 +89,8 @@ export function apply(ctx, config = {}) {
   let life
   const soul = installSoul(ctx, { state, log, getLife: () => life?.get?.() ?? life })
   // 生活层：她自己的作息（life.json + soul_life 工具 + 60s 定时器 + /dsh-aura/life-api）
-  life = initLife({ ctx, state, soul, log })
+  // getSpeak 延迟取 speak（life 先建、speak 后建）：plan/wake 时把「正在玩/出门/刚醒」变成分享欲
+  life = initLife({ ctx, state, soul, log, getSpeak: () => speak })
   // 人设（收编 dsh-soul）：独立 persona.json，注入人设段并注册 /dsh-aura/persona-api 与 set_persona 工具
   const persona = initPersona({ ctx, state, log })
   const disposers = []

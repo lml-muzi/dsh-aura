@@ -132,6 +132,8 @@ export const DEFAULT_CONFIG = {
   speakPauseHours: 24,
   speakWakeMode: 'auto', // auto | followup | schedule
   speakMaxChars: 60,
+  speakShareEnabled: true, // 分享欲开关：pendingShare 新鲜时用固定高命中线开口
+  speakEmotionSensitivity: 1.0, // 情绪冲动权重倍率 0~2（默认 1.0 与旧公式完全一致）
 
   // ---- 生活层（host/life.js：life.json；tick 固定 60s）----
   lifeRandom: false, // 随机生活默认关：只有她主动 plan 才换状态
@@ -184,13 +186,14 @@ const FLOAT_RANGES = {
   speakNearFactor: [0, 3],
   speakFarFactor: [0, 3],
   speakStageFactorFallback: [0, 3],
+  speakEmotionSensitivity: [0, 2],
 }
 
 const BOOL_FIELDS = new Set([
   'autoConnect', 'splitEnabled', 'soulEnabled', 'soulGrowthReflection', 'emotionEnabled',
   'emotionGuardOnNegative', 'memoryEnabled', 'memoryAutoCompact', 'memoryDiaryEnabled',
   'memoryImmediate', 'memorySessionDigest', 'diaryAuto',
-  'speakEnabled', 'speakDryRun', 'speakStickerEnabled', 'proactiveEnabled', 'steerEnabled',
+  'speakEnabled', 'speakDryRun', 'speakStickerEnabled', 'speakShareEnabled', 'proactiveEnabled', 'steerEnabled',
   'lifeRandom', 'lifeQuietSleep', 'lifeWakeGreeting',
 ])
 

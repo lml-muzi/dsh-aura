@@ -42,6 +42,7 @@
  *   - 可选测试参数（不要写进配置）：random, now, retryDelayMs, tickMs。
  */
 import { randomUUID } from 'node:crypto'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { describeLife } from './life.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -57,6 +58,23 @@ const THOUGHT_TTL_MS = 12 * 60 * 60 * 1000
 const WAKE_OVERRIDE_LINE = 80
 /** 「刚醒」只对最近 6 小时内有过互动的人开一次口。 */
 const WAKE_RECENT_MS = 6 * 60 * 60 * 1000
+/** 分享欲：pendingShare 新鲜时用的是固定高命中线（仍受日上限/静默/睡眠门控）。 */
+const SHARE_OVERRIDE_LINE = 85
+const SHARE_TTL_MINUTES = 120
+const SHARE_MAX_CHARS = 120
+const SHARE_DEFAULT_STRENGTH = 0.6
+const SPEAK_API_PREFIX = '/dsh-aura/speak-api'
+/** 模拟 API 的 byState 顺序（和 life.js 的 LIFE_STATES 一致）。 */
+const LIFE_STATE_LIST = Object.freeze(['awake', 'work', 'play', 'rest', 'sleep', 'out'])
+const LIFE_STATE_SET = new Set(LIFE_STATE_LIST)
+/** byDaypart 的取样钟点（本地时间；work 用 10:00 代表）。 */
+const DAYPART_CLOCK = Object.freeze({
+  morning: [8, 0],
+  work: [10, 0],
+  noon: [13, 0],
+  evening: [19, 0],
+  night: [22, 30],
+})
 
 /** 模型可以拒绝开口（比硬发一句尴尬话好）；bridge 出站前也应过滤。 */
 const SKIP_MARKERS = new Set(['<skip>', '[skip]', '（跳过）', '(跳过)', 'skip'])
@@ -94,6 +112,8 @@ export const SPEAK_DEFAULTS = Object.freeze({
   maxChars: 60,
   quietStart: '23:30',
   quietEnd: '07:30',
+  shareEnabled: true,
+  emotionSensitivity: 1,
 })
 
 const DAYPART_LABEL = {
@@ -119,6 +139,7 @@ const TRIGGER_LABEL = {
   ritual: '早晚的仪式感',
   return: '好久没聊',
   wake: '刚醒来',
+  share: '想分享',
   manual: '自己想起来',
 }
 
@@ -155,6 +176,7 @@ const DEFAULT_SPEAK_STATE = Object.freeze({
   pendingImpulse: null,
   pendingUserTurn: false,
   pendingThought: null,
+  pendingShare: null,
   ritual: { dayKey: '', morning: false, evening: false },
   dueDayKey: '',
   impulseDayKey: '',
@@ -181,6 +203,24 @@ function clamp(value, min, max) {
 
 function round1(value) {
   return Math.round(num(value) * 10) / 10
+}
+
+/** Date / 毫秒 / ISO 字符串 → Date；无法解析时退回当前时间。 */
+function toDate(value) {
+  if (value instanceof Date) return value
+  if (typeof value === 'number' || typeof value === 'string') {
+    const parsed = new Date(value)
+    if (!Number.isNaN(parsed.getTime())) return parsed
+  }
+  return new Date()
+}
+
+function toEpochMs(value) {
+  return toDate(value).getTime()
+}
+
+function round4(value) {
+  return Math.round(num(value) * 10000) / 10000
 }
 
 function errorMessage(error) {
@@ -295,15 +335,47 @@ export function unansweredFactor(unanswered) {
   return 0.2
 }
 
-/** D.3.2 冲动加成：亲近/精力/情绪波动，夹 0~20。 */
-export function impulseBonus(emotion = {}) {
-  const affection = normalize01(emotion.affection, 0.5)
-  const energy = normalize01(emotion.energy, 0.5)
-  const valence = normalizeSigned(emotion.valence, 0)
-  const bonus = Math.max(0, affection - 0.5) * 30
-    + Math.max(0, energy - 0.5) * 20
-    + Math.max(0, Math.abs(valence) - 0.3) * 20
-  return Math.round(clamp(bonus, 0, 20))
+/**
+ * D.3.2 冲动加成拆分明细：亲近/精力/情绪波动，夹 0~20。
+ * sensitivity 是情绪权重倍率（0~2，默认 1）；1.0 时 total 与旧公式逐位相同。
+ */
+export function emotionImpulseDetail(emotion = {}, sensitivity = 1) {
+  const snapshot = normalizeEmotion(emotion)
+  const weight = clamp(num(sensitivity, 1), 0, 2)
+  const affectionPart = Math.max(0, snapshot.affection - 0.5) * 30 * weight
+  const energyPart = Math.max(0, snapshot.energy - 0.5) * 20 * weight
+  const valencePart = Math.max(0, Math.abs(snapshot.valence) - 0.3) * 20 * weight
+  return {
+    total: Math.round(clamp(affectionPart + energyPart + valencePart, 0, 20)),
+    affectionPart,
+    energyPart,
+    valencePart,
+    weight,
+  }
+}
+
+/** D.3.2 冲动加成：历史行为保持不变（sensitivity 省略 = 1）。 */
+export function impulseBonus(emotion = {}, sensitivity = 1) {
+  return emotionImpulseDetail(emotion, sensitivity).total
+}
+
+/**
+ * 社交需求：优先 emotion.socialNeed（emotion.js 的 drive.socialNeed），没有就按「距上次互动」估算。
+ * 只作为情绪分解/分享欲的解释量，不直接加进命中线（保持旧公式不变）。
+ */
+export function estimateSocialNeed({ lastUserAt = 0, now = Date.now() } = {}) {
+  const last = num(lastUserAt, 0)
+  const at = toEpochMs(now)
+  const idleMinutes = last > 0 ? Math.max(0, (at - last) / MINUTE_MS) : 24 * 60
+  return clamp(0.15 + Math.min(0.8, (idleMinutes / 720) * 0.8), 0, 1)
+}
+
+export function socialNeedOf(emotion = {}, options = {}) {
+  const direct = Number(emotion && typeof emotion === 'object'
+    ? (emotion.socialNeed ?? emotion.drive?.socialNeed)
+    : NaN)
+  if (Number.isFinite(direct)) return clamp(direct, 0, 1)
+  return estimateSocialNeed(options)
 }
 
 /** D.3.2：烦躁/沮丧时不要主动。 */
@@ -347,21 +419,192 @@ export function computeHitLine(parts = {}) {
 /** D.10 面板要能一眼看懂「为什么这次没开口」。 */
 export function formatFormula(parts = {}) {
   const line = round1(parts.line ?? 0)
-  const lifeFactor = num(parts.lifeFactor, 1)
+  const lifeFactor = num(parts.lifeFactor ?? (typeof parts.life === 'number' ? parts.life : 1), 1)
+  const lifeLabel = parts.lifeState || (typeof parts.life === 'string' ? parts.life : '')
   if (parts.overrideLine !== null && parts.overrideLine !== undefined) {
     return `${line} = ${TRIGGER_LABEL[parts.trigger] || '触发源'}固定命中线 ${round1(parts.overrideLine)}` +
       (lifeFactor === 1 ? '' : ` × 生活 ${round1(lifeFactor)}`)
   }
   const pieces = [
-    `${DAYPART_LABEL[parts.daypart] || '时段'} ${round1(parts.baseLine ?? 0)}`,
+    `${DAYPART_LABEL[parts.daypart] || '时段'} ${round1(parts.baseLine ?? parts.base ?? 0)}`,
     `关系 ${round1(parts.stage ?? 1)}`,
     `时机 ${round1(parts.timing ?? 1)}（${parts.timingLabel || '刚聊过?'}）`,
   ]
   if (num(parts.busyFactor, 1) !== 1) pieces.push(`忙 ${round1(parts.busyFactor)}`)
   pieces.push(`未回复 ${round1(parts.unanswered ?? 1)}`)
   if (num(parts.triggerFactor, 1) !== 1) pieces.push(`${TRIGGER_LABEL[parts.trigger] || '触发'} ${round1(parts.triggerFactor)}`)
-  if (lifeFactor !== 1) pieces.push(`生活 ${round1(lifeFactor)}${parts.life ? `（${parts.life}）` : ''}`)
+  if (lifeFactor !== 1) pieces.push(`生活 ${round1(lifeFactor)}${lifeLabel ? `（${lifeLabel}）` : ''}`)
   return `${line} = ${pieces.join(' × ')} + 冲动 ${round1(parts.impulse ?? 0)} + 没中加成 ${round1(parts.missBonusPart ?? 0)}`
+}
+
+/** 触发源预设：字符串 trigger 用固定倍率/固定线；对象 trigger 尊重调用方给的 factor/overrideLine。 */
+const TRIGGER_PRESETS = Object.freeze({
+  idle: { factor: 1, overrideLine: null },
+  impulse: { factor: 1.5, overrideLine: null },
+  due: { factor: 1, overrideLine: 70 },
+  ritual: { factor: 1, overrideLine: 55 },
+  return: { factor: 1.3, overrideLine: null },
+  wake: { factor: 1, overrideLine: WAKE_OVERRIDE_LINE },
+  share: { factor: 1, overrideLine: SHARE_OVERRIDE_LINE },
+  manual: { factor: 1, overrideLine: null },
+})
+
+/** 把 'share' / { trigger, factor, overrideLine } 归一成掷骰用的触发源。 */
+export function normalizeDiceTrigger(trigger) {
+  if (trigger && typeof trigger === 'object' && !Array.isArray(trigger)) {
+    const name = typeof trigger.trigger === 'string' && TRIGGER_LABEL[trigger.trigger] ? trigger.trigger : 'idle'
+    const preset = TRIGGER_PRESETS[name] || TRIGGER_PRESETS.idle
+    return {
+      trigger: name,
+      factor: num(trigger.factor, preset.factor),
+      overrideLine: trigger.overrideLine === undefined || trigger.overrideLine === null ? preset.overrideLine : trigger.overrideLine,
+    }
+  }
+  const name = typeof trigger === 'string' && TRIGGER_LABEL[trigger] ? trigger : 'idle'
+  const preset = TRIGGER_PRESETS[name] || TRIGGER_PRESETS.idle
+  return { trigger: name, factor: preset.factor, overrideLine: preset.overrideLine }
+}
+
+/** 纯函数用的配置补全：既吃 state.readConfig() 的原字段，也吃 readSpeakConfig() 的结果。 */
+function diceConfigOf(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  const baseLines = { ...SPEAK_DEFAULTS.baseLines }
+  if (source.baseLines && typeof source.baseLines === 'object') Object.assign(baseLines, source.baseLines)
+  const stageFactors = { ...SPEAK_DEFAULTS.stageFactors }
+  if (source.stageFactors && typeof source.stageFactors === 'object') Object.assign(stageFactors, source.stageFactors)
+  return {
+    nearMinutes: num(source.nearMinutes ?? SPEAK_DEFAULTS.nearMinutes, SPEAK_DEFAULTS.nearMinutes),
+    nearFactor: clamp(source.nearFactor ?? SPEAK_DEFAULTS.nearFactor, 0, 3),
+    farMinutes: num(source.farMinutes ?? SPEAK_DEFAULTS.farMinutes, SPEAK_DEFAULTS.farMinutes),
+    farFactor: clamp(source.farFactor ?? SPEAK_DEFAULTS.farFactor, 0, 3),
+    baseLines,
+    stageFactors,
+    missBonus: clamp(source.missBonus ?? SPEAK_DEFAULTS.missBonus, 0, 100),
+    bonusCap: clamp(source.bonusCap ?? SPEAK_DEFAULTS.bonusCap, 0, 100),
+    shareEnabled: source.shareEnabled !== false,
+    emotionSensitivity: clamp(source.emotionSensitivity ?? SPEAK_DEFAULTS.emotionSensitivity, 0, 2),
+  }
+}
+
+/**
+ * 主动概率模型的唯一入口（纯函数，不读盘、不写盘、不发消息）。
+ *
+ * D.3 命中线：line = clamp(0,100, baseLine × stage × timing × unanswered × busy
+ *                            × triggerFactor + impulse + min(bonusCap, missStreak × missBonus))
+ *               最后再乘生活倍率（sleep=0）。默认参数下与重构前 computeParts 的数值逐位一致。
+ *
+ * @param {{config?:object, soul?:object, emotion?:object, life?:object|string,
+ *          now?:number|string|Date, trigger?:string|object,
+ *          lastUserAt?:number|null, busy?:boolean, perChat?:object|null}} input
+ * @returns {{line:number, probability:number, parts:object, emotionParts:object,
+ *            trigger:string, note:string, formula:string, emotionBlocked:boolean}}
+ */
+export function evaluateDice(input = {}) {
+  const {
+    config = {},
+    soul = null,
+    emotion = null,
+    life = null,
+    now = Date.now(),
+    trigger = null,
+    lastUserAt = null,
+    busy = false,
+    perChat = null,
+  } = input || {}
+  const settings = diceConfigOf(config)
+  const data = soul && typeof soul === 'object' ? soul : {}
+  const stateRef = data.speak && typeof data.speak === 'object' ? data.speak : {}
+  const date = toDate(now)
+  const at = date.getTime()
+  const emotionSnapshot = normalizeEmotion(emotion || data.emotion)
+  const lifeState = typeof life === 'string'
+    ? life
+    : String(life && typeof life === 'object' ? (life.state || '') : '')
+  const lifeFactor = lifeState ? lifeFactorOf(lifeState) : 1
+  const resolvedLastUserAt = lastUserAt === null || lastUserAt === undefined
+    ? (num(data?.relation?.lastUserAt, 0) || num(stateRef.lastUserAt, 0))
+    : num(lastUserAt, 0)
+  const minutesSinceUser = resolvedLastUserAt
+    ? Math.max(0, (at - resolvedLastUserAt) / MINUTE_MS)
+    : Infinity
+  const chat = perChat && typeof perChat === 'object' ? perChat : null
+  // 没指定具体会话时取所有会话里最差的未回复数（tick 会显式传当前目标，数值与旧实现一致）
+  const chatUnanswered = chat
+    ? num(chat.unanswered, 0)
+    : Object.values(stateRef.perChat && typeof stateRef.perChat === 'object' ? stateRef.perChat : {})
+        .reduce((worst, item) => Math.max(worst, num(item?.unanswered, 0)), 0)
+  const unanswered = unansweredFactor(Math.max(chatUnanswered, num(stateRef.unanswered, 0)))
+  const missStreak = Math.max(0, num(stateRef.missStreak, 0))
+  const missBonusPart = Math.min(settings.bonusCap, missStreak * settings.missBonus)
+  const impulse = emotionImpulseDetail(emotionSnapshot, settings.emotionSensitivity)
+  const triggerInfo = normalizeDiceTrigger(trigger)
+  const formulaParts = {
+    daypart: daypartOf(date),
+    baseLine: pickBaseLine(settings, date),
+    stage: stageFactor(data?.relation?.stage || 'stranger', settings),
+    timing: timingFactor(minutesSinceUser, settings),
+    timingLabel: resolvedLastUserAt ? `距上次说话 ${Math.max(0, Math.round(minutesSinceUser))} 分钟` : '还没怎么聊过',
+    unanswered,
+    busyFactor: busy ? 0.6 : 1,
+    triggerFactor: triggerInfo.factor,
+    impulse: impulse.total,
+    missStreak,
+    missBonus: settings.missBonus,
+    bonusCap: settings.bonusCap,
+    missBonusPart,
+    trigger: triggerInfo.trigger,
+    overrideLine: triggerInfo.overrideLine,
+    life: lifeState,
+    lifeFactor,
+  }
+  const line = clamp(computeHitLine(formulaParts) * lifeFactor, 0, 100)
+  formulaParts.line = line
+  const unsuitable = emotionUnsuitable(emotionSnapshot)
+  const socialNeed = socialNeedOf(emotionSnapshot, { lastUserAt: resolvedLastUserAt, now: at })
+  const emotionParts = {
+    affection: emotionSnapshot.affection,
+    valence: emotionSnapshot.valence,
+    energy: emotionSnapshot.energy,
+    socialNeed,
+    affectionBonus: round1(impulse.affectionPart),
+    energyBonus: round1(impulse.energyPart),
+    valenceBonus: round1(impulse.valencePart),
+    impulse: impulse.total,
+    weight: impulse.weight,
+    unsuitable,
+  }
+  const parts = {
+    base: formulaParts.baseLine,
+    stage: formulaParts.stage,
+    timing: formulaParts.timing,
+    unanswered: formulaParts.unanswered,
+    life: formulaParts.lifeFactor,
+    impulse: formulaParts.impulse,
+    miss: formulaParts.missBonusPart,
+    busy: formulaParts.busyFactor,
+    triggerFactor: formulaParts.triggerFactor,
+    overrideLine: formulaParts.overrideLine,
+    daypart: formulaParts.daypart,
+    baseLine: formulaParts.baseLine,
+    missStreak,
+    lifeState,
+    lifeFactor,
+    trigger: formulaParts.trigger,
+    timingLabel: formulaParts.timingLabel,
+  }
+  const notes = [formatFormula(formulaParts)]
+  if (unsuitable) notes.push('情绪不适合主动（负向高唤醒），只标记不硬发')
+  if (lifeState === 'sleep') notes.push('在睡，命中线被生活状态压成 0')
+  return {
+    line,
+    probability: clamp(line / 100, 0, 1),
+    parts,
+    emotionParts,
+    trigger: triggerInfo.trigger,
+    note: notes.join('｜'),
+    formula: formatFormula(formulaParts),
+    emotionBlocked: unsuitable,
+  }
 }
 
 /** D.2④ 仪式窗口：早上 07:30–09:30 / 晚上 22:00–23:00；不在窗口返回 ''。 */
@@ -386,6 +629,8 @@ export function normalizeEmotion(raw) {
   const arousal = normalize01(transient.arousal ?? source?.arousal, 0.2)
   const affection = normalize01(source?.affection ?? transient.affection, 0.5)
   const energy = normalize01(drive.energy ?? transient.energy ?? source?.energy, 0.6)
+  const socialRaw = drive.socialNeed ?? source?.socialNeed ?? transient.socialNeed
+  const socialNeed = Number.isFinite(num(socialRaw, NaN)) ? normalize01(socialRaw, 0.35) : null
   const moodValence = normalizeSigned(mood.valence, 0)
   const intensity = clamp(Math.max(Math.abs(valence), arousal * 0.8, Math.abs(valence - moodValence) * 1.2), 0, 1)
   return {
@@ -394,6 +639,7 @@ export function normalizeEmotion(raw) {
     arousal,
     affection,
     energy,
+    socialNeed,
     intensity,
     label: String(transient.label ?? source?.label ?? ''),
   }
@@ -580,6 +826,7 @@ export function buildIntentBody(input = {}) {
     maxChars = 60,
     trigger = 'idle',
     sticker = false,
+    shareText = '',
     lifeText = '',
   } = input
   const lines = [
@@ -587,6 +834,7 @@ export function buildIntentBody(input = {}) {
     `【由头】对方已经 ${Math.max(0, Math.round(num(idleMinutes, 0)))} 分钟没说话了；现在是 ${formatClock(now)}；你们的关系是「${STAGE_LABEL[stage] || stage}」。` +
       `（这次是你${TRIGGER_LABEL[trigger] || '想开口'}，不是对方找你。）`,
     lifeText ? `【此刻】你现在：${lifeText}。（自然带一句就好，不用解释自己的生活安排。）` : '',
+    shareText ? `【分享】你此刻想分享的是：${shareText}。（就用这个当由头，自然地讲给对方，别逐字照抄。）` : '',
     `【要求】说 1~2 句、15~${Math.max(15, Math.round(num(maxChars, 60)))} 个字，口语化；别像客服，别解释这条提醒；`,
     '       如果想起之前说过的话题，先确认对方现在状态合不合适再提；',
     '       不要用「一直在等你」「你不理我」「算了当我没说」这类带压力或自责的说法。',
@@ -621,8 +869,10 @@ export function buildSchedulePrompt(input = {}) {
 
 /** 主动轮的 prompt context（order 60）：只提醒「这一轮是你自己主动开的」，不重复整段框架。 */
 export function buildContextIntentText(input = {}) {
+  const shareText = String(input.shareText || '').trim()
   return [
     '（这一轮是你自己主动找他说话的：' + intentLineFor(input.act || 'care', input.topic || '') + '。',
+    shareText ? `想分享的是「${shareText}」。` : '',
     '对方此刻没有说话，不用回应任何「消息」；这一轮的发法按「主动念头」走。）',
   ].join('')
 }
@@ -642,6 +892,80 @@ export function buildFollowupMessage(text) {
 
 export function isSkipText(text) {
   return SKIP_MARKERS.has(String(text ?? '').trim().toLowerCase())
+}
+
+// ---------------------------------------------------------------------------
+// 模拟 API 的 HTTP 小工具（和 life.js / web.js 同一套 loopback + Origin 围栏）
+// ---------------------------------------------------------------------------
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
+const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
+function hostIsLoopback(req) {
+  const host = req?.headers?.host
+  if (!host) return true
+  const text = String(host)
+  let name = text
+  if (text.startsWith('[')) {
+    const end = text.indexOf(']')
+    name = end >= 0 ? text.slice(0, end + 1) : text
+  } else {
+    const colon = text.lastIndexOf(':')
+    if (colon > 0) name = text.slice(0, colon)
+  }
+  return LOOPBACK_HOSTS.has(name.toLowerCase())
+}
+
+function speakFence(req) {
+  if (!hostIsLoopback(req)) return false
+  const site = req.headers?.['sec-fetch-site']
+  if (site && String(site).toLowerCase() === 'cross-site') return false
+  const origin = req.headers?.origin
+  if (origin) {
+    try {
+      const url = new URL(String(origin))
+      if (!LOCAL_HOSTNAMES.has(url.hostname.toLowerCase())) return false
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
+function jsonReply(res, status, body) {
+  const data = Buffer.from(JSON.stringify(body))
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'content-length': data.length,
+  })
+  res.end(data)
+}
+
+function readJsonBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', chunk => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error('body too large'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      if (!chunks.length) return resolve({})
+      try {
+        const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        resolve(value && typeof value === 'object' ? value : {})
+      } catch {
+        reject(new Error('invalid json'))
+      }
+    })
+    req.on('error', reject)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +1052,236 @@ export function installSpeak(ctx, deps = {}) {
       return describeLife(source, nowMs())
     } catch {
       return ''
+    }
+  }
+
+  // --- 分享欲 pendingShare（D.11） ---------------------------------------
+
+  /** pendingShare → 面板/API 展示形状（不动 soul）。 */
+  function shareView(share, now = nowMs()) {
+    if (!share || typeof share !== 'object') return null
+    const expiresAt = num(share.expiresAt, 0)
+    return {
+      text: String(share.text || ''),
+      reason: String(share.reason || ''),
+      strength: clamp(share.strength, 0, 1),
+      createdAt: num(share.createdAt, 0),
+      expiresAt,
+      source: String(share.source || ''),
+      remainingMs: Math.max(0, expiresAt - now),
+      active: expiresAt > now,
+    }
+  }
+
+  function publicShare(now = nowMs()) {
+    return shareView(speakState().pendingShare, now)
+  }
+
+  /** 只读：新鲜的 pendingShare 才返回（过期自动忽略，不消费）。 */
+  function readPendingShare(now = nowMs()) {
+    const share = speakState().pendingShare
+    const view = shareView(share, now)
+    return view && view.active ? share : null
+  }
+
+  /**
+   * 记下一条分享欲：Aura 用 soul_share / life 的 plan·wake 钩子都会走这里。
+   * 不直接发消息；等下一次 tick 用固定高命中线（85）试着说出来。
+   */
+  function queueShare(args = {}) {
+    const config = readSpeakConfig()
+    if (config.shareEnabled === false) return { ok: false, error: '分享欲已关闭（speakShareEnabled=false）' }
+    const rawText = String(args?.text ?? '').replace(/\s+/g, ' ').trim()
+    if (!rawText) return { ok: false, error: '分享内容不能为空' }
+    if (Array.from(rawText).length > SHARE_MAX_CHARS) {
+      return { ok: false, error: `分享内容最多 ${SHARE_MAX_CHARS} 字` }
+    }
+    const now = nowMs()
+    const ttlMinutes = clamp(num(args?.ttlMinutes, SHARE_TTL_MINUTES), 5, 720)
+    const strength = clamp(num(args?.strength, SHARE_DEFAULT_STRENGTH), 0, 1)
+    const reason = String(args?.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
+    const source = String(args?.source || 'tool').slice(0, 24)
+    const stateRef = speakState()
+    stateRef.pendingShare = {
+      text: Array.from(rawText).slice(0, SHARE_MAX_CHARS).join(''),
+      reason,
+      strength,
+      createdAt: now,
+      expiresAt: now + ttlMinutes * MINUTE_MS,
+      source,
+    }
+    saveSoul()
+    recordExplain({
+      at: now,
+      summary: `记下一条分享欲（${Math.round(strength * 100)}%，${ttlMinutes} 分钟内有效）：${stateRef.pendingShare.text}`,
+      data: { source },
+    })
+    return { ok: true, pendingShare: shareView(stateRef.pendingShare, now) }
+  }
+
+  /** 发送成功后用掉；过期返回 null（顺手清掉）。 */
+  function consumeShare() {
+    const now = nowMs()
+    const stateRef = speakState()
+    const share = stateRef.pendingShare
+    if (!share || typeof share !== 'object') return null
+    const view = shareView(share, now)
+    stateRef.pendingShare = null
+    saveSoul(true)
+    if (!view || !view.active) return null
+    recordExplain({ at: now, summary: `分享欲已用掉：${view.text}`, data: { source: view.source } })
+    return view
+  }
+
+  function clearShare() {
+    const stateRef = speakState()
+    const existed = Boolean(stateRef.pendingShare)
+    stateRef.pendingShare = null
+    saveSoul(true)
+    return { ok: true, cleared: existed }
+  }
+
+  // --- 模拟：只读概率模型（不写盘、不触发发送） -------------------------
+
+  function normalizeStateOverride(raw) {
+    if (typeof raw === 'string' && LIFE_STATE_SET.has(raw)) return raw
+    if (raw && typeof raw === 'object' && LIFE_STATE_SET.has(String(raw.state))) return String(raw.state)
+    return ''
+  }
+
+  function emotionForSim(body) {
+    const base = readEmotion()
+    const override = body && body.emotionOverride && typeof body.emotionOverride === 'object' ? body.emotionOverride : null
+    if (!override) return base
+    const merged = { ...base }
+    const fields = ['valence', 'arousal', 'affection', 'energy', 'socialNeed']
+    for (const field of fields) {
+      const value = Number(override[field])
+      if (!Number.isFinite(value)) continue
+      merged[field] = field === 'valence' ? clamp(value, -1, 1) : clamp(value, 0, 1)
+    }
+    if (typeof override.label === 'string') merged.label = override.label.slice(0, 8)
+    return merged
+  }
+
+  function currentView(result) {
+    return {
+      line: round1(result.line),
+      probability: round4(result.probability),
+      parts: result.parts,
+      emotionParts: result.emotionParts,
+      trigger: result.trigger,
+      note: result.note,
+      formula: result.formula,
+    }
+  }
+
+  function simulatePayload(body = {}) {
+    const config = readSpeakConfig()
+    const at = body && body.now !== undefined && body.now !== null && body.now !== ''
+      ? toEpochMs(body.now)
+      : nowMs()
+    const date = new Date(at)
+    const data = getData()
+    const stateRef = data.speak && typeof data.speak === 'object' ? data.speak : {}
+    const realLife = lifeSnapshot()
+    const overrideState = normalizeStateOverride(body?.stateOverride)
+    const lifeForSim = overrideState
+      ? { ...(realLife || {}), state: overrideState }
+      : realLife
+    const emotion = emotionForSim(body)
+    // 和 snapshot 用同一套目标/时机口径（只读）：当前值才和面板 nextLine 对得上
+    let pickedTarget = null
+    try {
+      pickedTarget = pickTarget(at, config)
+    } catch {
+      pickedTarget = null
+    }
+    const lastUserAt = lastUserAtOf(stateRef, data, pickedTarget?.chat || null)
+    const busy = pickedTarget?.chat ? userBusyFactor(pickedTarget.chat.key) < 1 : false
+    const perChat = pickedTarget?.chat ? readPerChat(stateRef, pickedTarget.chat.key) : null
+    const todayCount = stateRef.dayKey === localDayKey(date) ? num(stateRef.todayCount, 0) : 0
+    const activeShare = config.shareEnabled !== false ? readPendingShare(at) : null
+    const triggered = activeShare ? 'share' : 'idle'
+    const baseArgs = { config, soul: data, emotion, life: lifeForSim, now: at, lastUserAt, busy, perChat }
+    const currentEval = evaluateDice({ ...baseArgs, trigger: triggered })
+    const chartArgs = { ...baseArgs, trigger: 'idle' }
+
+    const byState = {}
+    for (const state of LIFE_STATE_LIST) {
+      const evaluated = evaluateDice({ ...chartArgs, life: { ...(lifeForSim || {}), state } })
+      byState[state] = { line: round1(evaluated.line), probability: round4(evaluated.probability) }
+    }
+
+    const gapMs = lastUserAt ? Math.max(0, at - lastUserAt) : null
+    const byDaypart = {}
+    for (const [name, clock] of Object.entries(DAYPART_CLOCK)) {
+      const simDate = new Date(at)
+      simDate.setHours(clock[0], clock[1], 0, 0)
+      const simAt = simDate.getTime()
+      const simLastUserAt = gapMs === null ? 0 : Math.max(0, simAt - gapMs)
+      const evaluated = evaluateDice({
+        ...chartArgs,
+        soul: gapMs === null
+          ? data
+          : { ...data, relation: { ...(data.relation || {}), lastUserAt: simLastUserAt } },
+        now: simAt,
+        lastUserAt: simLastUserAt,
+      })
+      byDaypart[name] = { line: round1(evaluated.line), probability: round4(evaluated.probability) }
+    }
+
+    const byValence = []
+    for (let step = -5; step <= 5; step += 1) {
+      const x = step / 5
+      const evaluated = evaluateDice({ ...chartArgs, emotion: { ...emotion, valence: x } })
+      byValence.push({ x, probability: round4(evaluated.probability), line: round1(evaluated.line) })
+    }
+
+    const byTrigger = {}
+    for (const name of ['impulse', 'due', 'ritual', 'return', 'idle', 'share']) {
+      if (name === 'share' && config.shareEnabled === false) {
+        byTrigger.share = { probability: 0, line: 0, available: false }
+        continue
+      }
+      const evaluated = evaluateDice({ ...chartArgs, trigger: name })
+      byTrigger[name] = {
+        probability: round4(evaluated.probability),
+        line: round1(evaluated.line),
+        available: name === 'share' ? Boolean(activeShare) : true,
+      }
+    }
+
+    const intervalMinutes = config.intervalMinutes
+    const ticksPerDay = intervalMinutes > 0 ? Math.floor((24 * 60) / intervalMinutes) : 0
+    const cap = config.dailyCap
+    const rolls = cap > 0 ? Math.min(ticksPerDay, cap) : 0
+    const pAtLeastOne = rolls > 0 ? 1 - Math.pow(1 - currentEval.probability, rolls) : 0
+    const gates = {
+      enabled: config.enabled,
+      quiet: inQuietHours(config, date),
+      sleep: Boolean(lifeForSim && lifeForSim.state === 'sleep' && config.lifeQuietSleep !== false),
+      dailyCapReached: cap <= 0 || todayCount >= cap,
+      paused: num(stateRef.pausedUntil, 0) > at,
+      suppressed: num(stateRef.suppressUntil, 0) > at,
+      todayCount,
+      cap,
+    }
+    return {
+      ok: true,
+      now: at,
+      current: currentView(currentEval),
+      gates,
+      byState,
+      byDaypart,
+      byValence,
+      byTrigger,
+      daily: { intervalMinutes, ticksPerDay, pAtLeastOne: round4(pAtLeastOne), cap },
+      share: {
+        enabled: config.shareEnabled !== false,
+        line: SHARE_OVERRIDE_LINE,
+        pendingShare: publicShare(at),
+      },
     }
   }
 
@@ -869,6 +1423,10 @@ export function installSpeak(ctx, deps = {}) {
       lifeQuietSleep: raw.lifeQuietSleep !== false,
       // 醒来后要不要试着主动说一句（false 只关掉这个 hook，不影响普通主动搭话）
       lifeWakeGreeting: raw.lifeWakeGreeting !== false,
+      // 分享欲：pendingShare 新鲜时固定高命中线；情绪权重倍率 0~2（默认 1.0 = 旧公式）
+      shareEnabled: raw.speakShareEnabled !== false,
+      emotionSensitivity: clamp(raw.speakEmotionSensitivity ?? SPEAK_DEFAULTS.emotionSensitivity, 0, 2),
+      shareLine: SHARE_OVERRIDE_LINE,
     }
   }
 
@@ -1093,6 +1651,11 @@ export function installSpeak(ctx, deps = {}) {
     const lastUserAt = lastUserAtOf(stateRef, data, picked.chat)
     const silenceMinutes = lastUserAt ? (now - lastUserAt) / MINUTE_MS : Infinity
 
+    // 分享欲最优先：新鲜 pendingShare 用固定高命中线（仍然要掷骰）
+    if (config.shareEnabled !== false) {
+      const share = readPendingShare(now)
+      if (share) return { trigger: 'share', factor: 1, overrideLine: SHARE_OVERRIDE_LINE, share }
+    }
     if (pendingImpulseEligible(stateRef, now, lastUserAt, config)) {
       return { trigger: 'impulse', factor: 1.5, overrideLine: null }
     }
@@ -1155,6 +1718,7 @@ export function installSpeak(ctx, deps = {}) {
     const rituals = inRitualWindow(date)
     const recallCandidate = pickRecallCandidate(data, recentTopics, now, randomFn)
     const userBusy = userBusyFactor(picked.chat.key) < 1
+    const shareText = triggerInfo?.trigger === 'share' ? String(triggerInfo.share?.text || '') : ''
     const weights = actWeights({
       stage: data?.relation?.stage || 'stranger',
       emotion: emotionSnapshot,
@@ -1166,9 +1730,10 @@ export function installSpeak(ctx, deps = {}) {
       .filter(entry => entry && entry.hit === true && entry.act)
       .slice(-2)
       .map(entry => entry.act)
-    const act = pickAct({ weights, random: randomFn, recentActs })
-    const topic = act === 'recall' && recallCandidate ? recallCandidate.topic : ''
-    const sticker = stickerAvailable(stateRef, config, emotionSnapshot, now) && randomFn() < 0.2
+    // 分享欲触发时不掷 act 权重：这一轮就是「想分享」。
+    const act = shareText ? 'share' : pickAct({ weights, random: randomFn, recentActs })
+    const topic = !shareText && act === 'recall' && recallCandidate ? recallCandidate.topic : ''
+    const sticker = !shareText && stickerAvailable(stateRef, config, emotionSnapshot, now) && randomFn() < 0.2
     const idleMinutes = lastUserAt ? Math.round((now - lastUserAt) / MINUTE_MS) : picked.idleMinutes
     const input = {
       act,
@@ -1179,6 +1744,7 @@ export function installSpeak(ctx, deps = {}) {
       maxChars: config.maxChars,
       trigger: triggerInfo.trigger,
       sticker,
+      shareText,
       lifeText: lifePromptText(),
     }
     return {
@@ -1596,37 +2162,37 @@ export function installSpeak(ctx, deps = {}) {
     return stateRef.todayCount
   }
 
+  /**
+   * tick / snapshot 共用：纯函数 evaluateDice 算完后包成旧的 parts 形状（日志与公式兼容）。
+   * 数值全部来自 evaluateDice，行为与重构前一致。
+   */
   function computeParts({ picked, triggerInfo, config, emotionSnapshot, stateRef, data, now, lastUserAt, busy }) {
-    const date = nowDate()
-    const minutesSinceUser = lastUserAt ? (now - lastUserAt) / MINUTE_MS : Infinity
-    const timing = timingFactor(minutesSinceUser, config)
-    const perChat = picked ? readPerChat(stateRef, picked.chat.key) : null
-    const unanswered = unansweredFactor(Math.max(num(perChat?.unanswered, 0), num(stateRef.unanswered, 0)))
-    const missStreak = num(stateRef.missStreak, 0)
-    const missBonusPart = Math.min(config.bonusCap, missStreak * config.missBonus)
-    const parts = {
-      daypart: daypartOf(date),
-      baseLine: pickBaseLine(config, date),
-      stage: stageFactor(data?.relation?.stage || 'stranger', config),
-      timing,
-      timingLabel: lastUserAt ? `距上次说话 ${Math.max(0, Math.round(minutesSinceUser))} 分钟` : '还没怎么聊过',
-      unanswered,
-      busyFactor: busy ? 0.6 : 1,
-      triggerFactor: triggerInfo?.factor ?? 1,
-      impulse: impulseBonus(emotionSnapshot),
-      missStreak,
+    const evaluation = evaluateDice({
+      config,
+      soul: data,
+      emotion: emotionSnapshot,
+      life: lifeSnapshot(),
+      now,
+      trigger: triggerInfo,
+      lastUserAt,
+      busy,
+      perChat: picked ? readPerChat(stateRef, picked.chat.key) : null,
+    })
+    return {
+      ...evaluation.parts,
+      busyFactor: evaluation.parts.busy,
+      triggerFactor: evaluation.parts.triggerFactor,
+      missStreak: evaluation.parts.missStreak,
       missBonus: config.missBonus,
       bonusCap: config.bonusCap,
-      missBonusPart,
-      trigger: triggerInfo?.trigger || 'idle',
-      overrideLine: triggerInfo?.overrideLine ?? null,
+      missBonusPart: evaluation.parts.miss,
+      trigger: evaluation.trigger,
+      overrideLine: evaluation.parts.overrideLine,
+      life: evaluation.parts.lifeState,
+      lifeFactor: evaluation.parts.lifeFactor,
+      line: evaluation.line,
+      evaluation,
     }
-    const lifeNow = lifeSnapshot()
-    parts.life = lifeNow?.state || ''
-    parts.lifeFactor = lifeNow ? lifeFactorOf(lifeNow.state) : 1
-    // 生活状态乘在最后：due/ritual 的固定命中线也照样被「睡着」压成 0。
-    parts.line = clamp(computeHitLine(parts) * num(parts.lifeFactor, 1), 0, 100)
-    return parts
   }
 
   function buildResult(parts, extra = {}) {
@@ -1701,16 +2267,22 @@ export function installSpeak(ctx, deps = {}) {
     let triggerInfo
     if (manual) {
       triggerInfo = { trigger: 'manual', factor: 1, overrideLine: null }
-    } else if (wakeTrigger) {
-      // 睡醒/忙完后的第一次开口：命中线抬高，但仍掷骰，不强制发
-      triggerInfo = { trigger: 'wake', factor: 1, overrideLine: WAKE_OVERRIDE_LINE }
     } else {
-      triggerInfo = pickTrigger(now, config, picked, data, stateRef)
-      if (!triggerInfo) {
-        // idle 间隔没到、其他触发源也没到期
-        return { done: 'idle-wait', nextAt: num(stateRef.lastRollAt, 0) + config.intervalMinutes * MINUTE_MS }
+      // 分享欲优先级最高：比 wake / impulse / due 都先，但静默/睡眠/日上限在前面已经挡过
+      const share = config.shareEnabled !== false ? readPendingShare(now) : null
+      if (share) {
+        triggerInfo = { trigger: 'share', factor: 1, overrideLine: SHARE_OVERRIDE_LINE, share }
+      } else if (wakeTrigger) {
+        // 睡醒/忙完后的第一次开口：命中线抬高，但仍掷骰，不强制发
+        triggerInfo = { trigger: 'wake', factor: 1, overrideLine: WAKE_OVERRIDE_LINE }
+      } else {
+        triggerInfo = pickTrigger(now, config, picked, data, stateRef)
+        if (!triggerInfo) {
+          // idle 间隔没到、其他触发源也没到期
+          return { done: 'idle-wait', nextAt: num(stateRef.lastRollAt, 0) + config.intervalMinutes * MINUTE_MS }
+        }
+        markTriggerUsed(triggerInfo, stateRef, data, now, lastUserAt)
       }
-      markTriggerUsed(triggerInfo, stateRef, data, now, lastUserAt)
     }
 
     const parts = computeParts({ picked, triggerInfo, config, emotionSnapshot, stateRef, data, now, lastUserAt, busy })
@@ -1826,6 +2398,8 @@ export function installSpeak(ctx, deps = {}) {
     const pendingEntry = pending.get(picked.chat.sessionId)
     if (pendingEntry) pendingEntry.logEntry = logEntry
     if (delivery.sent) {
+      // 分享欲：真正发出去了才消费；dry-run / 未中 / 日上限都不消费
+      if (triggerInfo.trigger === 'share') consumeShare()
       recordExplain({ at: now, summary: `主动搭话已发出（${delivery.channel}，${content.act}）：掷出 ${round1(roll)} < 命中线 ${round1(parts.line)}｜${formatFormula(parts)}`, data: { chatKey: picked.chat.key, trigger: triggerInfo.trigger } })
       log(`[speak] 主动搭话 ${delivery.channel} ${picked.chat.key}（${content.act}/${triggerInfo.trigger}，line ${round1(parts.line)} > roll ${round1(roll)}）`)
     } else {
@@ -1934,17 +2508,30 @@ export function installSpeak(ctx, deps = {}) {
     const picked = pickTarget(nowMs(), config)
     const lastUserAt = picked?.chat ? lastUserAtOf(stateRef, data, picked.chat) : lastUserAtOf(stateRef, data, null)
     const busy = picked?.chat ? userBusyFactor(picked.chat.key) < 1 : false
-    const previewParts = computeParts({
-      picked: picked?.chat ? picked : null,
-      triggerInfo: { trigger: 'idle', factor: 1, overrideLine: null },
+    const previewEval = evaluateDice({
       config,
-      emotionSnapshot,
-      stateRef,
-      data,
+      soul: data,
+      emotion: emotionSnapshot,
+      life: lifeSnapshot(),
       now: nowMs(),
+      trigger: { trigger: 'idle', factor: 1, overrideLine: null },
       lastUserAt,
       busy,
+      perChat: picked?.chat ? readPerChat(stateRef, picked.chat.key) : null,
     })
+    const previewParts = {
+      ...previewEval.parts,
+      busyFactor: previewEval.parts.busy,
+      triggerFactor: previewEval.parts.triggerFactor,
+      missBonusPart: previewEval.parts.miss,
+      missBonus: config.missBonus,
+      bonusCap: config.bonusCap,
+      trigger: previewEval.trigger,
+      overrideLine: previewEval.parts.overrideLine,
+      life: previewEval.parts.lifeState,
+      lifeFactor: previewEval.parts.lifeFactor,
+      line: previewEval.line,
+    }
     const pendingThought = stateRef.pendingThought && num(stateRef.pendingThought.expiresAt, 0) > nowMs()
       ? stateRef.pendingThought
       : null
@@ -1968,7 +2555,14 @@ export function installSpeak(ctx, deps = {}) {
       suppressUntil: num(stateRef.suppressUntil, 0),
       recentTexts: Array.isArray(stateRef.recentTexts) ? stateRef.recentTexts.slice(-RECENT_TEXT_LIMIT) : [],
       nextLine: round1(previewParts.line),
+      nextProbability: round4(previewEval.probability),
       rule: formatFormula(previewParts),
+      formula: formatFormula(previewParts),
+      parts: previewEval.parts,
+      emotionParts: previewEval.emotionParts,
+      shareEnabled: config.shareEnabled !== false,
+      shareLine: SHARE_OVERRIDE_LINE,
+      pendingShare: publicShare(),
       nextTriggerIn: Math.max(0, num(stateRef.lastRollAt, 0) + config.intervalMinutes * MINUTE_MS - nowMs()),
       target: picked?.chat ? { sessionId: picked.chat.sessionId, kind: picked.chat.kind, chatId: picked.chat.chatId, cold: Boolean(picked.cold) } : null,
       pendingThought,
@@ -2061,6 +2655,121 @@ export function installSpeak(ctx, deps = {}) {
     logOnce('wake-hook', '[speak] 订阅 life.wake 失败:', errorMessage(error))
   }
 
+  // --- 模拟 API（/dsh-aura/speak-api；只读，不写盘、不触发发送） ----------
+
+  function speakApiRegistration() {
+    return {
+      kind: 'prefix',
+      path: SPEAK_API_PREFIX,
+      async handler(req, res) {
+        if (!speakFence(req)) {
+          jsonReply(res, 403, { ok: false, error: 'forbidden' })
+          return
+        }
+        const method = String(req.method || 'GET').toUpperCase()
+        const url = new URL(String(req.url || '/'), 'http://localhost')
+        try {
+          if (method === 'GET') {
+            const action = url.searchParams.get('action') || 'preview'
+            if (action !== 'preview') {
+              jsonReply(res, 400, { ok: false, error: `未知 action：${action}` })
+              return
+            }
+            jsonReply(res, 200, simulatePayload({}))
+            return
+          }
+          if (method === 'POST') {
+            const body = await readJsonBody(req)
+            const action = String(body.action || '').trim()
+            if (action === 'simulate') {
+              jsonReply(res, 200, simulatePayload(body))
+              return
+            }
+            if (action === 'clearShare') {
+              const result = clearShare()
+              jsonReply(res, 200, { ...simulatePayload({}), cleared: result.cleared })
+              return
+            }
+            jsonReply(res, 400, { ok: false, error: '未知 action（simulate / clearShare）' })
+            return
+          }
+          jsonReply(res, 405, { ok: false, error: 'method not allowed', allow: 'GET, POST' })
+        } catch (error) {
+          const message = errorMessage(error)
+          jsonReply(res, message === 'invalid json' || message === 'body too large' ? 400 : 500, { ok: false, error: message })
+        }
+      },
+    }
+  }
+
+  try {
+    const webServer = (() => {
+      try {
+        return typeof ctx?.get === 'function' ? ctx.get('webServer') : undefined
+      } catch {
+        return undefined
+      }
+    })() || ctx?.webServer
+    if (webServer && typeof webServer.register === 'function') {
+      disposers.push(safeDispose(webServer.register(speakApiRegistration())))
+    }
+  } catch (error) {
+    logOnce('speak-api', '[speak] 模拟 API 注册失败:', errorMessage(error))
+  }
+
+  // --- soul_share 工具：Aura 主动塞一条分享欲（≤120 字） ------------------
+
+  function registerShareTool() {
+    const tools = (() => {
+      try {
+        return typeof ctx?.get === 'function' ? ctx.get('tools') : undefined
+      } catch {
+        return undefined
+      }
+    })() || ctx?.tools
+    if (!tools || typeof tools.register !== 'function') return
+    const render = (_args, value) => [{
+      type: 'text',
+      text: value?.ok === true
+        ? `分享欲已记下（${Math.round(num(value.pendingShare?.strength, 0) * 100)}%，${Math.round(num(value.pendingShare?.remainingMs, 0) / MINUTE_MS)} 分钟内有效）：${String(value.pendingShare?.text || '')}`
+        : `没记下：${String(value?.error || '未知原因')}`,
+    }]
+    const base = {
+      name: 'soul_share',
+      description: '记下一条此刻想分享的小事，等下一次主动搭话时自然说出来。'
+        + '不是立刻发消息；文字必填 ≤120 字，可给理由/强度(0~1)/有效期(分钟)。',
+      parameters: {
+        text: { type: 'string', description: '必填：想分享的内容（≤120 字）', required: true },
+        reason: { type: 'string', description: '可选：为什么想分享（≤80 字）' },
+        strength: { type: 'number', description: '可选：分享冲动强度 0~1，默认 0.6' },
+        ttlMinutes: { type: 'number', description: '可选：几分钟内有效，默认 120（5~720）' },
+      },
+      render,
+      async execute(args = {}) {
+        return queueShare({ ...args, source: 'tool' })
+      },
+    }
+    let tool = null
+    try {
+      tool = defineTool({ ...base, output: { schema: { type: 'object', additionalProperties: true }, render } })
+    } catch {
+      try {
+        tool = defineTool(base)
+      } catch (error) {
+        logOnce('share-tool', '[speak] soul_share 工具定义失败:', errorMessage(error))
+        return
+      }
+    }
+    if (!tool) return
+    try {
+      disposers.push(safeDispose(tools.register(tool)))
+    } catch (error) {
+      logOnce('share-tool', '[speak] soul_share 工具注册失败:', errorMessage(error))
+    }
+  }
+
+  registerShareTool()
+
   try {
     if (ctx?.systemPrompt && typeof ctx.systemPrompt.context === 'function') {
       ctx.systemPrompt.context({
@@ -2123,8 +2832,29 @@ export function installSpeak(ctx, deps = {}) {
     notifyProactiveResult,
     notifyWake,
     stop,
+    /** 分享欲（/dsh-aura/speak-api 与 soul_share 工具共用） */
+    queueShare,
+    consumeShare,
+    clearShare,
+    pendingShare: () => publicShare(),
+    /** 只读模拟（不写盘、不触发发送）；也可走 POST /dsh-aura/speak-api */
+    simulate: options => simulatePayload(options || {}),
     /** 纯函数也挂到 API 上，方便 web.js/面板直接算展示值 */
-    helpers: { computeHitLine, formatFormula, inQuietHours, daypartOf, pickBaseLine, stageFactor, timingFactor, unansweredFactor, impulseBonus },
+    helpers: {
+      computeHitLine,
+      formatFormula,
+      inQuietHours,
+      daypartOf,
+      pickBaseLine,
+      stageFactor,
+      timingFactor,
+      unansweredFactor,
+      impulseBonus,
+      emotionImpulseDetail,
+      socialNeedOf,
+      evaluateDice,
+      normalizeDiceTrigger,
+    },
   }
 }
 

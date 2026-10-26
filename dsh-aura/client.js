@@ -26,6 +26,8 @@ window.__ModuleLoader__.load({
 
     /** 生活层 Host API（host/life.js；面板「生活」页）。 */
     const LIFE_API = '/dsh-aura/life-api'
+    /** 主动概率模拟 API（host/speak.js；只读，不写盘）。 */
+    const SPEAK_API = '/dsh-aura/speak-api'
     const LIFE_POLL_MS = 5000
     const LIFE_STATE_OPTIONS = [
       ['awake', '醒着'],
@@ -1041,6 +1043,33 @@ window.__ModuleLoader__.load({
 .aura-life-history-activity{flex:1;min-width:0;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
 .aura-life-history-source{flex:none;color:var(--dsw-alias-label-tertiary)}
 .aura-life-settings .qqn-look-title{margin-top:2px}
+.aura-prob-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px}
+.aura-prob-line{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;font-variant-numeric:tabular-nums}
+.aura-prob-value{font-size:22px;font-weight:600;line-height:28px;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums}
+.aura-prob-breakdown{margin-top:2px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.aura-prob-emotion{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.aura-prob-chip{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:11px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;font-variant-numeric:tabular-nums}
+.aura-prob-note{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.aura-prob-daily{margin-top:6px;color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
+.aura-prob-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-top:12px}
+.aura-prob-chart{min-width:0}
+.aura-prob-chart-title{margin-bottom:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.aura-prob-bars{display:flex;flex-direction:column;gap:4px}
+.aura-prob-bar-row{display:flex;align-items:center;gap:6px;font-size:12px;line-height:18px}
+.aura-prob-bar-label{flex:none;min-width:44px;color:var(--dsw-alias-label-secondary)}
+.aura-prob-bar-track{flex:1;height:8px;border-radius:4px;background:var(--dsw-alias-bg-base);overflow:hidden}
+.aura-prob-bar-fill{display:block;height:100%;border-radius:4px;background:var(--dsw-alias-state-business-primary);transition:width .2s ease}
+.aura-prob-bar-value{flex:none;min-width:34px;text-align:right;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.aura-prob-svg{display:block;width:100%;height:auto}
+.aura-prob-axis{stroke:var(--dsw-alias-border-l3);stroke-width:1}
+.aura-prob-line{fill:none;stroke:var(--dsw-alias-state-business-primary);stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}
+.aura-prob-dot{fill:var(--dsw-alias-state-business-primary)}
+.aura-prob-share{margin-top:12px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l3)}
+.aura-prob-share-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:6px}
+.aura-prob-share-title{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px}
+.aura-prob-share-text{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
+.aura-prob-share-reason,.aura-prob-share-meta{margin-top:4px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.aura-prob-share .qqn-actions{margin-top:8px}
 @media (max-width:640px){
 .aura-life-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 .aura-life-form{grid-template-columns:1fr}
@@ -1134,6 +1163,62 @@ ${TRAIL_CSS}
       } catch {
         return ''
       }
+    }
+
+    /** 0~1 → 百分比整数（面板展示用）。 */
+    function probabilityPercent(value) {
+      const number = Number(value)
+      if (!Number.isFinite(number)) return 0
+      return Math.round(Math.max(0, Math.min(1, number)) * 100)
+    }
+
+    /** 概率条（柱状图）：rows = [[label, 0~1], …]；纯 DOM，不引第三方。 */
+    function probabilityBars(rows) {
+      return h('div', { className: 'aura-prob-bars' },
+        asArray(rows).map((row, index) => {
+          const pair = Array.isArray(row) ? row : [row, 0]
+          const percent = probabilityPercent(pair[1])
+          return h('div', { key: 'prob-bar-' + index, className: 'aura-prob-bar-row' },
+            h('span', { className: 'aura-prob-bar-label' }, String(pair[0])),
+            h('span', { className: 'aura-prob-bar-track' },
+              h('span', { className: 'aura-prob-bar-fill', style: { width: percent + '%' } })),
+            h('span', { className: 'aura-prob-bar-value' }, percent + '%'),
+          )
+        }))
+    }
+
+    /** 情绪 valence → 概率折线（内联 SVG，无第三方）。 */
+    function probabilityLine(points) {
+      const list = asArray(points).map(point => asObject(point))
+      if (!list.length) return h('div', { className: 'qqn-mood-empty' }, '暂时没有数据')
+      const width = 260
+      const height = 96
+      const padX = 12
+      const padY = 12
+      const count = Math.max(1, list.length - 1)
+      const coords = list.map((point, index) => ({
+        key: 'prob-dot-' + index,
+        x: padX + (index / count) * (width - padX * 2),
+        y: height - padY - (probabilityPercent(point.probability) / 100) * (height - padY * 2),
+      }))
+      const polyline = coords.map(point => point.x.toFixed(1) + ',' + point.y.toFixed(1)).join(' ')
+      return h('svg', {
+        className: 'aura-prob-svg',
+        viewBox: '0 0 ' + width + ' ' + height,
+        role: 'img',
+        'aria-label': '按情绪愉悦度的主动概率折线',
+      },
+        h('line', { className: 'aura-prob-axis', x1: padX, y1: height - padY, x2: width - padX, y2: height - padY }),
+        h('line', { className: 'aura-prob-axis', x1: padX, y1: padY, x2: padX, y2: height - padY }),
+        h('polyline', { className: 'aura-prob-line', points: polyline }),
+        coords.map(point => h('circle', {
+          key: point.key,
+          className: 'aura-prob-dot',
+          cx: point.x.toFixed(1),
+          cy: point.y.toFixed(1),
+          r: 2.4,
+        })),
+      )
     }
 
     /** "HH:MM" → 今天/明天那个时间点的时间戳；非法返回 null。 */
@@ -1577,6 +1662,7 @@ ${TRAIL_CSS}
 
     function buildSpeakForm(config) {
       const cfg = asObject(config)
+      const sensitivity = Number(cfg.speakEmotionSensitivity)
       return {
         speakEnabled: cfg.speakEnabled === true,
         speakDryRun: cfg.speakDryRun !== false,
@@ -1586,6 +1672,8 @@ ${TRAIL_CSS}
         quietStart: typeof cfg.quietStart === 'string' ? cfg.quietStart : '23:30',
         quietEnd: typeof cfg.quietEnd === 'string' ? cfg.quietEnd : '07:30',
         speakStickerEnabled: cfg.speakStickerEnabled !== false,
+        speakShareEnabled: cfg.speakShareEnabled !== false,
+        speakEmotionSensitivity: Number.isFinite(sensitivity) ? Math.max(0, Math.min(2, sensitivity)) : 1,
       }
     }
 
@@ -1983,6 +2071,9 @@ ${TRAIL_CSS}
       const [lifeCustomOpen, setLifeCustomOpen] = React.useState(false)
       const [lifeSettings, setLifeSettings] = React.useState(() => buildLifeSettings({}))
       const [lifeSettingsBaseline, setLifeSettingsBaseline] = React.useState(() => buildLifeSettings({}))
+      const [speakSim, setSpeakSim] = React.useState(null)
+      const [speakSimError, setSpeakSimError] = React.useState('')
+      const [speakSimBusy, setSpeakSimBusy] = React.useState('')
 
       const mounted = React.useRef(true)
       const inflight = React.useRef(false)
@@ -2444,6 +2535,32 @@ ${TRAIL_CSS}
         }
       }, [])
 
+      /** 主动概率模拟：只读 GET/POST /dsh-aura/speak-api，失败不打断生活页。 */
+      const loadSpeakSim = React.useCallback(async (mode) => {
+        if (mode === 'manual') setSpeakSimBusy('refresh')
+        try {
+          const value = await fetchJson(SPEAK_API, { action: 'simulate' })
+          if (!mounted.current) return
+          setSpeakSim(asObject(value))
+          setSpeakSimError('')
+        } catch (error) {
+          if (mounted.current) setSpeakSimError(errorMessage(error))
+        } finally {
+          if (mode === 'manual' && mounted.current) setSpeakSimBusy('')
+        }
+      }, [])
+
+      const clearSpeakShare = React.useCallback(async () => {
+        try {
+          const value = await fetchJson(SPEAK_API, { action: 'clearShare' })
+          if (!mounted.current) return
+          setSpeakSim(asObject(value))
+          setSpeakSimError('')
+        } catch (error) {
+          if (mounted.current) setSpeakSimError(errorMessage(error))
+        }
+      }, [])
+
       const loadLifeHistory = React.useCallback(async () => {
         try {
           const value = await fetchJson(LIFE_API + '?action=list&limit=20')
@@ -2479,12 +2596,14 @@ ${TRAIL_CSS}
       React.useEffect(() => {
         void loadLife()
         void loadLifeHistory()
+        void loadSpeakSim()
         const timer = setInterval(() => {
           if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
           void loadLife()
+          void loadSpeakSim()
         }, LIFE_POLL_MS)
         return () => clearInterval(timer)
-      }, [loadLife, loadLifeHistory])
+      }, [loadLife, loadLifeHistory, loadSpeakSim])
 
       const quickLife = state => {
         const defaults = LIFE_QUICK_PLANS[state] || { wakeMode: 'open' }
@@ -3308,6 +3427,7 @@ ${TRAIL_CSS}
           setBlock('speak', { busy: false, notice: '', error: t('error.quietFormat') })
           return
         }
+        const sensitivity = Number(speakForm.speakEmotionSensitivity)
         void saveBlock('speak', {
           speakEnabled: speakForm.speakEnabled === true,
           speakDryRun: speakForm.speakDryRun === true,
@@ -3317,6 +3437,8 @@ ${TRAIL_CSS}
           quietStart: speakForm.quietStart.trim(),
           quietEnd: speakForm.quietEnd.trim(),
           speakStickerEnabled: speakForm.speakStickerEnabled === true,
+          speakShareEnabled: speakForm.speakShareEnabled !== false,
+          speakEmotionSensitivity: Number.isFinite(sensitivity) ? Math.max(0, Math.min(2, sensitivity)) : 1,
         }, 'notice.speakSaved')
       }
 
@@ -4489,6 +4611,130 @@ ${TRAIL_CSS}
         ? h('div', { className: 'qqn-error', role: 'status', 'aria-live': 'polite' }, '生活：' + lifeError)
         : (lifeNotice ? h('div', { className: 'qqn-feedback', role: 'status', 'aria-live': 'polite' }, lifeNotice) : null)
 
+      /* ---------------- 主动概率：命中线 / 分解 / 图表 / pendingShare ---------------- */
+      const sim = asObject(speakSim)
+      const simCurrent = asObject(sim.current)
+      const simParts = asObject(simCurrent.parts)
+      const simEmotion = asObject(simCurrent.emotionParts)
+      const simGates = asObject(sim.gates)
+      const simDaily = asObject(sim.daily)
+      const simShareInfo = asObject(sim.share)
+      const pendingShare = asObject(simShareInfo.pendingShare)
+      const simByState = asObject(sim.byState)
+      const simByDaypart = asObject(sim.byDaypart)
+      const simByTrigger = asObject(sim.byTrigger)
+      const simValence = asArray(sim.byValence)
+      const roundProb = value => Math.round((Number(value) || 0) * 10) / 10
+      const probPercent = probabilityPercent(simCurrent.probability)
+      const triggerLabels = { impulse: '心动', due: '约定', ritual: '仪式', return: '久别', idle: '空闲', share: '分享' }
+      const stateRows = LIFE_STATE_OPTIONS.map(([key, label]) => [label, asObject(simByState[key]).probability])
+      const daypartRows = [
+        ['早上', asObject(simByDaypart.morning).probability],
+        ['工作时段', asObject(simByDaypart.work).probability],
+        ['午间', asObject(simByDaypart.noon).probability],
+        ['晚间', asObject(simByDaypart.evening).probability],
+        ['深夜', asObject(simByDaypart.night).probability],
+      ]
+      const triggerRows = ['impulse', 'due', 'ritual', 'return', 'idle', 'share']
+        .map(key => [triggerLabels[key], asObject(simByTrigger[key]).probability])
+      const gateBadges = []
+      if (simGates.quiet) gateBadges.push('静默时段')
+      if (simGates.sleep) gateBadges.push('睡着')
+      if (simGates.dailyCapReached) gateBadges.push('今日已上限')
+      if (simGates.paused) gateBadges.push('暂停中')
+      if (simGates.suppressed) gateBadges.push('收尾抑制')
+      const shareRemaining = Number(pendingShare.remainingMs)
+      const shareStrength = Math.round((Number(pendingShare.strength) || 0) * 100)
+      const emotionChips = [
+        ['亲近', simEmotion.affection],
+        ['愉悦度', simEmotion.valence],
+        ['精力', simEmotion.energy],
+        ['社交需求', simEmotion.socialNeed],
+      ]
+      const breakdownText = [
+        '时段基线 ' + roundProb(simParts.base),
+        '关系 ×' + roundProb(simParts.stage),
+        '时机 ×' + roundProb(simParts.timing),
+        '未回复 ×' + roundProb(simParts.unanswered),
+        '生活 ×' + roundProb(simParts.life),
+        '情绪 +' + roundProb(simParts.impulse),
+        '没中 +' + roundProb(simParts.miss),
+      ].join(' · ')
+      const probSection = h(Section, {
+        title: '主动概率',
+        action: h(Button, {
+          disabled: speakSimBusy !== '',
+          onClick: () => { void loadSpeakSim('manual') },
+        }, speakSimBusy ? '刷新中…' : '刷新'),
+      },
+        speakSimError ? h('div', { className: 'qqn-error', role: 'status', 'aria-live': 'polite' }, '概率模型：' + speakSimError) : null,
+        !speakSim && !speakSimError ? h('div', { className: 'qqn-loading' }, '正在计算主动概率…') : null,
+        speakSim ? h('div', { className: 'aura-life-card aura-prob-card' },
+          h('div', { className: 'aura-prob-head' },
+            h('span', { className: 'aura-prob-line' }, '当前命中线 ' + roundProb(simCurrent.line)),
+            h('span', { className: 'aura-prob-value' }, probPercent + '%'),
+            h('span', { className: 'aura-life-badge' }, '触发 ' + (triggerLabels[simCurrent.trigger] || String(simCurrent.trigger || '空闲'))),
+            simEmotion.unsuitable ? h('span', { className: 'aura-life-badge aura-life-badge-warn' }, '情绪不适合主动') : null,
+            gateBadges.map(label => h('span', { key: 'prob-gate-' + label, className: 'aura-life-badge aura-life-badge-warn' }, label)),
+          ),
+          h('div', { className: 'aura-prob-breakdown' }, breakdownText),
+          h('div', { className: 'aura-prob-emotion' },
+            emotionChips.map(([label, value]) => h('span', {
+              key: 'prob-emotion-' + label,
+              className: 'aura-prob-chip',
+            }, label + ' ' + (Math.round((Number(value) || 0) * 100) / 100))),
+          ),
+          h('div', { className: 'aura-prob-note' }, String(simCurrent.note || '')),
+          h('div', { className: 'aura-prob-daily' },
+            '今天至少一次 ' + probabilityPercent(simDaily.pAtLeastOne) + '%'
+            + '（每 ' + Math.round(Number(simDaily.intervalMinutes) || 0) + ' 分钟一次，上限 '
+            + Math.round(Number(simDaily.cap) || 0) + ' 次，全天约 ' + Math.round(Number(simDaily.ticksPerDay) || 0) + ' 次）'),
+          h('div', { className: 'aura-prob-grid' },
+            h('div', { className: 'aura-prob-chart' },
+              h('div', { className: 'aura-prob-chart-title' }, '按生活状态'),
+              probabilityBars(stateRows),
+            ),
+            h('div', { className: 'aura-prob-chart' },
+              h('div', { className: 'aura-prob-chart-title' }, '按时段'),
+              probabilityBars(daypartRows),
+            ),
+            h('div', { className: 'aura-prob-chart' },
+              h('div', { className: 'aura-prob-chart-title' }, '按情绪愉悦度'),
+              probabilityLine(simValence),
+            ),
+            h('div', { className: 'aura-prob-chart' },
+              h('div', { className: 'aura-prob-chart-title' }, '按触发源'),
+              probabilityBars(triggerRows),
+            ),
+          ),
+          h('div', { className: 'aura-prob-share' },
+            h('div', { className: 'aura-prob-share-head' },
+              h('span', { className: 'aura-prob-share-title' }, pendingShare.text ? '想去分享' : '分享欲'),
+              pendingShare.text ? h('span', { className: 'aura-life-badge' }, '强度 ' + shareStrength + '%') : null,
+              pendingShare.text
+                ? h('span', { className: 'aura-life-badge' + (pendingShare.active ? '' : ' aura-life-badge-warn') },
+                    pendingShare.active ? '剩余 ' + formatUptime(shareRemaining, t) : '已过期')
+                : null,
+            ),
+            pendingShare.text
+              ? h(React.Fragment, null,
+                  h('div', { className: 'aura-prob-share-text' }, String(pendingShare.text)),
+                  pendingShare.reason ? h('div', { className: 'aura-prob-share-reason' }, '理由：' + String(pendingShare.reason)) : null,
+                  h('div', { className: 'aura-prob-share-meta' },
+                    '来源 ' + (String(pendingShare.source || '') || '—') + ' · '
+                    + (pendingShare.active ? '命中线固定 ' + Math.round(Number(simShareInfo.line) || 0) : '过期后自动忽略')),
+                  h('div', { className: 'qqn-actions' },
+                    h(Button, {
+                      disabled: speakSimBusy !== '',
+                      onClick: () => { void clearSpeakShare() },
+                    }, '清除分享'),
+                  ),
+                )
+              : h('div', { className: 'qqn-mood-empty' }, '现在没有想分享的事'),
+          ),
+        ) : null,
+      )
+
       const lifeSection = h(Section, {
         title: '生活',
         action: h('span', { className: 'qqn-unit' }, lifeBusy !== '' ? '处理中…' : '每 5 秒刷新'),
@@ -4678,6 +4924,7 @@ ${TRAIL_CSS}
 
       const speakSection = h(React.Fragment, null,
         lifeSection,
+        probSection,
         h(Section, { title: t('section.speak') },
         h('div', { className: 'qqn-rows' },
           h(Row, {
@@ -4789,6 +5036,35 @@ ${TRAIL_CSS}
               checked: speakForm.speakStickerEnabled === true,
               onChange: event => setSpeakForm(prev => ({ ...prev, speakStickerEnabled: event.target.checked })),
             }),
+          }),
+          h(Row, {
+            label: '允许分享欲',
+            hint: '有想分享的事时，用更高的命中线先开口（默认开）',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: speakForm.speakShareEnabled !== false,
+              onChange: event => setSpeakForm(prev => ({ ...prev, speakShareEnabled: event.target.checked })),
+            }),
+          }),
+          h(Row, {
+            label: '情绪权重',
+            hint: '0~2，1.0 保持原公式；越高情绪越影响主动',
+            control: h(React.Fragment, null,
+              h('input', {
+                className: 'qqn-input qqn-input-narrow',
+                type: 'number',
+                min: 0,
+                max: 2,
+                step: 0.1,
+                value: speakForm.speakEmotionSensitivity,
+                'aria-label': '情绪权重',
+                onChange: event => setSpeakForm(prev => ({
+                  ...prev,
+                  speakEmotionSensitivity: event.target.value === '' ? '' : Number(event.target.value),
+                })),
+              }),
+            ),
           }),
           h(Row, {
             label: t('row.speakLast'),

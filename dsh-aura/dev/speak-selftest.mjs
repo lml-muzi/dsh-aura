@@ -17,6 +17,11 @@
  *
  * 运行：node dev/speak-selftest.mjs   （可重复执行；退出码 0 = 全通过）
  */
+import { Readable } from 'node:stream'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { initLife } from '../host/life.js'
 import {
   installSpeak,
   inQuietHours,
@@ -47,6 +52,11 @@ import {
   normalizeEmotion,
   localDayKey,
   parseAllowlist,
+  evaluateDice,
+  emotionImpulseDetail,
+  socialNeedOf,
+  estimateSocialNeed,
+  normalizeDiceTrigger,
 } from '../host/speak.js'
 
 let passed = 0
@@ -236,12 +246,28 @@ function createHarness(options = {}) {
     emitInbound(event) { for (const fn of [...hooks.inbound]) fn(event) },
     emitOutbound(...args) { for (const fn of [...hooks.outbound]) fn(...args) },
   }
+  const webRoutes = []
+  const registeredTools = []
+  const webServer = {
+    register(registration) {
+      webRoutes.push(registration)
+      return () => { const index = webRoutes.indexOf(registration); if (index >= 0) webRoutes.splice(index, 1) }
+    },
+  }
+  const tools = {
+    register(tool) {
+      registeredTools.push(tool)
+      return () => { const index = registeredTools.indexOf(tool); if (index >= 0) registeredTools.splice(index, 1) }
+    },
+  }
   const ctx = {
     systemPrompt: { context(entry) { contextEntries.push(entry) } },
     get(name) {
       if (name === 'schedule') return schedule
       if (name === 'workspaceRegistry') return { list: () => [], archivedSessionIds: options.archived || [] }
       if (name === 'agents') return { get: sessionId => agents[sessionId] }
+      if (name === 'webServer') return webServer
+      if (name === 'tools') return tools
       return undefined
     },
     effect(fn) {
@@ -308,6 +334,10 @@ function createHarness(options = {}) {
     contextEntries,
     logLines,
     effects,
+    webRoutes,
+    webServer,
+    registeredTools,
+    tools,
     dispose() {
       for (const disposer of effects.splice(0)) { try { if (typeof disposer === 'function') disposer() } catch { /* ignore */ } }
     },
@@ -1027,6 +1057,373 @@ await withHarness({ agentOptions: { failTimes: 2 } }, async ({ harness, speak })
   await speak.tick()
   eq('followup 失败后清掉 bridge 主动标记', harness.bridge.proactiveMarks.size, 0)
 })
+
+// ---------------------------------------------------------------------------
+section('evaluateDice 纯函数（与旧公式逐位一致）')
+// ---------------------------------------------------------------------------
+{
+  const now = atLocal('20:00').getTime()
+  const soul = {
+    relation: { stage: 'familiar', lastUserAt: now - 60 * 60_000 },
+    speak: { unanswered: 0, missStreak: 1, perChat: { 'dm:u1': { unanswered: 1 } } },
+  }
+  const config = {
+    nearMinutes: 20, nearFactor: 0.15, farMinutes: 360, farFactor: 1.5,
+    missBonus: 10, bonusCap: 40,
+  }
+  const emotion = { valence: 0.4, arousal: 0.3, affection: 0.8, energy: 0.7 }
+  const before = JSON.stringify(soul)
+  const result = evaluateDice({ config, soul, emotion, life: { state: 'work' }, now, trigger: 'idle' })
+  // 45 × 1 × 1 × 0.5 × 1 + 冲动 15 + 没中 10 = 47.5；生活 work ×0.4 → 19
+  eq('命中线 = 旧公式（含生活倍率）', result.line, 19)
+  eq('概率 = 命中线 / 100', result.probability, 0.19)
+  eq('trigger 归一', result.trigger, 'idle')
+  eq('parts.base/stage/timing/unanswered/life/impulse/miss', [
+    result.parts.base, result.parts.stage, result.parts.timing,
+    result.parts.unanswered, result.parts.life, result.parts.impulse, result.parts.miss,
+  ], [45, 1, 1, 0.5, 0.4, 15, 10])
+  eq('parts 关键字段类型', Object.keys(result.parts).every(key => result.parts[key] !== undefined), true)
+  ok('note 含时段基线与生活倍率', result.note.includes('晚间 45') && result.note.includes('生活 0.4'), result.note)
+  eq('纯函数不修改 soul', JSON.stringify(soul), before)
+
+  const objectTrigger = evaluateDice({ config, soul, emotion, life: { state: 'work' }, now, trigger: { trigger: 'idle', factor: 1, overrideLine: null } })
+  eq('对象 trigger 与字符串等价', objectTrigger.line, result.line)
+
+  const wake = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'wake' })
+  eq('wake 固定线 80', wake.line, 80)
+  const due = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'due' })
+  eq('due 固定线 70', due.line, 70)
+  const ritual = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'ritual' })
+  eq('ritual 固定线 55', ritual.line, 55)
+  const share = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'share' })
+  eq('share 固定线 85', share.line, 85)
+  const impulse = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'impulse' })
+  ok('impulse 用 ×1.5', impulse.line > result.line * 2, { impulse: impulse.line, idle: result.line })
+  const sleep = evaluateDice({ config, soul, emotion, life: { state: 'sleep' }, now, trigger: 'idle' })
+  eq('sleep 命中线 0', sleep.line, 0)
+  eq('sleep note 标注生活状态', sleep.note.includes('在睡'), true)
+  eq('normalizeDiceTrigger share', normalizeDiceTrigger('share').overrideLine, 85)
+}
+
+// ---------------------------------------------------------------------------
+section('情绪分解 / 权重倍率 / 不合适标记')
+// ---------------------------------------------------------------------------
+{
+  const detail = emotionImpulseDetail({ affection: 0.8, energy: 0.8, valence: 0.5 })
+  ok('亲近分项 9', Math.abs(detail.affectionPart - 9) < 1e-9, detail.affectionPart)
+  ok('精力分项 6', Math.abs(detail.energyPart - 6) < 1e-9, detail.energyPart)
+  ok('愉悦分项 4', Math.abs(detail.valencePart - 4) < 1e-9, detail.valencePart)
+  eq('总冲动 19', detail.total, 19)
+  eq('与 impulseBonus 一致', detail.total, impulseBonus({ affection: 0.8, energy: 0.8, valence: 0.5 }))
+  eq('倍率 2 → 封顶 20', emotionImpulseDetail({ affection: 0.8, energy: 0.8, valence: 0.5 }, 2).total, 20)
+  eq('倍率 0 → 冲动 0', emotionImpulseDetail({ affection: 0.8, energy: 0.8, valence: 0.5 }, 0).total, 0)
+
+  const now = atLocal('20:00').getTime()
+  const soul = { relation: { stage: 'familiar', lastUserAt: now - 60 * 60_000 }, speak: {} }
+  const base = evaluateDice({ soul, emotion: { valence: 0, arousal: 0.2, affection: 0.5, energy: 0.6 }, now, trigger: 'idle' })
+  const moreAffection = evaluateDice({ soul, emotion: { valence: 0, arousal: 0.2, affection: 0.9, energy: 0.6 }, now, trigger: 'idle' })
+  const moreEnergy = evaluateDice({ soul, emotion: { valence: 0, arousal: 0.2, affection: 0.5, energy: 0.95 }, now, trigger: 'idle' })
+  const moreValence = evaluateDice({ soul, emotion: { valence: 0.8, arousal: 0.2, affection: 0.5, energy: 0.6 }, now, trigger: 'idle' })
+  ok('affection 单调性', moreAffection.line > base.line, { base: base.line, more: moreAffection.line })
+  ok('energy 单调性', moreEnergy.line > base.line)
+  ok('|valence| 单调性', moreValence.line > base.line)
+  eq('emotionParts 四元组', ['affection', 'valence', 'energy', 'socialNeed'].every(key => Number.isFinite(base.emotionParts[key])), true)
+  eq('没有 socialNeed 时按距上次互动估算', Math.abs(base.emotionParts.socialNeed - estimateSocialNeed({ lastUserAt: now - 60 * 60_000, now })) < 1e-9, true)
+  eq('socialNeed 直接读取', socialNeedOf({ socialNeed: 0.9 }), 0.9)
+  eq('socialNeed 优先级高于估算', evaluateDice({ soul, emotion: { valence: 0, arousal: 0.2, affection: 0.5, energy: 0.6, socialNeed: 0.93 }, now, trigger: 'idle' }).emotionParts.socialNeed, 0.93)
+
+  const bad = evaluateDice({ soul, emotion: { valence: -0.8, arousal: 0.9, affection: 0.5, energy: 0.6 }, now, trigger: 'idle' })
+  eq('负向高唤醒标记不合适', bad.emotionBlocked, true)
+  ok('标记但命中线不硬归零（行为不变）', bad.line > 0 && bad.note.includes('不适合'), bad.note)
+}
+
+// ---------------------------------------------------------------------------
+section('simulate：形状 / 状态 / 时段 / 情绪 / 触发源 / 日上限')
+// ---------------------------------------------------------------------------
+await withHarness({ installOptions: { life: { get: () => ({ state: 'awake', activity: '' }) } } }, async ({ harness, speak }) => {
+  const saves = harness.soul.saves
+  const agentCalls = harness.agents[mainBinding.sessionId].calls
+  const sim = speak.simulate({ now: harness.clock.ms })
+  eq('simulate 不写盘', harness.soul.saves, saves)
+  eq('simulate 不发送', harness.agents[mainBinding.sessionId].calls, agentCalls)
+  eq('顶层 ok', sim.ok, true)
+  eq('current 字段齐全', ['line', 'probability', 'parts', 'emotionParts', 'trigger'].every(key => sim.current[key] !== undefined), true)
+  eq('byState 六种生活状态', Object.keys(sim.byState).sort(), ['awake', 'out', 'play', 'rest', 'sleep', 'work'])
+  eq('byDaypart 五个时段', Object.keys(sim.byDaypart).sort(), ['evening', 'morning', 'night', 'noon', 'work'])
+  eq('byValence 11 个点（-1~1 步长 0.2）', sim.byValence.length, 11)
+  eq('byValence 首尾', [sim.byValence[0].x, sim.byValence[10].x], [-1, 1])
+  eq('byTrigger 六个触发源', Object.keys(sim.byTrigger).sort(), ['due', 'idle', 'impulse', 'return', 'ritual', 'share'])
+  eq('daily 字段', ['intervalMinutes', 'ticksPerDay', 'pAtLeastOne', 'cap'].every(key => sim.daily[key] !== undefined), true)
+  eq('daily interval', sim.daily.intervalMinutes, 30)
+  eq('daily ticksPerDay', sim.daily.ticksPerDay, 48)
+  eq('daily cap', sim.daily.cap, 3)
+  ok('daily pAtLeastOne 0~1', sim.daily.pAtLeastOne > 0 && sim.daily.pAtLeastOne < 1, sim.daily.pAtLeastOne)
+
+  ok('生活状态单调：rest > awake > work', sim.byState.rest.probability > sim.byState.awake.probability
+    && sim.byState.awake.probability > sim.byState.work.probability, sim.byState)
+  eq('work = play', sim.byState.work.probability, sim.byState.play.probability)
+  ok('out 在 work 与 awake 之间', sim.byState.out.probability > sim.byState.work.probability
+    && sim.byState.out.probability < sim.byState.awake.probability)
+  eq('sleep 概率 0', sim.byState.sleep.probability, 0)
+  ok('傍晚 > 工作时段基线', sim.byDaypart.evening.probability > sim.byDaypart.work.probability, sim.byDaypart)
+  ok('valence 正侧单调不减（0 → 1）', sim.byValence.slice(5).every((point, index, list) => index === 0 || point.probability >= list[index - 1].probability), sim.byValence.slice(5))
+  ok('|valence|=1 比 0 更容易', sim.byValence[10].probability > sim.byValence[5].probability)
+  eq('byTrigger share 固定 85', sim.byTrigger.share.line, 85)
+  eq('没有 pendingShare 时 share 不可用', sim.byTrigger.share.available, false)
+  eq('share 卡片 enabled', sim.share.enabled, true)
+
+  const sleepSim = speak.simulate({ now: harness.clock.ms, stateOverride: 'sleep' })
+  eq('stateOverride 改生活状态', sleepSim.current.parts.lifeState, 'sleep')
+  eq('stateOverride sleep 命中线 0', sleepSim.current.line, 0)
+  eq('stateOverride sleep 门控标记', sleepSim.gates.sleep, true)
+  const emotionSim = speak.simulate({ now: harness.clock.ms, emotionOverride: { valence: 0.9, affection: 0.95 } })
+  eq('emotionOverride 覆盖 valence', emotionSim.current.emotionParts.valence, 0.9)
+  eq('emotionOverride 覆盖 affection', emotionSim.current.emotionParts.affection, 0.95)
+})
+
+await withHarness({ config: { speakShareEnabled: false }, installOptions: { life: { get: () => ({ state: 'awake' }) } } }, async ({ harness, speak }) => {
+  const sim = speak.simulate({ now: harness.clock.ms })
+  eq('分享欲关闭：byTrigger.share = 0', sim.byTrigger.share.probability, 0)
+  eq('分享欲关闭：share.enabled false', sim.share.enabled, false)
+})
+
+// ---------------------------------------------------------------------------
+section('pendingShare：入队 / 消费 / 过期 / 优先级 / 门控')
+// ---------------------------------------------------------------------------
+await withHarness({}, async ({ harness, speak }) => {
+  rand = 0
+  const queued = speak.queueShare({ text: '刚听到一首歌，想分你一半', reason: '单曲循环', strength: 0.8, ttlMinutes: 60, source: 'test' })
+  eq('queueShare ok', queued.ok, true)
+  const stored = harness.soulData.speak.pendingShare
+  eq('pendingShare 文本', stored.text, '刚听到一首歌，想分你一半')
+  eq('pendingShare 强度', stored.strength, 0.8)
+  eq('pendingShare source', stored.source, 'test')
+  eq('ttl 60 分钟', stored.expiresAt - stored.createdAt, 60 * 60_000)
+  eq('snapshot 暴露 pendingShare', speak.snapshot().pendingShare.text, stored.text)
+  eq('snapshot 暴露概率', typeof speak.snapshot().nextProbability, 'number')
+
+  // 冲动也满足，但 share 优先级更高
+  const now = harness.clock.ms
+  const lastUserAt = now - 40 * 60_000
+  harness.soulData.relation.lastUserAt = lastUserAt
+  harness.soulData.speak.lastUserAt = lastUserAt
+  harness.soulData.speak.pendingImpulse = { at: lastUserAt, deltaValence: 0.6, deltaAffection: 0.1 }
+  harness.soulData.speak.impulseDayKey = ''
+  const result = await speak.tick()
+  eq('share 优先于 impulse', result.trigger, 'share')
+  eq('share 命中线 85', result.line, 85)
+  eq('share 命中', result.hit, true)
+  const sent = harness.agents[mainBinding.sessionId].sent.at(-1)
+  ok('prompt 带分享内容', sent.content[0].text.includes('刚听到一首歌'), sent.content[0].text.slice(0, 200))
+  eq('发送成功后消费', harness.soulData.speak.pendingShare, null)
+})
+
+await withHarness({ config: { speakDryRun: true } }, async ({ harness, speak }) => {
+  rand = 0
+  speak.queueShare({ text: '试运行不消费', ttlMinutes: 60 })
+  const result = await speak.tick()
+  eq('dry-run 命中 share', result.done, 'dry-run')
+  eq('dry-run 不消费 pendingShare', harness.soulData.speak.pendingShare.text, '试运行不消费')
+})
+
+await withHarness({}, async ({ harness, speak }) => {
+  rand = 0
+  speak.queueShare({ text: '过期了', ttlMinutes: 60 })
+  harness.soulData.speak.pendingShare.expiresAt = harness.clock.ms - 1000
+  eq('过期 snapshot.active false', speak.snapshot().pendingShare.active, false)
+  const result = await speak.tick()
+  ok('过期不触发 share', result.trigger !== 'share', result)
+  eq('过期 consumeShare 返回 null', speak.consumeShare(), null)
+  eq('过期 consumeShare 清掉记录', harness.soulData.speak.pendingShare, null)
+})
+
+await withHarness({}, async ({ harness, speak }) => {
+  rand = 0
+  speak.queueShare({ text: '日上限不消费', ttlMinutes: 60 })
+  harness.soulData.speak.dayKey = localDayKey(harness.clock.now())
+  harness.soulData.speak.todayCount = 3
+  const result = await speak.tick()
+  eq('日上限挡住', result.done, 'daily-cap')
+  eq('日上限不消费', harness.soulData.speak.pendingShare.text, '日上限不消费')
+})
+
+await withHarness({ installOptions: { life: { get: () => ({ state: 'sleep' }) } } }, async ({ harness, speak }) => {
+  rand = 0
+  speak.queueShare({ text: '睡着不消费', ttlMinutes: 60 })
+  const result = await speak.tick()
+  eq('sleep 门控优先', result.done, 'life-sleep')
+  eq('sleep 不消费 pendingShare', harness.soulData.speak.pendingShare.text, '睡着不消费')
+})
+
+await withHarness({}, async ({ harness, speak }) => {
+  rand = 0
+  speak.queueShare({ text: '静默别开口', ttlMinutes: 60 })
+  harness.clock.set(atLocal('02:00').getTime())
+  const result = await speak.tick()
+  eq('静默时段挡住 share', result.done, 'quiet')
+  eq('静默不消费 pendingShare', harness.soulData.speak.pendingShare.text, '静默别开口')
+})
+
+await withHarness({}, async ({ harness, speak }) => {
+  rand = 0
+  harness.setConfig({ speakShareEnabled: false })
+  const off = speak.queueShare({ text: '关了就别塞', ttlMinutes: 60 })
+  eq('关闭时 queueShare 拒绝', off.ok, false)
+  // 绕过 queueShare 直接塞一条，验证 tick 不消费 share 触发
+  harness.soulData.speak.pendingShare = { text: '遗留', createdAt: harness.clock.ms, expiresAt: harness.clock.ms + 60_000, strength: 0.6, source: 'test' }
+  const result = await speak.tick()
+  ok('关闭时 tick 不选 share', result.trigger !== 'share', result.trigger)
+  eq('关闭时也不消费', harness.soulData.speak.pendingShare.text, '遗留')
+
+  const cleared = speak.clearShare()
+  eq('clearShare 清掉', cleared.cleared, true)
+  eq('clearShare 后面板为空', speak.pendingShare(), null)
+})
+
+// ---------------------------------------------------------------------------
+section('queueShare 参数校验 / 默认值')
+// ---------------------------------------------------------------------------
+await withHarness({}, async ({ harness, speak }) => {
+  eq('空文本拒绝', speak.queueShare({ text: '   ' }).ok, false)
+  eq('超长拒绝', speak.queueShare({ text: '字'.repeat(121) }).ok, false)
+  const clamped = speak.queueShare({ text: '默认值', strength: 9, ttlMinutes: 1 })
+  eq('strength 夹到 1', clamped.pendingShare.strength, 1)
+  eq('ttl 最小 5 分钟', clamped.pendingShare.expiresAt - clamped.pendingShare.createdAt, 5 * 60_000)
+  eq('source 默认 tool', clamped.pendingShare.source, 'tool')
+  const overwritten = speak.queueShare({ text: '覆盖上一条' })
+  eq('再次入队覆盖', overwritten.pendingShare.text, '覆盖上一条')
+  eq('只保留一条', typeof harness.soulData.speak.pendingShare.text, 'string')
+})
+
+// ---------------------------------------------------------------------------
+section('speak-api：simulate / preview / clearShare / fence')
+// ---------------------------------------------------------------------------
+async function callSpeakApi(harness, method, path, body, headers = {}) {
+  const route = harness.webRoutes[0]
+  if (!route) throw new Error('没有注册 speak-api')
+  const stream = body === undefined
+    ? Readable.from([])
+    : Readable.from([Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))])
+  stream.method = method
+  stream.url = path
+  stream.headers = { host: '127.0.0.1:3080', ...headers }
+  const res = {
+    status: 0,
+    body: null,
+    writeHead(status) { this.status = status },
+    end(text) { this.body = text ? JSON.parse(text) : null },
+  }
+  await route.handler(stream, res)
+  return { status: res.status, body: res.body }
+}
+
+await withHarness({ installOptions: { life: { get: () => ({ state: 'awake' }) } } }, async ({ harness, speak }) => {
+  const route = harness.webRoutes[0]
+  ok('注册 prefix /dsh-aura/speak-api', route && route.kind === 'prefix' && route.path === '/dsh-aura/speak-api', route && { kind: route.kind, path: route.path })
+
+  let out = await callSpeakApi(harness, 'POST', '/dsh-aura/speak-api', { action: 'simulate', now: harness.clock.ms, stateOverride: 'play', emotionOverride: { valence: 0.6 } })
+  eq('POST simulate 200', out.status, 200)
+  eq('POST simulate ok', out.body.ok, true)
+  eq('POST simulate 带 current/byState', ['current', 'byState', 'byDaypart', 'byValence', 'byTrigger', 'daily'].every(key => out.body[key] !== undefined), true)
+
+  const saves = harness.soul.saves
+  out = await callSpeakApi(harness, 'POST', '/dsh-aura/speak-api', { action: 'simulate' })
+  eq('simulate 只读不写盘', harness.soul.saves, saves)
+
+  out = await callSpeakApi(harness, 'GET', '/dsh-aura/speak-api?action=preview')
+  eq('GET preview 200', out.status, 200)
+  eq('GET preview 有 current', typeof out.body.current.line, 'number')
+
+  speak.queueShare({ text: '面板清除我', ttlMinutes: 60 })
+  out = await callSpeakApi(harness, 'POST', '/dsh-aura/speak-api', { action: 'clearShare' })
+  eq('clearShare 200', out.status, 200)
+  eq('clearShare cleared', out.body.cleared, true)
+  eq('clearShare 后为空', out.body.share.pendingShare, null)
+
+  out = await callSpeakApi(harness, 'POST', '/dsh-aura/speak-api', { action: 'nope' })
+  eq('未知 action 400', out.status, 400)
+  out = await callSpeakApi(harness, 'GET', '/dsh-aura/speak-api?action=nope')
+  eq('未知 GET action 400', out.status, 400)
+  out = await callSpeakApi(harness, 'PUT', '/dsh-aura/speak-api')
+  eq('PUT 405', out.status, 405)
+  out = await callSpeakApi(harness, 'POST', '/dsh-aura/speak-api', { action: 'simulate' }, { origin: 'http://evil.example' })
+  eq('跨站 Origin 403', out.status, 403)
+  out = await callSpeakApi(harness, 'POST', '/dsh-aura/speak-api', { action: 'simulate' }, { host: 'evil.example:3080' })
+  eq('非 loopback Host 403', out.status, 403)
+  out = await callSpeakApi(harness, 'POST', '/dsh-aura/speak-api', 'not json')
+  eq('坏 JSON 400', out.status, 400)
+})
+
+// ---------------------------------------------------------------------------
+section('soul_share 工具')
+// ---------------------------------------------------------------------------
+await withHarness({}, async ({ harness }) => {
+  const tool = harness.registeredTools.find(item => item.name === 'soul_share')
+  ok('注册 soul_share', Boolean(tool), harness.registeredTools.map(item => item.name))
+
+  let result = await tool.execute({ text: '刚看到一只猫，很像你', reason: '突然想到', strength: 0.7, ttlMinutes: 30 })
+  eq('soul_share ok', result.ok, true)
+  eq('工具写入 pendingShare', harness.soulData.speak.pendingShare.text, '刚看到一只猫，很像你')
+  eq('工具 source', harness.soulData.speak.pendingShare.source, 'tool')
+  eq('工具 strength', harness.soulData.speak.pendingShare.strength, 0.7)
+
+  eq('工具拒绝空文本', (await tool.execute({ text: '' })).ok, false)
+  eq('工具拒绝超长', (await tool.execute({ text: '字'.repeat(121) })).ok, false)
+  harness.setConfig({ speakShareEnabled: false })
+  eq('工具尊重分享欲开关', (await tool.execute({ text: '关了' })).ok, false)
+})
+
+// ---------------------------------------------------------------------------
+section('life 钩子：plan/wake → queueShare')
+// ---------------------------------------------------------------------------
+{
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-aura-speak-share-'))
+  const config = { speakShareEnabled: true }
+  const fakeSpeak = {
+    calls: [],
+    queueShare(args) { this.calls.push(args); return { ok: true } },
+  }
+  const lifeState = { readConfig: () => ({ ...config }) }
+  const lifeCtx = { get: () => undefined }
+  const timers = { setInterval: () => 1, clearInterval: () => {} }
+  const fixedNow = atLocal('20:00').getTime()
+  const life = initLife({
+    ctx: lifeCtx,
+    state: lifeState,
+    log: () => {},
+    dir,
+    now: () => fixedNow,
+    random: () => 0,
+    timers,
+    autoSchedule: false,
+    getSpeak: () => fakeSpeak,
+  })
+  try {
+    life.plan({ state: 'play', activity: '听歌', wakeMode: 'open' })
+    eq('plan 玩 + activity 入队', fakeSpeak.calls.length, 1)
+    eq('分享强度 0.6', fakeSpeak.calls[0].strength, 0.6)
+    eq('分享 ttl 120 分钟', fakeSpeak.calls[0].ttlMinutes, 120)
+    eq('分享 source life', fakeSpeak.calls[0].source, 'life')
+    ok('分享文本带活动', fakeSpeak.calls[0].text.includes('听歌'), fakeSpeak.calls[0].text)
+
+    life.wake({ source: 'auto' })
+    eq('wake 也入队', fakeSpeak.calls.length, 2)
+    ok('wake 分享文案', fakeSpeak.calls[1].text.includes('刚醒'), fakeSpeak.calls[1].text)
+
+    life.plan({ state: 'work', wakeMode: 'open' })
+    eq('work 无 activity 不入队', fakeSpeak.calls.length, 2)
+
+    life.plan({ state: 'awake', activity: '发呆', wakeMode: 'open' })
+    eq('有 activity 就入队', fakeSpeak.calls.length, 3)
+
+    config.speakShareEnabled = false
+    life.plan({ state: 'play', activity: '听歌', wakeMode: 'open' })
+    eq('分享欲关闭时 life 不入队', fakeSpeak.calls.length, 3)
+  } finally {
+    life.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
 
 // ---------------------------------------------------------------------------
 const total = passed + failures.length
