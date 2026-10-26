@@ -1062,6 +1062,11 @@ window.__ModuleLoader__.load({
 .aura-prob-bar-value{flex:none;min-width:34px;text-align:right;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
 .aura-prob-svg{display:block;width:100%;height:auto}
 .aura-prob-axis{stroke:var(--dsw-alias-border-l3);stroke-width:1}
+.aura-prob-timeline{margin-bottom:12px}
+.aura-prob-quiet{fill:var(--dsw-specific-sidebar-fill);opacity:.7}
+.aura-prob-grid-line{stroke:var(--dsw-alias-border-l3);stroke-width:.5;stroke-dasharray:2 3}
+.aura-prob-now{stroke:var(--dsw-alias-state-business-primary);stroke-width:1;stroke-dasharray:3 3;opacity:.8}
+.aura-prob-axis-label{fill:var(--dsw-alias-label-tertiary);font-size:9px}
 .aura-prob-line{fill:none;stroke:var(--dsw-alias-state-business-primary);stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}
 .aura-prob-dot{fill:var(--dsw-alias-state-business-primary)}
 .aura-prob-share{margin-top:12px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l3)}
@@ -1218,6 +1223,89 @@ ${TRAIL_CSS}
           cy: point.y.toFixed(1),
           r: 2.4,
         })),
+      )
+    }
+
+    /** 一天 24h 的主动概率时间线：横轴时间、纵轴单次概率；静默时段画灰。 */
+    function probabilityTimeline(points, nowMs) {
+      const list = asArray(points).map(point => asObject(point)).filter(point => Number.isFinite(Number(point.minutes)))
+      if (!list.length) return h('div', { className: 'qqn-mood-empty' }, '暂时没有数据')
+      const width = 640
+      const height = 140
+      const padL = 36
+      const padR = 12
+      const padT = 12
+      const padB = 22
+      const plotW = width - padL - padR
+      const plotH = height - padT - padB
+      const xFor = minutes => padL + (Math.max(0, Math.min(1440, Number(minutes))) / 1440) * plotW
+      const yFor = probability => padT + (1 - Math.max(0, Math.min(1, Number(probability) || 0))) * plotH
+      // 静默时段合并成矩形
+      const quietRects = []
+      let active = null
+      for (const point of list) {
+        const quiet = point.quiet === true
+        if (quiet && !active) active = { start: Number(point.minutes), end: Number(point.minutes) + 30 }
+        else if (quiet && active) active.end = Number(point.minutes) + 30
+        else if (!quiet && active) { quietRects.push(active); active = null }
+      }
+      if (active) quietRects.push(active)
+      const coords = list.map(point => ({
+        x: xFor(point.minutes),
+        y: yFor(point.probability),
+      }))
+      const polyline = coords.map(point => point.x.toFixed(1) + ',' + point.y.toFixed(1)).join(' ')
+      const now = Number(nowMs)
+      const nowDate = new Date(Number.isFinite(now) ? now : Date.now())
+      const nowMinutes = nowDate.getHours() * 60 + nowDate.getMinutes()
+      const ticks = [0, 6, 12, 18, 24]
+      return h('svg', {
+        className: 'aura-prob-svg aura-prob-timeline-svg',
+        viewBox: '0 0 ' + width + ' ' + height,
+        role: 'img',
+        'aria-label': '一天中的主动概率时间线',
+      },
+        quietRects.map((rect, index) => h('rect', {
+          key: 'quiet-' + index,
+          className: 'aura-prob-quiet',
+          x: xFor(rect.start).toFixed(1),
+          y: padT,
+          width: Math.max(0, xFor(rect.end) - xFor(rect.start)).toFixed(1),
+          height: plotH,
+        })),
+        [0, 50, 100].map(value => h('line', {
+          key: 'grid-' + value,
+          className: 'aura-prob-grid-line',
+          x1: padL, y1: yFor(value / 100), x2: width - padR, y2: yFor(value / 100),
+        })),
+        h('line', { className: 'aura-prob-axis', x1: padL, y1: height - padB, x2: width - padR, y2: height - padB }),
+        h('line', { className: 'aura-prob-axis', x1: padL, y1: padT, x2: padL, y2: height - padB }),
+        [0, 50, 100].map(value => h('text', {
+          key: 'ylabel-' + value,
+          className: 'aura-prob-axis-label',
+          x: padL - 6,
+          y: yFor(value / 100) + 3,
+          textAnchor: 'end',
+        }, value + '%')),
+        ticks.map(hour => h('text', {
+          key: 'xlabel-' + hour,
+          className: 'aura-prob-axis-label',
+          x: xFor(hour * 60),
+          y: height - 6,
+          textAnchor: 'middle',
+        }, String(hour).padStart(2, '0'))),
+        h('polyline', { className: 'aura-prob-line', points: polyline }),
+        h('line', {
+          className: 'aura-prob-now',
+          x1: xFor(nowMinutes), y1: padT,
+          x2: xFor(nowMinutes), y2: height - padB,
+        }),
+        h('text', {
+          className: 'aura-prob-axis-label',
+          x: Math.max(padL + 10, xFor(nowMinutes) - 8),
+          y: padT + 10,
+          textAnchor: 'end',
+        }, '现在'),
       )
     }
 
@@ -4621,6 +4709,7 @@ ${TRAIL_CSS}
       const simShareInfo = asObject(sim.share)
       const pendingShare = asObject(simShareInfo.pendingShare)
       const simByState = asObject(sim.byState)
+      const simTimeline = asArray(sim.timeline)
       const simByDaypart = asObject(sim.byDaypart)
       const simByTrigger = asObject(sim.byTrigger)
       const simValence = asArray(sim.byValence)
@@ -4689,6 +4778,10 @@ ${TRAIL_CSS}
             '今天至少一次 ' + probabilityPercent(simDaily.pAtLeastOne) + '%'
             + '（每 ' + Math.round(Number(simDaily.intervalMinutes) || 0) + ' 分钟一次，上限 '
             + Math.round(Number(simDaily.cap) || 0) + ' 次，全天约 ' + Math.round(Number(simDaily.ticksPerDay) || 0) + ' 次）'),
+          h('div', { className: 'aura-prob-chart aura-prob-timeline' },
+            h('div', { className: 'aura-prob-chart-title' }, '一天中的主动概率（按当前状态/情绪）'),
+            probabilityTimeline(simTimeline, Number(speakSim.now) || Date.now()),
+          ),
           h('div', { className: 'aura-prob-grid' },
             h('div', { className: 'aura-prob-chart' },
               h('div', { className: 'aura-prob-chart-title' }, '按生活状态'),

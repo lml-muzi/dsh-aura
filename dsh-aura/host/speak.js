@@ -1252,6 +1252,31 @@ export function installSpeak(ctx, deps = {}) {
       }
     }
 
+    // 一天中的概率时间线：每 30 分钟一个点，横轴时间、纵轴单次主动概率；静默时段置 0。
+    const timeline = []
+    for (let minutes = 0; minutes < 24 * 60; minutes += 30) {
+      const simDate = new Date(at)
+      simDate.setHours(0, minutes, 0, 0)
+      const simAt = simDate.getTime()
+      const quiet = inQuietHours(config, simDate)
+      const simLastUserAt = gapMs === null ? 0 : Math.max(0, simAt - gapMs)
+      const evaluated = evaluateDice({
+        ...chartArgs,
+        soul: gapMs === null
+          ? data
+          : { ...data, relation: { ...(data.relation || {}), lastUserAt: simLastUserAt } },
+        now: simAt,
+        lastUserAt: simLastUserAt,
+      })
+      timeline.push({
+        minutes,
+        hour: Math.round((minutes / 60) * 100) / 100,
+        quiet,
+        line: quiet ? 0 : round1(evaluated.line),
+        probability: quiet ? 0 : round4(evaluated.probability),
+      })
+    }
+
     const intervalMinutes = config.intervalMinutes
     const ticksPerDay = intervalMinutes > 0 ? Math.floor((24 * 60) / intervalMinutes) : 0
     const cap = config.dailyCap
@@ -1276,6 +1301,7 @@ export function installSpeak(ctx, deps = {}) {
       byDaypart,
       byValence,
       byTrigger,
+      timeline,
       daily: { intervalMinutes, ticksPerDay, pAtLeastOne: round4(pAtLeastOne), cap },
       share: {
         enabled: config.shareEnabled !== false,
