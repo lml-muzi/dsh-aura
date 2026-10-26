@@ -339,7 +339,7 @@ const fake = makeFakeCtx()
 const logs = []
 const installed = installSoul(fake.ctx, { state, log: (...parts) => logs.push(parts.join(' ')) })
 const evolve = fake.tools.find((tool) => tool.name === 'soul_evolve')
-const identitySection = fake.sections.find((spec) => spec.name === 'aura:soul-identity')
+const identitySection = fake.contexts.find((spec) => spec.name === 'aura:growth')
 
 await test('工具已注册：parameters 是每属性 spec，config 收窄白名单', () => {
   assert.ok(evolve, '应注册 soul_evolve')
@@ -376,7 +376,8 @@ await test('写入：返回 growth/configChanged/backupId，落盘 soul.json，�
   const text = identitySection.text()
   assert.ok(text.includes(GROWTH_HEADER))
   assert.ok(text.includes('- [self] 我比自己以为的更能承认不确定'))
-  assert.ok(text.endsWith('[END AURA]'))
+  const identityText = fake.sections.find((spec) => spec.name === 'aura:soul-identity').text()
+  assert.ok(identityText.endsWith('[END AURA]'))
   assert.equal(text, identitySection.text(), '无改动时每轮渲染应一致')
 
   const manifest = JSON.parse(readFileSync(join(backupsRoot, result.backupId, 'manifest.json'), 'utf8'))
@@ -435,7 +436,7 @@ await test('config：通过 state.writeConfig 写 config.json，interests/streng
   assert.equal(cfg.soulEnabled, true)
   assert.deepEqual(installed.get().identity.interests, ['听歌', '看人折腾项目'])
   assert.deepEqual(installed.get().identity.strengths, ['记得住细节'])
-  const text = identitySection.text()
+  const text = fake.sections.find((spec) => spec.name === 'aura:soul-identity').text()
   assert.ok(text.includes('## 性格'))
   assert.ok(text.includes('嘴硬心软'))
   assert.ok(text.length <= 880)
@@ -475,7 +476,7 @@ await test('重新装载：growth 从 soul.json 恢复，reset 不清成长', ()
   const again = makeFakeCtx()
   const reloaded = installSoul(again.ctx, { state, log: () => {} })
   assert.equal(reloaded.listGrowth().length, installed.listGrowth().length)
-  const section = again.sections.find((spec) => spec.name === 'aura:soul-identity')
+  const section = again.contexts.find((spec) => spec.name === 'aura:growth')
   assert.ok(section.text().includes(GROWTH_HEADER))
   const before = reloaded.listGrowth().length
   reloaded.reset('all')

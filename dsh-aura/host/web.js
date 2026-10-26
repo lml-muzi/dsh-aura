@@ -11,7 +11,7 @@
  * POST /dsh-aura/api/proactive/tick  旧面板兼容入口
  */
 import { importImConnectQq, redactConfig, writeConfig } from './state.js'
-import { buildIdentityText } from './soul.js'
+import { renderSoulPreview } from './soul.js'
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
 const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
@@ -169,7 +169,7 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
               if (Object.prototype.hasOwnProperty.call(patch, key)) cfg[key] = patch[key]
             }
           }
-          const text = buildIdentityText(soul.get(), cfg)
+          const text = renderSoulPreview(soul.get(), cfg)
           json(res, 200, { ok: true, text, chars: Array.from(text).length, budget: cfg.soulPromptBudget })
           return
         }

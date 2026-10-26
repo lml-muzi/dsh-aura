@@ -304,8 +304,8 @@ await test('首次反思：growth(source=reflection) + growthReflection + soul.j
   assert.equal(disk.growth[0].source, 'reflection')
   assert.deepEqual(disk.growthReflection, soul.growthReflection)
 
-  const identity = mainWorld.fake.sections.find((spec) => spec.name === 'aura:soul-identity')
-  assert.ok(identity.text().includes(DEFAULT_TEXT))
+  const growthCtx = mainWorld.fake.contexts.find((spec) => spec.name === 'aura:growth')
+  assert.ok(growthCtx.text().includes(DEFAULT_TEXT))
 
   const last = mainWorld.reflection.lastState()
   assert.equal(last.ok, true)

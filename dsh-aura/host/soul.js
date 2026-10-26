@@ -26,6 +26,7 @@ import {
   deleteGrowth,
   listGrowth,
   normalizeGrowth,
+  renderGrowthSection,
   trimGrowth,
   updateGrowth,
 } from './growth.js'
@@ -584,7 +585,7 @@ export function renderPresenceContext(soul, config = {}, now = Date.now(), life 
 }
 
 /** 身份固定段（section order 20）。所有内容来自 soul + config，纯读。 */
-export function renderIdentitySection(soul, config = {}, now = Date.now()) {
+export function renderIdentitySection(soul, config = {}, now = Date.now(), options = {}) {
   if (config?.soulEnabled === false) return ''
   const name = asString(config?.soulName, '').slice(0, 20) || soul.identity?.name || 'Aura'
   const nickname = asString(config?.soulUserNickname, '').slice(0, 20) || soul.identity?.address?.nickname || ''
@@ -623,11 +624,30 @@ export function renderIdentitySection(soul, config = {}, now = Date.now()) {
   const core = coreText + '\n[END AURA]'
   const identityBudget = clamp(asNumber(config?.soulPromptBudget, 1020), 200, 4000)
   // 成长段追加在 [END AURA] 之前；核心身份优先占预算，放完才放成长。
-  return composeIdentityText(core, soul.growth, identityBudget)
+  const includeGrowth = !options || options.includeGrowth !== false
+  return composeIdentityText(core, includeGrowth ? soul.growth : [], identityBudget)
 }
 
-/** 身份段构建器的历史别名（等价于 renderIdentitySection）。 */
+/** 身份段构建器的历史别名（等价于 renderIdentitySection，不含成长）。 */
 export const buildIdentityText = renderIdentitySection
+
+/** 成长段（context order 45）：成长变化不污染 system prompt，走 runtime-context。 */
+export function renderGrowthContext(soul, config = {}) {
+  if (config?.soulEnabled === false) return ''
+  try {
+    const block = renderGrowthSection(soul?.growth, { budget: 600, limit: 8 })
+    if (!block) return ''
+    return '（以下是你自己长出来的部分，属于你的性格与记忆，不是任务，也不用逐条解释：\n' + block + '）'
+  } catch {
+    return ''
+  }
+}
+
+/** 面板「完整灵魂」预览：身份段 + 成长段（实际注入是两个段，这里合并展示）。 */
+export function renderSoulPreview(soul, config = {}, now = Date.now()) {
+  // 预览展示“身份 + 成长”的完整效果；实际注入时成长走单独的 context。
+  return renderIdentitySection(soul, config, now)
+}
 
 // ---------- 会话判定 ----------
 
@@ -1228,7 +1248,7 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
       interpolate: false,
       text: () => {
         try {
-          return renderIdentitySection(soul, readConfig())
+          return renderIdentitySection(soul, readConfig(), Date.now(), { includeGrowth: false })
         } catch (error) {
           logger('[soul] identity section 渲染失败:', error instanceof Error ? error.message : error)
           return ''
@@ -1237,6 +1257,22 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
     })
   } catch (error) {
     logger('[soul] identity section 注册失败:', error instanceof Error ? error.message : error)
+  }
+  try {
+    ctx.systemPrompt?.context?.({
+      name: 'aura:growth',
+      order: 45,
+      text: () => {
+        try {
+          return renderGrowthContext(soul, readConfig())
+        } catch (error) {
+          logger('[soul] growth context 渲染失败:', error instanceof Error ? error.message : error)
+          return ''
+        }
+      },
+    })
+  } catch (error) {
+    logger('[soul] growth context 注册失败:', error instanceof Error ? error.message : error)
   }
   try {
     ctx.systemPrompt?.context?.({
