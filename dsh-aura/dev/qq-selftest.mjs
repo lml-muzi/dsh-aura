@@ -26,7 +26,7 @@ import {
   isQqMarkdownRejection,
   qqUploadFileType,
   looksLikeImageBytes,
-} from '../host/qq.js'
+} from '../host/qq-legacy.js'
 
 let passed = 0
 const failures = []
