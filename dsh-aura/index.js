@@ -14,6 +14,7 @@ import { initPersona } from './host/persona.js'
 import { initMeme, dispose as disposeMeme, getMemeState } from './host/meme.js'
 import { createDiary } from './host/diary.js'
 import { installEmotion } from './host/emotion.js'
+import { installConfigTool } from './host/config-tool.js'
 import { installMemory } from './host/memory.js'
 import { installArchive } from './host/archive.js'
 import { installSpeak } from './host/speak.js'
@@ -95,6 +96,9 @@ export function apply(ctx, config = {}) {
   // 人设（收编 dsh-soul）：独立 persona.json，注入人设段并注册 /dsh-aura/persona-api 与 set_persona 工具
   const persona = initPersona({ ctx, state, log })
   const disposers = []
+  // 给 Aura 一个受控的配置口（只改运行参数，不碰身份/凭据）
+  const configTool = installConfigTool({ ctx, state, log })
+  if (configTool && typeof configTool.dispose === 'function') disposers.push(configTool.dispose)
   // Aura 模式：一个只带灵魂能力的会话预设；工具由本插件全局注册。
   try {
     void ctx.agentPresets?.register?.({
