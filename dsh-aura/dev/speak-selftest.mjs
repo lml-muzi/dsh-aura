@@ -57,6 +57,9 @@ import {
   socialNeedOf,
   estimateSocialNeed,
   normalizeDiceTrigger,
+  emotionShareFactor,
+  shareStrengthFactor,
+  withinRecentInteraction,
 } from '../host/speak.js'
 
 let passed = 0
@@ -1074,15 +1077,17 @@ section('evaluateDice 纯函数（与旧公式逐位一致）')
   const emotion = { valence: 0.4, arousal: 0.3, affection: 0.8, energy: 0.7 }
   const before = JSON.stringify(soul)
   const result = evaluateDice({ config, soul, emotion, life: { state: 'work' }, now, trigger: 'idle' })
-  // 45 × 1 × 1 × 0.5 × 1 + 冲动 15 + 没中 10 = 47.5；生活 work ×0.4 → 19
-  eq('命中线 = 旧公式（含生活倍率）', result.line, 19)
-  eq('概率 = 命中线 / 100', result.probability, 0.19)
+  // 45 × 1 × 1 × 0.5 × 1 + 冲动 15 + 社交 0.9 + 没中 10 = 48.4；生活 work ×0.4 → 19.36
+  ok('命中线 = 旧公式 + 社交需求加成', Math.abs(result.line - 19.36) < 1e-9, result.line)
+  ok('概率 = 命中线 / 100', Math.abs(result.probability - 0.1936) < 1e-9, result.probability)
   eq('trigger 归一', result.trigger, 'idle')
   eq('parts.base/stage/timing/unanswered/life/impulse/miss', [
     result.parts.base, result.parts.stage, result.parts.timing,
     result.parts.unanswered, result.parts.life, result.parts.impulse, result.parts.miss,
   ], [45, 1, 1, 0.5, 0.4, 15, 10])
   eq('parts 关键字段类型', Object.keys(result.parts).every(key => result.parts[key] !== undefined), true)
+  ok('社交需求 impact = 0.2 × socialNeed × 20', Math.abs(result.parts.socialNeedImpact - 0.9) < 1e-9, result.parts.socialNeedImpact)
+  ok('socialNeed 从距上次互动估算', Math.abs(result.parts.socialNeed - 0.2167) < 0.001, result.parts.socialNeed)
   ok('note 含时段基线与生活倍率', result.note.includes('晚间 45') && result.note.includes('生活 0.4'), result.note)
   eq('纯函数不修改 soul', JSON.stringify(soul), before)
 
@@ -1090,19 +1095,54 @@ section('evaluateDice 纯函数（与旧公式逐位一致）')
   eq('对象 trigger 与字符串等价', objectTrigger.line, result.line)
 
   const wake = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'wake' })
-  eq('wake 固定线 80', wake.line, 80)
+  eq('wake 线 = 80 × 情绪（正向情绪 clamp 到 100）', wake.line, 100)
+  ok('wake 情绪倍率 > 1', wake.parts.shareEmotionFactor > 1, wake.parts.shareEmotionFactor)
   const due = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'due' })
   eq('due 固定线 70', due.line, 70)
   const ritual = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'ritual' })
   eq('ritual 固定线 55', ritual.line, 55)
   const share = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'share' })
-  eq('share 固定线 85', share.line, 85)
+  eq('share 线 = 85 × 生活 × 情绪 × 强度（正向情绪 clamp 到 100）', share.line, 100)
+  eq('share 默认强度倍率 1.0', share.parts.shareStrengthFactor, 1)
   const impulse = evaluateDice({ config, soul, emotion, life: 'awake', now, trigger: 'impulse' })
   ok('impulse 用 ×1.5', impulse.line > result.line * 2, { impulse: impulse.line, idle: result.line })
   const sleep = evaluateDice({ config, soul, emotion, life: { state: 'sleep' }, now, trigger: 'idle' })
   eq('sleep 命中线 0', sleep.line, 0)
   eq('sleep note 标注生活状态', sleep.note.includes('在睡'), true)
   eq('normalizeDiceTrigger share', normalizeDiceTrigger('share').overrideLine, 85)
+}
+
+// ---------------------------------------------------------------------------
+section('情绪加权 / 分享强度 / 互动窗口（纯函数）')
+// ---------------------------------------------------------------------------
+{
+  const HOUR_MS = 60 * 60 * 1000
+  const neutral = { valence: 0, arousal: 0.2, affection: 0.5, energy: 0.6 }
+  eq('无情绪数据 → 1.0', emotionShareFactor({}, []), 1)
+  eq('中性情绪 → 1.0', emotionShareFactor(neutral), 1)
+  ok('正向 valence/affection/energy 提高', emotionShareFactor({ valence: 0.6, arousal: 0.4, affection: 0.85, energy: 0.85 }) > 1)
+  ok('负向 valence 降低', emotionShareFactor({ ...neutral, valence: -0.6 }) < 1)
+  const episode = (type, level = 'medium', intensity = 0.6, expiresAt = Date.now() + HOUR_MS) => ({ type, level, intensity, expiresAt })
+  ok('好奇 episode 提高', emotionShareFactor(neutral, [episode('curiosity')]) > 1)
+  ok('开心 episode 提高', emotionShareFactor(neutral, [episode('joy')]) > 1)
+  ok('悲伤 episode 降低', emotionShareFactor(neutral, [episode('sadness')]) < 1)
+  ok('愤怒 episode 降低', emotionShareFactor(neutral, [episode('anger')]) < 1)
+  ok('恐惧 episode 降低', emotionShareFactor(neutral, [episode('fear')]) < 1)
+  eq('上限 1.6', emotionShareFactor({ valence: 1, arousal: 0.5, affection: 1, energy: 1 }, [episode('joy', 'heavy', 1)]), 1.6)
+  eq('下限 0.2', emotionShareFactor({ valence: -1, arousal: 0.5, affection: 0, energy: 0 }, [episode('sadness', 'heavy', 1)]), 0.2)
+  eq('过期 episode 不参与', emotionShareFactor(neutral, [episode('sadness', 'heavy', 1, Date.now() - 1)]), 1)
+
+  eq('strength 0.6（默认）→ 1.0', shareStrengthFactor(0.6), 1)
+  ok('strength 高 → 倍率更高', shareStrengthFactor(0.9) > 1)
+  ok('strength 低 → 倍率更低', shareStrengthFactor(0.3) < 1)
+  eq('strength 上限 1.3', shareStrengthFactor(1), 1.3)
+  eq('strength 下限 0.7', shareStrengthFactor(0), 0.7)
+
+  const nowAt = Date.now()
+  eq('互动窗口 0 = 不限', withinRecentInteraction(nowAt - 10 * HOUR_MS, nowAt, 0), true)
+  eq('互动窗口内命中', withinRecentInteraction(nowAt - 5 * HOUR_MS, nowAt, 6), true)
+  eq('互动窗口外拒绝', withinRecentInteraction(nowAt - 7 * HOUR_MS, nowAt, 6), false)
+  eq('从没互动过 + 窗口 >0 拒绝', withinRecentInteraction(0, nowAt, 6), false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,6 +1175,13 @@ section('情绪分解 / 权重倍率 / 不合适标记')
   const bad = evaluateDice({ soul, emotion: { valence: -0.8, arousal: 0.9, affection: 0.5, energy: 0.6 }, now, trigger: 'idle' })
   eq('负向高唤醒标记不合适', bad.emotionBlocked, true)
   ok('标记但命中线不硬归零（行为不变）', bad.line > 0 && bad.note.includes('不适合'), bad.note)
+
+  const lowSocial = evaluateDice({ soul, emotion: { valence: 0, arousal: 0.2, affection: 0.5, energy: 0.6, socialNeed: 0 }, now, trigger: 'idle' })
+  const highSocial = evaluateDice({ soul, emotion: { valence: 0, arousal: 0.2, affection: 0.5, energy: 0.6, socialNeed: 0.9 }, now, trigger: 'idle' })
+  ok('社交需求进冲动：0.2 × 0.9 × 20 = 3.6', Math.abs((highSocial.line - lowSocial.line) - 3.6) < 1e-9, highSocial.line - lowSocial.line)
+  eq('社交 impact 写进 parts', highSocial.parts.socialNeedImpact, 3.6)
+  const zeroWeight = evaluateDice({ config: { socialNeedWeight: 0 }, soul, emotion: { valence: 0, arousal: 0.2, affection: 0.5, energy: 0.6, socialNeed: 0.9 }, now, trigger: 'idle' })
+  ok('权重 0 → 社交不加成', Math.abs(zeroWeight.line - lowSocial.line) < 1e-9, zeroWeight.line)
 }
 
 // ---------------------------------------------------------------------------
@@ -1168,9 +1215,14 @@ await withHarness({ installOptions: { life: { get: () => ({ state: 'awake', acti
   ok('傍晚 > 工作时段基线', sim.byDaypart.evening.probability > sim.byDaypart.work.probability, sim.byDaypart)
   ok('valence 正侧单调不减（0 → 1）', sim.byValence.slice(5).every((point, index, list) => index === 0 || point.probability >= list[index - 1].probability), sim.byValence.slice(5))
   ok('|valence|=1 比 0 更容易', sim.byValence[10].probability > sim.byValence[5].probability)
-  eq('byTrigger share 固定 85', sim.byTrigger.share.line, 85)
+  eq('byTrigger share 用动态线（中性情绪 = 85）', sim.byTrigger.share.line, 85)
   eq('没有 pendingShare 时 share 不可用', sim.byTrigger.share.available, false)
   eq('share 卡片 enabled', sim.share.enabled, true)
+  eq('share.factors 三项', ['life', 'emotion', 'strength'].every(key => typeof sim.share.factors[key] === 'number'), true)
+  eq('share.factors 中性值', [sim.share.factors.life, sim.share.factors.emotion, sim.share.factors.strength], [1, 1, 1])
+  eq('daily.shareDaily 字段', ['cap', 'count', 'dayKey'].every(key => sim.daily.shareDaily[key] !== undefined), true)
+  eq('daily.shareDaily cap 默认 2', sim.daily.shareDaily.cap, 2)
+  eq('byTrigger.share 带 factors', typeof sim.byTrigger.share.factors.emotion, 'number')
 
   const sleepSim = speak.simulate({ now: harness.clock.ms, stateOverride: 'sleep' })
   eq('stateOverride 改生活状态', sleepSim.current.parts.lifeState, 'sleep')
@@ -1179,6 +1231,8 @@ await withHarness({ installOptions: { life: { get: () => ({ state: 'awake', acti
   const emotionSim = speak.simulate({ now: harness.clock.ms, emotionOverride: { valence: 0.9, affection: 0.95 } })
   eq('emotionOverride 覆盖 valence', emotionSim.current.emotionParts.valence, 0.9)
   eq('emotionOverride 覆盖 affection', emotionSim.current.emotionParts.affection, 0.95)
+  ok('正向情绪抬高分享线', emotionSim.share.line > 85, emotionSim.share)
+  ok('分享线 factors 跟着情绪变', emotionSim.share.factors.emotion > 1, emotionSim.share.factors)
 })
 
 await withHarness({ config: { speakShareEnabled: false }, installOptions: { life: { get: () => ({ state: 'awake' }) } } }, async ({ harness, speak }) => {
@@ -1211,7 +1265,7 @@ await withHarness({}, async ({ harness, speak }) => {
   harness.soulData.speak.impulseDayKey = ''
   const result = await speak.tick()
   eq('share 优先于 impulse', result.trigger, 'share')
-  eq('share 命中线 85', result.line, 85)
+  eq('share 命中线 = 85 × 强度 1.3（0.8 强度）→ clamp 100', result.line, 100)
   eq('share 命中', result.hit, true)
   const sent = harness.agents[mainBinding.sessionId].sent.at(-1)
   ok('prompt 带分享内容', sent.content[0].text.includes('刚听到一首歌'), sent.content[0].text.slice(0, 200))
@@ -1278,6 +1332,74 @@ await withHarness({}, async ({ harness, speak }) => {
   const cleared = speak.clearShare()
   eq('clearShare 清掉', cleared.cleared, true)
   eq('clearShare 后面板为空', speak.pendingShare(), null)
+})
+
+// ---------------------------------------------------------------------------
+section('分享/普通主动窗口 / 分享冷却 / 分享日上限 / 醒来情绪不适合')
+// ---------------------------------------------------------------------------
+await withHarness({ config: { speakShareRecentHours: 6 } }, async ({ harness, speak }) => {
+  rand = 0
+  speak.queueShare({ text: '窗口外的分享', ttlMinutes: 60 })
+  harness.soulData.relation.lastUserAt = harness.clock.ms - 7 * 60 * 60_000
+  harness.soulData.speak.lastUserAt = harness.soulData.relation.lastUserAt
+  const result = await speak.tick()
+  ok('分享互动窗口外不选 share', result.trigger !== 'share', result.trigger)
+  eq('窗口外 pendingShare 保留', (harness.soulData.speak.pendingShare || {}).text, '窗口外的分享')
+})
+
+await withHarness({ config: { speakShareRecentHours: 0 } }, async ({ harness, speak }) => {
+  rand = 0
+  harness.soulData.relation.lastUserAt = harness.clock.ms - 7 * 60 * 60_000
+  harness.soulData.speak.lastUserAt = harness.soulData.relation.lastUserAt
+  speak.queueShare({ text: '窗口 0 = 不限', ttlMinutes: 60 })
+  const result = await speak.tick()
+  eq('窗口 0 保持旧行为（可以分享）', result.trigger, 'share')
+  eq('分享发出后消费', harness.soulData.speak.pendingShare, null)
+})
+
+await withHarness({ config: { speakProactiveRecentHours: 6 } }, async ({ harness, speak }) => {
+  rand = 0
+  harness.soulData.relation.lastUserAt = harness.clock.ms - 7 * 60 * 60_000
+  harness.soulData.speak.lastUserAt = harness.soulData.relation.lastUserAt
+  const result = await speak.tick()
+  eq('普通主动窗口外 no-recent', result.done, 'no-recent')
+  eq('普通主动窗口外不发送', harness.agents[mainBinding.sessionId].sent.length, 0)
+})
+
+await withHarness({}, async ({ harness, speak }) => {
+  rand = 0
+  speak.queueShare({ text: '第一次分享', strength: 0.6, ttlMinutes: 120 })
+  const first = await speak.tick()
+  eq('第一次分享命中', first.trigger, 'share')
+  eq('分享单独记 shareCount', harness.soulData.speak.shareCount, 1)
+  eq('分享不占普通主动 todayCount', harness.soulData.speak.todayCount, 0)
+  eq('冷却从成功发送时算', harness.soulData.speak.lastShareAt, harness.clock.ms)
+  eq('分享成功后消费 pendingShare', harness.soulData.speak.pendingShare, null)
+
+  speak.queueShare({ text: '冷却内的第二条', ttlMinutes: 120 })
+  const second = await speak.tick()
+  ok('分享冷却内不再选 share', second.trigger !== 'share', second.trigger)
+  eq('冷却内 pendingShare 不消费', harness.soulData.speak.pendingShare.text, '冷却内的第二条')
+})
+
+await withHarness({ config: { speakShareDailyCap: 1 } }, async ({ harness, speak }) => {
+  rand = 0
+  harness.soulData.speak.shareDayKey = localDayKey(harness.clock.now())
+  harness.soulData.speak.shareCount = 1
+  harness.soulData.speak.lastShareAt = 0
+  speak.queueShare({ text: '额度用完的那条', ttlMinutes: 120 })
+  const result = await speak.tick()
+  ok('分享日上限挡住 share', result.trigger !== 'share', result.trigger)
+  eq('到达分享日上限不消费 pendingShare', harness.soulData.speak.pendingShare.text, '额度用完的那条')
+})
+
+await withHarness({}, async ({ harness, speak }) => {
+  rand = 0
+  harness.emotionState.valence = -0.8
+  harness.emotionState.arousal = 0.9
+  const result = await speak.notifyWake()
+  eq('醒来遇明显不适合 → emotion-unsuitable', result.done, 'emotion-unsuitable')
+  eq('醒来不适合时不发送', harness.agents[mainBinding.sessionId].sent.length, 0)
 })
 
 // ---------------------------------------------------------------------------

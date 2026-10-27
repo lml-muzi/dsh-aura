@@ -42,6 +42,11 @@ export const STATE_LABEL = Object.freeze({
   out: '在外面',
 })
 
+/** 随机生活分享：同一状态 2 小时内只入队一次（避免每个 tick 都塞 pendingShare）。 */
+export const RANDOM_SHARE_DEDUPE_MS = 2 * 60 * 60 * 1000
+/** 随机生活分享文案里的状态短语（只有 play / out / rest 会分享）。 */
+const RANDOM_SHARE_PHRASE = Object.freeze({ play: '在玩', out: '在外面', rest: '在休息' })
+
 /** random 唤醒窗口的默认分钟区间（按状态）。 */
 export const RANDOM_WAKE_MINUTES = Object.freeze({
   sleep: [300, 540], // 5~9h
@@ -204,6 +209,9 @@ export function defaultsLife(now = Date.now()) {
     // 内部字段：中途醒之后「接着睡」要恢复的原计划；以及每 10 分钟一次的抽查时间点。
     resume: null,
     midWakeCheckedAt: null,
+    // 随机生活分享去重：上次因哪种状态入队过分享、以及时间。
+    lastShareAt: 0,
+    lastShareState: '',
   }
 }
 
@@ -281,6 +289,8 @@ export function normalizeLife(raw = {}, now = Date.now()) {
     history: normalizeHistory(source.history, now),
     resume: normalizeResume(source.resume),
     midWakeCheckedAt: numOrNull(source.midWakeCheckedAt),
+    lastShareAt: numOrNull(source.lastShareAt) ?? 0,
+    lastShareState: sliceCodepoints(str(source.lastShareState).trim(), 16),
   }
 }
 
@@ -944,13 +954,21 @@ export function initLife(options = {}) {
     return speak && typeof speak.queueShare === 'function' ? speak : null
   }
 
-  function queueLifeShare(text, reason) {
+  function queueLifeShare(text, reason, options = {}) {
     const speak = shareSpeak()
-    if (!speak) return
+    if (!speak) return false
     try {
-      speak.queueShare({ text, reason, strength: 0.6, ttlMinutes: 120, source: 'life' })
+      const result = speak.queueShare({
+        text,
+        reason,
+        strength: 0.6,
+        ttlMinutes: 120,
+        source: str(options.source).trim() || 'life',
+      })
+      return result === undefined || result.ok !== false
     } catch (error) {
       logger('[life] 分享欲入队失败:', errorText(error))
+      return false
     }
   }
 
@@ -967,6 +985,22 @@ export function initLife(options = {}) {
   function shareForWake(result) {
     if (!result || result.ok !== true || result.woke !== true || result.resumed === true) return
     queueLifeShare('我刚醒了。', 'life:wake')
+  }
+
+  /**
+   * 随机生活 tick 切到 play / out / rest 时，也塞一条分享欲（走现有 share 冷却/日上限）。
+   * 同一状态 2 小时内只入队一次，避免每 60s tick 重复。
+   */
+  function shareForRandom(state, now) {
+    const key = str(state)
+    const phrase = RANDOM_SHARE_PHRASE[key]
+    if (!phrase) return
+    const lastAt = numOrNull(life.lastShareAt) ?? 0
+    if (life.lastShareState === key && lastAt > 0 && now - lastAt < RANDOM_SHARE_DEDUPE_MS) return
+    // 只有真的入队成功才记去重时间；分享暂时关闭时不占用 2 小时窗口。
+    if (!queueLifeShare(`我现在${phrase}，想跟你说一声。`, `life:random:${key}`, { source: 'random' })) return
+    life.lastShareAt = now
+    life.lastShareState = key
   }
 
   function plan(args = {}) {
@@ -1019,6 +1053,10 @@ export function initLife(options = {}) {
     } catch (error) {
       logger('[life] tick 失败:', errorText(error))
       return { changed: false, events: [] }
+    }
+    // 随机生活 tick → 分享欲（先入队再落盘，lastShareAt/lastShareState 跟着一起写）。
+    for (const event of result.events) {
+      if (event.type === 'plan' && event.source === 'random') shareForRandom(event.state, now)
     }
     if (result.changed) saveNow()
     for (const event of result.events) {

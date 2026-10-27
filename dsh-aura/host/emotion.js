@@ -1,5 +1,5 @@
 /**
- * 情绪层（Host 侧）：事件评估 → 状态数学 → 衰减 → expressionStyle 三档注入 → 安全守卫。
+ * 情绪层（Host 侧）：事件评估 → 状态数学 → 衰减 → expressionStyle 自由文本注入 → 安全守卫。
  *
  * 设计依据：docs/aura-soul-design.md 的 B（情绪模型）、E.4（context order 30）、E.5.1（qq_mood）、
  * F.1 第 4/19 条（衰减幂等、自报限幅）。
@@ -9,6 +9,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { DEFAULT_EXPRESSION_STYLE } from './state.js'
 import {
   clamp,
   codepointSlice,
@@ -490,8 +491,29 @@ export function planeLabel(v, a) {
   return '平静'
 }
 
+/**
+ * 表达方式（自由文本）→ 注入模式：
+ * - 空 / 含「关闭」/ off / none → 'off'（不注入情绪上下文）
+ * - 含「直白」/ explicit → 'explicit'（可以自然说出感受，但仍不报数值）
+ * - 其他（含蓄、自定义描述）→ 'subtle'（只影响语气，不直接报情绪）
+ * 旧的 'subtle' 字符串仍按 subtle 处理，保证旧配置/旧测试不受影响。
+ */
 export function normalizeStyle(value) {
-  return value === 'explicit' || value === 'off' ? value : 'subtle'
+  const text = String(value ?? '').trim()
+  if (!text) return 'off'
+  const lower = text.toLowerCase()
+  if (text.includes('关闭') || lower === 'off' || lower === 'none') return 'off'
+  if (text.includes('直白') || lower === 'explicit') return 'explicit'
+  return 'subtle'
+}
+
+/** 用户写的表达指导原文（旧的 subtle / explicit / off 三档不当作指导）。 */
+export function expressionGuidance(value) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  const lower = text.toLowerCase()
+  if (lower === 'subtle' || lower === 'explicit' || lower === 'off' || lower === 'none') return ''
+  return codepointSlice(text, 200)
 }
 
 /** 规则快评：返回 Appraisal（不读配置、不写状态）。 */
@@ -988,14 +1010,18 @@ function appendWithinBudget(base, extras, tail, budget) {
   return codepointSlice(text + tail, budget)
 }
 
-/** 情绪上下文段（context order 30）。off 返回空串；subtle 只在显著/有 episode/nudge 时注入；不向用户暴露数值。 */
+/**
+ * 情绪上下文段（context order 30）。
+ * 表达方式是自由文本：空/关闭不注入；explicit 把原文当表达指导（仍保留「不报数值」约束）；
+ * 其他按 subtle（只在显著/有 episode/nudge 时注入语气提示）。不向用户暴露数值。
+ */
 export function renderEmotionContext(soul, config = {}, now = Date.now()) {
   const style = normalizeStyle(config.expressionStyle)
   if (style === 'off') return ''
   if (config.emotionEnabled === false || config.soulEnabled === false) return ''
   const emotion = ensureEmotionExtras(soul?.emotion, now)
   const e = decayedEmotion(soul, config, now)
-  const hint = STYLE_HINTS[e.transient.label] ?? '自然即可'
+  const hint = expressionGuidance(config.expressionStyle) || STYLE_HINTS[e.transient.label] || '自然即可'
   const trendText = describeTrend(e)
   // 最强 ≤2 条 episode + 一条很轻的显著性提醒；都走自然语言，不写数字/枚举。
   const episodes = activeEpisodes(emotion, now).slice(0, 2)
@@ -1118,7 +1144,7 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
     soulEnabled: true,
     emotionEnabled: true,
     emotionScope: 'qq',
-    expressionStyle: 'subtle',
+    expressionStyle: DEFAULT_EXPRESSION_STYLE,
     emotionDecayValenceHours: 3,
     emotionDecayArousalMinutes: 45,
     emotionDecayEnergyHours: 6,

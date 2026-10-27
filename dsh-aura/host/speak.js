@@ -58,7 +58,7 @@ const THOUGHT_TTL_MS = 12 * 60 * 60 * 1000
 const WAKE_OVERRIDE_LINE = 80
 /** 「刚醒」只对最近 6 小时内有过互动的人开一次口。 */
 const WAKE_RECENT_MS = 6 * 60 * 60 * 1000
-/** 分享欲：pendingShare 新鲜时用的是固定高命中线（仍受日上限/静默/睡眠门控）。 */
+/** 分享欲：pendingShare 新鲜时用动态命中线（85 × 生活 × 情绪 × 强度；仍受日上限/静默/睡眠/分享冷却/分享日上限）。 */
 const SHARE_OVERRIDE_LINE = 85
 const SHARE_TTL_MINUTES = 120
 const SHARE_MAX_CHARS = 120
@@ -114,6 +114,12 @@ export const SPEAK_DEFAULTS = Object.freeze({
   quietEnd: '07:30',
   shareEnabled: true,
   emotionSensitivity: 1,
+  socialNeedWeight: 0.2,
+  shareCooldownMinutes: 45,
+  shareDailyCap: 2,
+  shareRecentHours: 0,
+  proactiveRecentHours: 0,
+  wakeRecentHours: 0,
 })
 
 const DAYPART_LABEL = {
@@ -177,6 +183,9 @@ const DEFAULT_SPEAK_STATE = Object.freeze({
   pendingUserTurn: false,
   pendingThought: null,
   pendingShare: null,
+  shareDayKey: '',
+  shareCount: 0,
+  lastShareAt: 0,
   ritual: { dayKey: '', morning: false, evening: false },
   dueDayKey: '',
   impulseDayKey: '',
@@ -221,6 +230,10 @@ function toEpochMs(value) {
 
 function round4(value) {
   return Math.round(num(value) * 10000) / 10000
+}
+
+function round3(value) {
+  return Math.round(num(value) * 1000) / 1000
 }
 
 function errorMessage(error) {
@@ -383,6 +396,59 @@ export function emotionUnsuitable(emotion = {}) {
   return normalizeSigned(emotion.valence, 0) < -0.4 && normalize01(emotion.arousal, 0) > 0.6
 }
 
+/** 分享情绪倍率的上下限（无情绪数据时默认 1.0）。 */
+export const EMOTION_SHARE_MIN = 0.2
+export const EMOTION_SHARE_MAX = 1.6
+/** episode 对「想分享」的影响：正向/好奇提高，悲伤/愤怒/恐惧降低。 */
+const EPISODE_SHARE_WEIGHT = Object.freeze({ light: 0.08, medium: 0.16, heavy: 0.3 })
+const POSITIVE_SHARE_EPISODES = new Set(['joy', 'curiosity', 'surprise'])
+const NEGATIVE_SHARE_EPISODES = new Set(['sadness', 'anger', 'fear', 'disgust'])
+
+/**
+ * 情绪对「想分享」的加权（纯函数，0.2~1.6，无情绪数据默认 1.0）：
+ * - 正向 valence / 高 affection / 高 energy → 提高；
+ * - 负向 valence → 降低；
+ * - joy / curiosity / surprise episode → 提高；sadness / anger / fear / disgust → 降低。
+ * episodes 只读 expiresAt（过期忽略），既吃 normalizeEmotion 的快照，也吃 soul.emotion.episodes。
+ */
+export function emotionShareFactor(emotion = {}, episodes = [], now = Date.now()) {
+  const snapshot = normalizeEmotion(emotion)
+  const list = (Array.isArray(episodes) ? episodes : [])
+    .filter(episode => episode && typeof episode === 'object')
+    .filter(episode => !Number.isFinite(num(episode.expiresAt, NaN)) || num(episode.expiresAt, 0) > now)
+  if (!snapshot.valid && list.length === 0) return 1
+  let factor = 1
+  if (snapshot.valid) {
+    factor += Math.max(0, snapshot.valence) * 0.3
+    factor -= Math.max(0, -snapshot.valence) * 0.45
+    factor += Math.max(0, snapshot.affection - 0.5) * 0.4
+    factor += Math.max(0, snapshot.energy - 0.6) * 0.3
+  }
+  for (const episode of list) {
+    const intensity = clamp(num(episode.intensity, 0.5), 0, 1)
+    const base = EPISODE_SHARE_WEIGHT[String(episode.level || '')] ?? EPISODE_SHARE_WEIGHT.medium
+    const weight = base * (0.5 + intensity)
+    if (POSITIVE_SHARE_EPISODES.has(episode.type)) factor += weight
+    else if (NEGATIVE_SHARE_EPISODES.has(episode.type)) factor -= weight
+  }
+  return round3(clamp(factor, EMOTION_SHARE_MIN, EMOTION_SHARE_MAX))
+}
+
+/** pendingShare.strength → 分享命中线倍率：0.6（默认）→ 1.0，clamp 0.7~1.3。 */
+export function shareStrengthFactor(strength, fallback = SHARE_DEFAULT_STRENGTH) {
+  const value = clamp(num(strength, fallback), 0, 1)
+  return round3(clamp(1 + (value - SHARE_DEFAULT_STRENGTH) * 1.5, 0.7, 1.3))
+}
+
+/** 互动窗口：hours > 0 时要求最近 hours 小时内有过用户发言；0 = 不限。 */
+export function withinRecentInteraction(lastUserAt, now, hours) {
+  const windowHours = Math.max(0, num(hours, 0))
+  if (windowHours <= 0) return true
+  const last = num(lastUserAt, 0)
+  if (!(last > 0)) return false
+  return Math.max(0, toEpochMs(now) - last) <= windowHours * 60 * 60 * 1000
+}
+
 /**
  * 生活状态对主动搭话的倍率：睡着完全不发；忙/玩减弱；休息略增；外出稍减；醒着不变。
  * 她不说话不是「没兴趣」，是正在过自己的生活。
@@ -412,6 +478,7 @@ export function computeHitLine(parts = {}) {
     * num(parts.unanswered, 1)
     * num(parts.busyFactor, 1)
   const bonus = Math.max(0, num(parts.impulse, 0))
+    + Math.max(0, num(parts.socialNeedImpact, 0))
     + Math.min(Math.max(0, num(parts.bonusCap, 40)), Math.max(0, num(parts.missStreak, 0)) * Math.max(0, num(parts.missBonus, 10)))
   return clamp(core * num(parts.triggerFactor, 1) + bonus, 0, 100)
 }
@@ -422,6 +489,15 @@ export function formatFormula(parts = {}) {
   const lifeFactor = num(parts.lifeFactor ?? (typeof parts.life === 'number' ? parts.life : 1), 1)
   const lifeLabel = parts.lifeState || (typeof parts.life === 'string' ? parts.life : '')
   if (parts.overrideLine !== null && parts.overrideLine !== undefined) {
+    // 分享 / 醒来是动态固定线：把情绪、强度、生活倍率都摊开，面板上能看出这次为什么高/低。
+    if (parts.trigger === 'share') {
+      return `${line} = 分享基线 ${round1(parts.overrideLine)} × 生活 ${round1(lifeFactor)}`
+        + ` × 情绪 ${round1(parts.shareEmotionFactor ?? 1)} × 强度 ${round1(parts.shareStrengthFactor ?? 1)}`
+    }
+    if (parts.trigger === 'wake') {
+      return `${line} = 醒来基线 ${round1(parts.overrideLine)} × 情绪 ${round1(parts.shareEmotionFactor ?? 1)}`
+        + (lifeFactor === 1 ? '' : ` × 生活 ${round1(lifeFactor)}`)
+    }
     return `${line} = ${TRIGGER_LABEL[parts.trigger] || '触发源'}固定命中线 ${round1(parts.overrideLine)}` +
       (lifeFactor === 1 ? '' : ` × 生活 ${round1(lifeFactor)}`)
   }
@@ -434,7 +510,10 @@ export function formatFormula(parts = {}) {
   pieces.push(`未回复 ${round1(parts.unanswered ?? 1)}`)
   if (num(parts.triggerFactor, 1) !== 1) pieces.push(`${TRIGGER_LABEL[parts.trigger] || '触发'} ${round1(parts.triggerFactor)}`)
   if (lifeFactor !== 1) pieces.push(`生活 ${round1(lifeFactor)}${lifeLabel ? `（${lifeLabel}）` : ''}`)
-  return `${line} = ${pieces.join(' × ')} + 冲动 ${round1(parts.impulse ?? 0)} + 没中加成 ${round1(parts.missBonusPart ?? 0)}`
+  const social = round1(parts.socialNeedImpact ?? 0)
+  return `${line} = ${pieces.join(' × ')} + 冲动 ${round1(parts.impulse ?? 0)}`
+    + (social > 0 ? ` + 社交 ${social}` : '')
+    + ` + 没中加成 ${round1(parts.missBonusPart ?? 0)}`
 }
 
 /** 触发源预设：字符串 trigger 用固定倍率/固定线；对象 trigger 尊重调用方给的 factor/overrideLine。 */
@@ -483,6 +562,7 @@ function diceConfigOf(raw) {
     bonusCap: clamp(source.bonusCap ?? SPEAK_DEFAULTS.bonusCap, 0, 100),
     shareEnabled: source.shareEnabled !== false,
     emotionSensitivity: clamp(source.emotionSensitivity ?? SPEAK_DEFAULTS.emotionSensitivity, 0, 2),
+    socialNeedWeight: clamp(source.socialNeedWeight ?? SPEAK_DEFAULTS.socialNeedWeight, 0, 1),
   }
 }
 
@@ -490,12 +570,15 @@ function diceConfigOf(raw) {
  * 主动概率模型的唯一入口（纯函数，不读盘、不写盘、不发消息）。
  *
  * D.3 命中线：line = clamp(0,100, baseLine × stage × timing × unanswered × busy
- *                            × triggerFactor + impulse + min(bonusCap, missStreak × missBonus))
- *               最后再乘生活倍率（sleep=0）。默认参数下与重构前 computeParts 的数值逐位一致。
+ *                            × triggerFactor + impulse + socialNeedImpact + min(bonusCap, missStreak × missBonus))
+ *               最后再乘生活倍率（sleep=0）。
+ * 分享线 = 85 × 生活 × emotionShareFactor × strengthFactor（clamp 0~100）；
+ * 醒来线 = clamp(80 × emotionShareFactor, 20, 100) × 生活。
  *
  * @param {{config?:object, soul?:object, emotion?:object, life?:object|string,
  *          now?:number|string|Date, trigger?:string|object,
- *          lastUserAt?:number|null, busy?:boolean, perChat?:object|null}} input
+ *          lastUserAt?:number|null, busy?:boolean, perChat?:object|null,
+ *          episodes?:Array|null, shareStrength?:number|null}} input
  * @returns {{line:number, probability:number, parts:object, emotionParts:object,
  *            trigger:string, note:string, formula:string, emotionBlocked:boolean}}
  */
@@ -510,6 +593,8 @@ export function evaluateDice(input = {}) {
     lastUserAt = null,
     busy = false,
     perChat = null,
+    episodes = null,
+    shareStrength = null,
   } = input || {}
   const settings = diceConfigOf(config)
   const data = soul && typeof soul === 'object' ? soul : {}
@@ -527,6 +612,7 @@ export function evaluateDice(input = {}) {
   const minutesSinceUser = resolvedLastUserAt
     ? Math.max(0, (at - resolvedLastUserAt) / MINUTE_MS)
     : Infinity
+  const socialNeed = socialNeedOf(emotionSnapshot, { lastUserAt: resolvedLastUserAt, now: at })
   const chat = perChat && typeof perChat === 'object' ? perChat : null
   // 没指定具体会话时取所有会话里最差的未回复数（tick 会显式传当前目标，数值与旧实现一致）
   const chatUnanswered = chat
@@ -538,6 +624,26 @@ export function evaluateDice(input = {}) {
   const missBonusPart = Math.min(settings.bonusCap, missStreak * settings.missBonus)
   const impulse = emotionImpulseDetail(emotionSnapshot, settings.emotionSensitivity)
   const triggerInfo = normalizeDiceTrigger(trigger)
+  // 分享 / 醒来用的情绪 episode：优先调用方给的，其次 soul.emotion.episodes（只读，过期忽略）。
+  const rawEpisodes = Array.isArray(episodes)
+    ? episodes
+    : (Array.isArray(data?.emotion?.episodes) ? data.emotion.episodes : [])
+  const activeEpisodeList = rawEpisodes.filter(episode => episode && typeof episode === 'object'
+    && (!Number.isFinite(num(episode.expiresAt, NaN)) || num(episode.expiresAt, 0) > at))
+  const emotionShare = emotionShareFactor(emotionSnapshot, activeEpisodeList, at)
+  const triggerShare = trigger && typeof trigger === 'object' && !Array.isArray(trigger) ? trigger.share : null
+  const resolvedShareStrength = clamp(
+    shareStrength === null || shareStrength === undefined
+      ? num(triggerShare?.strength, num(stateRef.pendingShare?.strength, SHARE_DEFAULT_STRENGTH))
+      : shareStrength,
+    0,
+    1,
+  )
+  const strengthFactor = shareStrengthFactor(resolvedShareStrength)
+  // 普通主动才把社交需求算进冲动；固定线触发源（分享/醒来/约定/仪式）不加，避免改了它们的语义。
+  const socialNeedImpact = triggerInfo.overrideLine === null || triggerInfo.overrideLine === undefined
+    ? round1(settings.socialNeedWeight * socialNeed * 20)
+    : 0
   const formulaParts = {
     daypart: daypartOf(date),
     baseLine: pickBaseLine(settings, date),
@@ -548,6 +654,11 @@ export function evaluateDice(input = {}) {
     busyFactor: busy ? 0.6 : 1,
     triggerFactor: triggerInfo.factor,
     impulse: impulse.total,
+    socialNeedImpact,
+    socialNeed,
+    shareEmotionFactor: emotionShare,
+    shareStrengthFactor: strengthFactor,
+    shareStrength: resolvedShareStrength,
     missStreak,
     missBonus: settings.missBonus,
     bonusCap: settings.bonusCap,
@@ -557,15 +668,21 @@ export function evaluateDice(input = {}) {
     life: lifeState,
     lifeFactor,
   }
-  const line = clamp(computeHitLine(formulaParts) * lifeFactor, 0, 100)
+  let line = clamp(computeHitLine(formulaParts) * lifeFactor, 0, 100)
+  if (triggerInfo.trigger === 'share') {
+    line = clamp(SHARE_OVERRIDE_LINE * lifeFactor * emotionShare * strengthFactor, 0, 100)
+  } else if (triggerInfo.trigger === 'wake') {
+    line = clamp(clamp(WAKE_OVERRIDE_LINE * emotionShare, 20, 100) * lifeFactor, 0, 100)
+  }
   formulaParts.line = line
   const unsuitable = emotionUnsuitable(emotionSnapshot)
-  const socialNeed = socialNeedOf(emotionSnapshot, { lastUserAt: resolvedLastUserAt, now: at })
   const emotionParts = {
     affection: emotionSnapshot.affection,
     valence: emotionSnapshot.valence,
     energy: emotionSnapshot.energy,
     socialNeed,
+    socialNeedImpact,
+    emotionShareFactor: emotionShare,
     affectionBonus: round1(impulse.affectionPart),
     energyBonus: round1(impulse.energyPart),
     valenceBonus: round1(impulse.valencePart),
@@ -591,10 +708,16 @@ export function evaluateDice(input = {}) {
     lifeFactor,
     trigger: formulaParts.trigger,
     timingLabel: formulaParts.timingLabel,
+    socialNeed: round3(socialNeed),
+    socialNeedImpact,
+    shareEmotionFactor: emotionShare,
+    shareStrengthFactor: strengthFactor,
+    shareStrength: resolvedShareStrength,
   }
   const notes = [formatFormula(formulaParts)]
   if (unsuitable) notes.push('情绪不适合主动（负向高唤醒），只标记不硬发')
   if (lifeState === 'sleep') notes.push('在睡，命中线被生活状态压成 0')
+  if (triggerInfo.trigger === 'share') notes.push(`分享线 = 85 × 生活 × 情绪 × 强度（情绪 ${emotionShare}，强度 ${strengthFactor}）`)
   return {
     line,
     probability: clamp(line / 100, 0, 1),
@@ -1201,10 +1324,13 @@ export function installSpeak(ctx, deps = {}) {
     const busy = pickedTarget?.chat ? userBusyFactor(pickedTarget.chat.key) < 1 : false
     const perChat = pickedTarget?.chat ? readPerChat(stateRef, pickedTarget.chat.key) : null
     const todayCount = stateRef.dayKey === localDayKey(date) ? num(stateRef.todayCount, 0) : 0
+    const shareCount = shareCountOf(stateRef, localDayKey(date))
     const activeShare = config.shareEnabled !== false ? readPendingShare(at) : null
+    const shareStrength = activeShare ? clamp(activeShare.strength, 0, 1) : SHARE_DEFAULT_STRENGTH
     const triggered = activeShare ? 'share' : 'idle'
-    const baseArgs = { config, soul: data, emotion, life: lifeForSim, now: at, lastUserAt, busy, perChat }
+    const baseArgs = { config, soul: data, emotion, life: lifeForSim, now: at, lastUserAt, busy, perChat, shareStrength }
     const currentEval = evaluateDice({ ...baseArgs, trigger: triggered })
+    const shareEval = evaluateDice({ ...baseArgs, trigger: 'share' })
     const chartArgs = { ...baseArgs, trigger: 'idle' }
 
     const byState = {}
@@ -1244,11 +1370,21 @@ export function installSpeak(ctx, deps = {}) {
         byTrigger.share = { probability: 0, line: 0, available: false }
         continue
       }
-      const evaluated = evaluateDice({ ...chartArgs, trigger: name })
+      const evaluated = name === 'share' ? shareEval : evaluateDice({ ...chartArgs, trigger: name })
       byTrigger[name] = {
         probability: round4(evaluated.probability),
         line: round1(evaluated.line),
         available: name === 'share' ? Boolean(activeShare) : true,
+        ...(name === 'share'
+          ? {
+              strength: round3(shareStrength),
+              factors: {
+                life: round3(lifeFactorOf(lifeForSim?.state)),
+                emotion: shareEval.parts.shareEmotionFactor,
+                strength: shareEval.parts.shareStrengthFactor,
+              },
+            }
+          : {}),
       }
     }
 
@@ -1302,10 +1438,34 @@ export function installSpeak(ctx, deps = {}) {
       byValence,
       byTrigger,
       timeline,
-      daily: { intervalMinutes, ticksPerDay, pAtLeastOne: round4(pAtLeastOne), cap },
+      daily: {
+        intervalMinutes,
+        ticksPerDay,
+        pAtLeastOne: round4(pAtLeastOne),
+        cap,
+        shareDaily: {
+          cap: config.shareDailyCap,
+          count: shareCount,
+          dayKey: localDayKey(date),
+        },
+      },
       share: {
         enabled: config.shareEnabled !== false,
-        line: SHARE_OVERRIDE_LINE,
+        line: round1(shareEval.line),
+        baseLine: SHARE_OVERRIDE_LINE,
+        strength: round3(shareStrength),
+        factors: {
+          life: round3(lifeFactorOf(lifeForSim?.state)),
+          emotion: shareEval.parts.shareEmotionFactor,
+          strength: shareEval.parts.shareStrengthFactor,
+        },
+        cooldownMinutes: config.shareCooldownMinutes,
+        cooldownActive: config.shareCooldownMinutes > 0
+          && num(stateRef.lastShareAt, 0) > 0
+          && at - num(stateRef.lastShareAt, 0) < config.shareCooldownMinutes * MINUTE_MS,
+        lastShareAt: num(stateRef.lastShareAt, 0),
+        dailyCap: config.shareDailyCap,
+        dailyCount: shareCount,
         pendingShare: publicShare(at),
       },
     }
@@ -1449,10 +1609,15 @@ export function installSpeak(ctx, deps = {}) {
       lifeQuietSleep: raw.lifeQuietSleep !== false,
       // 醒来后要不要试着主动说一句（false 只关掉这个 hook，不影响普通主动搭话）
       lifeWakeGreeting: raw.lifeWakeGreeting !== false,
-      // 分享欲：pendingShare 新鲜时固定高命中线；情绪权重倍率 0~2（默认 1.0 = 旧公式）
+      // 分享欲：pendingShare 新鲜时用动态线（85 × 生活 × 情绪 × 强度）；情绪权重倍率 0~2（默认 1.0）
       shareEnabled: raw.speakShareEnabled !== false,
       wakeRecentHours: clamp(raw.speakWakeRecentHours ?? 0, 0, 72),
+      shareRecentHours: clamp(raw.speakShareRecentHours ?? 0, 0, 72),
+      proactiveRecentHours: clamp(raw.speakProactiveRecentHours ?? 0, 0, 72),
+      shareCooldownMinutes: clamp(raw.speakShareCooldownMinutes ?? SPEAK_DEFAULTS.shareCooldownMinutes, 0, 1440),
+      shareDailyCap: clamp(raw.speakShareDailyCap ?? SPEAK_DEFAULTS.shareDailyCap, 0, 10),
       emotionSensitivity: clamp(raw.speakEmotionSensitivity ?? SPEAK_DEFAULTS.emotionSensitivity, 0, 2),
+      socialNeedWeight: clamp(raw.speakSocialNeedWeight ?? SPEAK_DEFAULTS.socialNeedWeight, 0, 1),
       shareLine: SHARE_OVERRIDE_LINE,
     }
   }
@@ -1672,14 +1837,14 @@ export function installSpeak(ctx, deps = {}) {
     else if (kind === 'evening') stateRef.ritual.evening = true
   }
 
-  function pickTrigger(now, config, picked, data, stateRef) {
+  function pickTrigger(now, config, picked, data, stateRef, options = {}) {
     const date = nowDate()
     const dayKey = localDayKey(date)
     const lastUserAt = lastUserAtOf(stateRef, data, picked.chat)
     const silenceMinutes = lastUserAt ? (now - lastUserAt) / MINUTE_MS : Infinity
 
-    // 分享欲最优先：新鲜 pendingShare 用固定高命中线（仍然要掷骰）
-    if (config.shareEnabled !== false) {
+    // 分享欲最优先：只有 tick 还没单独判过分享门控时才在这里挑（tick 传 allowShare:false）。
+    if (options.allowShare !== false && config.shareEnabled !== false) {
       const share = readPendingShare(now)
       if (share) return { trigger: 'share', factor: 1, overrideLine: SHARE_OVERRIDE_LINE, share }
     }
@@ -1808,6 +1973,9 @@ export function installSpeak(ctx, deps = {}) {
       lastAt: num(stateRef.lastAt, 0),
       missStreak: num(stateRef.missStreak, 0),
       stickerCount: num(stateRef.todaySticker, 0),
+      shareDayKey: stateRef.shareDayKey || '',
+      shareCount: num(stateRef.shareCount, 0),
+      lastShareAt: num(stateRef.lastShareAt, 0),
     }
   }
 
@@ -1898,11 +2066,21 @@ export function installSpeak(ctx, deps = {}) {
 
     if (!manual) {
       const dayKey = localDayKey(nowDate())
-      if (stateRef.dayKey !== dayKey) {
-        stateRef.dayKey = dayKey
-        stateRef.todayCount = 0
+      if (triggerInfo.trigger === 'share') {
+        // 分享单独计数：不占普通主动的 todayCount，冷却从成功发出时算。
+        if (stateRef.shareDayKey !== dayKey) {
+          stateRef.shareDayKey = dayKey
+          stateRef.shareCount = 0
+        }
+        stateRef.shareCount = num(stateRef.shareCount, 0) + 1
+        stateRef.lastShareAt = now
+      } else {
+        if (stateRef.dayKey !== dayKey) {
+          stateRef.dayKey = dayKey
+          stateRef.todayCount = 0
+        }
+        stateRef.todayCount = num(stateRef.todayCount, 0) + 1
       }
-      stateRef.todayCount = num(stateRef.todayCount, 0) + 1
       stateRef.lastAt = now
       stateRef.lastProactiveAt = now
       stateRef.lastSessionId = picked.chat.sessionId
@@ -1981,6 +2159,9 @@ export function installSpeak(ctx, deps = {}) {
     stateRef.todayCount = num(prev.todayCount, 0)
     stateRef.lastAt = num(prev.lastAt, 0)
     stateRef.missStreak = num(prev.missStreak, 0)
+    stateRef.shareDayKey = prev.shareDayKey || ''
+    stateRef.shareCount = num(prev.shareCount, 0)
+    stateRef.lastShareAt = num(prev.lastShareAt, 0)
     if (pendingEntry.sticker) stateRef.todaySticker = num(prev.stickerCount, 0)
     const perChat = ensurePerChat(stateRef, pendingEntry.chatKey)
     if (perChat) perChat.unanswered = Math.max(0, num(perChat.unanswered, 0) - 1)
@@ -2189,6 +2370,33 @@ export function installSpeak(ctx, deps = {}) {
     return stateRef.todayCount
   }
 
+  /** 分享次数单独按日计数（不混用普通主动的 todayCount）。 */
+  function shareCountOf(stateRef, dayKey) {
+    return stateRef.shareDayKey === dayKey ? num(stateRef.shareCount, 0) : 0
+  }
+
+  /**
+   * 分享触发源的门控：分享日上限 / 分享冷却 / 分享互动窗口。
+   * 不通过时只跳过 share（pendingShare 保留），普通主动/醒来仍可各自尝试。
+   */
+  function shareGate(stateRef, config, now, dayKey, lastUserAt) {
+    if (config.shareEnabled === false) return { ok: false, reason: 'share-off' }
+    if (config.shareDailyCap <= 0) return { ok: false, reason: 'share-daily-cap' }
+    const count = shareCountOf(stateRef, dayKey)
+    if (count >= config.shareDailyCap) {
+      return { ok: false, reason: 'share-daily-cap', count, cap: config.shareDailyCap }
+    }
+    const cooldownMs = config.shareCooldownMinutes * MINUTE_MS
+    const lastShareAt = num(stateRef.lastShareAt, 0)
+    if (cooldownMs > 0 && lastShareAt > 0 && now - lastShareAt < cooldownMs) {
+      return { ok: false, reason: 'share-cooldown', nextAt: lastShareAt + cooldownMs }
+    }
+    if (!withinRecentInteraction(lastUserAt, now, config.shareRecentHours)) {
+      return { ok: false, reason: 'share-no-recent' }
+    }
+    return { ok: true }
+  }
+
   /**
    * tick / snapshot 共用：纯函数 evaluateDice 算完后包成旧的 parts 形状（日志与公式兼容）。
    * 数值全部来自 evaluateDice，行为与重构前一致。
@@ -2292,21 +2500,57 @@ export function installSpeak(ctx, deps = {}) {
     const busy = userBusyFactor(picked.chat.key) < 1
 
     let triggerInfo
+    let shareBlocked = ''
     if (manual) {
       triggerInfo = { trigger: 'manual', factor: 1, overrideLine: null }
     } else {
-      // 分享欲优先级最高：比 wake / impulse / due 都先，但静默/睡眠/日上限在前面已经挡过
+      // 分享欲优先级最高：比 wake / impulse / due 都先，但静默/睡眠/日上限/分享冷却/分享窗口在前面挡。
       const share = config.shareEnabled !== false ? readPendingShare(now) : null
       if (share) {
-        triggerInfo = { trigger: 'share', factor: 1, overrideLine: SHARE_OVERRIDE_LINE, share }
-      } else if (wakeTrigger) {
+        const gate = shareGate(stateRef, config, now, dayKey, lastUserAt)
+        if (gate.ok) {
+          triggerInfo = { trigger: 'share', factor: 1, overrideLine: SHARE_OVERRIDE_LINE, share }
+        } else {
+          shareBlocked = gate.reason
+        }
+      }
+      if (!triggerInfo && wakeTrigger) {
+        // 明显不适合主动（负向高唤醒）时不硬算 0，只记日志、不发。
+        if (emotionUnsuitable(emotionSnapshot)) {
+          const entry = appendLog({
+            at: now,
+            trigger: 'wake',
+            sessionId: picked.chat.sessionId,
+            line: 0,
+            roll: null,
+            hit: false,
+            formula: '醒来 × 情绪不适合主动：本次不开口',
+            act: '',
+            topic: '',
+            dryRun: true,
+            sent: false,
+            error: 'emotion-unsuitable',
+          })
+          recordExplain({ at: now, summary: '刚醒来但情绪明显不适合主动，这次不开口', data: { chatKey: picked.chat.key, trigger: 'wake', emotionBlocked: true } })
+          saveSoul()
+          return { done: 'emotion-unsuitable', trigger: 'wake', emotionBlocked: true, logEntry: entry }
+        }
         // 睡醒/忙完后的第一次开口：命中线抬高，但仍掷骰，不强制发
         triggerInfo = { trigger: 'wake', factor: 1, overrideLine: WAKE_OVERRIDE_LINE }
-      } else {
-        triggerInfo = pickTrigger(now, config, picked, data, stateRef)
+      }
+      if (!triggerInfo) {
+        // 普通主动的互动窗口与分享/醒来各自独立；0 = 旧行为（不限）。
+        if (!withinRecentInteraction(lastUserAt, now, config.proactiveRecentHours)) {
+          return { done: 'no-recent', window: 'proactive', shareBlocked: shareBlocked || undefined }
+        }
+        triggerInfo = pickTrigger(now, config, picked, data, stateRef, { allowShare: false })
         if (!triggerInfo) {
           // idle 间隔没到、其他触发源也没到期
-          return { done: 'idle-wait', nextAt: num(stateRef.lastRollAt, 0) + config.intervalMinutes * MINUTE_MS }
+          return {
+            done: 'idle-wait',
+            nextAt: num(stateRef.lastRollAt, 0) + config.intervalMinutes * MINUTE_MS,
+            shareBlocked: shareBlocked || undefined,
+          }
         }
         markTriggerUsed(triggerInfo, stateRef, data, now, lastUserAt)
       }
@@ -2591,6 +2835,10 @@ export function installSpeak(ctx, deps = {}) {
       emotionParts: previewEval.emotionParts,
       shareEnabled: config.shareEnabled !== false,
       shareLine: SHARE_OVERRIDE_LINE,
+      shareCooldownMinutes: config.shareCooldownMinutes,
+      shareDailyCap: config.shareDailyCap,
+      shareCount: shareCountOf(stateRef, localDayKey(nowDate())),
+      lastShareAt: num(stateRef.lastShareAt, 0),
       pendingShare: publicShare(),
       nextTriggerIn: Math.max(0, num(stateRef.lastRollAt, 0) + config.intervalMinutes * MINUTE_MS - nowMs()),
       target: picked?.chat ? { sessionId: picked.chat.sessionId, kind: picked.chat.kind, chatId: picked.chat.chatId, cold: Boolean(picked.cold) } : null,

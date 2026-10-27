@@ -331,10 +331,8 @@ window.__ModuleLoader__.load({
       'notice.soulSaved': '灵魂设置已保存',
       'section.emotion': '情绪',
       'row.expressionStyle': '表达方式',
-      'row.expressionStyle.hint': '含蓄只影响语气 · 直白会说出感受 · 关闭则不注入情绪',
-      'style.subtle': '含蓄',
-      'style.explicit': '直白',
-      'style.off': '关闭',
+      'row.expressionStyle.hint': '自由文本 ≤200 字：写清她该怎么表达；留空或写「关闭」= 不注入情绪',
+      'row.expressionStyle.placeholder': '例如：含蓄：不直接报情绪，用语气、停顿带出来',
       'row.emotionLastChange': '最近一次变化',
       'emotion.empty': '还没有情绪数据（灵魂层启动后会自动记录）',
       'emotion.baseline': '基准',
@@ -640,10 +638,8 @@ window.__ModuleLoader__.load({
       'notice.soulSaved': 'Soul settings saved',
       'section.emotion': 'Emotion',
       'row.expressionStyle': 'Expression style',
-      'row.expressionStyle.hint': 'subtle shifts tone · explicit says it out loud · off injects nothing',
-      'style.subtle': 'Subtle',
-      'style.explicit': 'Explicit',
-      'style.off': 'Off',
+      'row.expressionStyle.hint': 'Free text up to 200 chars. Leave blank or write "off" to inject nothing.',
+      'row.expressionStyle.placeholder': 'e.g. Implicit: let tone and pauses carry the feeling',
       'row.emotionLastChange': 'Last change',
       'emotion.empty': 'No emotion data yet (the soul layer records it once running)',
       'emotion.baseline': 'Baseline',
@@ -1538,7 +1534,8 @@ ${TRAIL_CSS}
 
     /* ---------------- 灵魂层：数据读取与表单（全部防御式） ---------------- */
     const SOUL_STAGES = ['stranger', 'familiar', 'close', 'intimate']
-    const EXPRESSION_STYLES = ['subtle', 'explicit', 'off']
+    /** 表达方式默认值（与 host/state.js 的 DEFAULT_EXPRESSION_STYLE 保持一致）。 */
+    const DEFAULT_EXPRESSION_STYLE_TEXT = '含蓄：不直接报情绪，用语气、停顿、主动性带出来'
     const EMOTION_TYPES = ['joy', 'sadness', 'anger', 'fear', 'surprise', 'disgust', 'curiosity', 'calm']
     const EMOTION_LEVELS = ['light', 'medium', 'heavy']
     const EPISODE_TENDENCIES = ['approach', 'withdraw', 'repair', 'quiet', 'share', 'none']
@@ -1661,8 +1658,10 @@ ${TRAIL_CSS}
       return SOUL_STAGES.includes(value) ? value : 'stranger'
     }
 
-    function styleOf(value) {
-      return EXPRESSION_STYLES.includes(value) ? value : 'subtle'
+    /** 表达方式是自由文本；非字符串（旧 Host/缺字段）回落默认值。 */
+    function expressionStyleOf(value) {
+      if (typeof value !== 'string') return DEFAULT_EXPRESSION_STYLE_TEXT
+      return value.slice(0, 200)
     }
 
     /** 情绪四维：优先 soul.emotion（0~1），退回旧 emotion（0~10）。 */
@@ -1849,7 +1848,7 @@ ${TRAIL_CSS}
     function buildEmotionForm(config) {
       const cfg = asObject(config)
       return {
-        expressionStyle: styleOf(cfg.expressionStyle),
+        expressionStyle: expressionStyleOf(cfg.expressionStyle),
         emotionScope: cfg.emotionScope === 'all' ? 'all' : 'qq',
         emotionDecayValenceHours: clampInt(cfg.emotionDecayValenceHours, 1, 72, 3),
         emotionDecayArousalMinutes: clampInt(cfg.emotionDecayArousalMinutes, 5, 1440, 45),
@@ -1904,10 +1903,18 @@ ${TRAIL_CSS}
 
     function buildLifeSettings(config) {
       const cfg = asObject(config)
+      const socialNeedWeight = Number(cfg.speakSocialNeedWeight)
       return {
         lifeRandom: cfg.lifeRandom === true,
         lifeQuietSleep: cfg.lifeQuietSleep !== false,
         lifeWakeGreeting: cfg.lifeWakeGreeting !== false,
+        speakShareRecentHours: clampInt(cfg.speakShareRecentHours, 0, 72, 0),
+        speakProactiveRecentHours: clampInt(cfg.speakProactiveRecentHours, 0, 72, 0),
+        speakShareCooldownMinutes: clampInt(cfg.speakShareCooldownMinutes, 0, 1440, 45),
+        speakShareDailyCap: clampInt(cfg.speakShareDailyCap, 0, 10, 2),
+        speakSocialNeedWeight: Number.isFinite(socialNeedWeight)
+          ? Math.max(0, Math.min(1, socialNeedWeight))
+          : 0.2,
       }
     }
 
@@ -1944,7 +1951,8 @@ ${TRAIL_CSS}
       const soulSpeak = asObject(soul.speak)
       if (cfg.soulName === undefined && typeof identity.name === 'string') cfg.soulName = identity.name
       if (cfg.soulUserNickname === undefined && typeof identity.userNickname === 'string') cfg.soulUserNickname = identity.userNickname
-      if (cfg.expressionStyle === undefined && typeof soulEmotion.style === 'string') cfg.expressionStyle = soulEmotion.style
+      if (cfg.expressionStyle === undefined && typeof soulEmotion.style === 'string'
+        && !['subtle', 'explicit', 'off'].includes(soulEmotion.style)) cfg.expressionStyle = soulEmotion.style
       if (cfg.speakEnabled === undefined && typeof soulSpeak.enabled === 'boolean') cfg.speakEnabled = soulSpeak.enabled
       if (cfg.speakDryRun === undefined && typeof soulSpeak.dryRun === 'boolean') cfg.speakDryRun = soulSpeak.dryRun
       return cfg
@@ -3641,7 +3649,7 @@ ${TRAIL_CSS}
 
       const saveEmotion = () => {
         void saveBlock('emotion', {
-          expressionStyle: styleOf(emotionForm.expressionStyle),
+          expressionStyle: expressionStyleOf(emotionForm.expressionStyle).trim(),
           emotionScope: emotionForm.emotionScope === 'all' ? 'all' : 'qq',
           emotionDecayValenceHours: clampInt(emotionForm.emotionDecayValenceHours, 1, 72, 3),
           emotionDecayArousalMinutes: clampInt(emotionForm.emotionDecayArousalMinutes, 5, 1440, 45),
@@ -3673,10 +3681,18 @@ ${TRAIL_CSS}
       }
 
       const saveLifeSettings = () => {
+        const socialNeedWeight = Number(lifeSettings.speakSocialNeedWeight)
         void saveBlock('lifeSettings', {
           lifeRandom: lifeSettings.lifeRandom === true,
           lifeQuietSleep: lifeSettings.lifeQuietSleep !== false,
           lifeWakeGreeting: lifeSettings.lifeWakeGreeting !== false,
+          speakShareRecentHours: clampInt(lifeSettings.speakShareRecentHours, 0, 72, 0),
+          speakProactiveRecentHours: clampInt(lifeSettings.speakProactiveRecentHours, 0, 72, 0),
+          speakShareCooldownMinutes: clampInt(lifeSettings.speakShareCooldownMinutes, 0, 1440, 45),
+          speakShareDailyCap: clampInt(lifeSettings.speakShareDailyCap, 0, 10, 2),
+          speakSocialNeedWeight: Number.isFinite(socialNeedWeight)
+            ? Math.max(0, Math.min(1, socialNeedWeight))
+            : 0.2,
         }, 'notice.lifeSaved')
       }
 
@@ -4415,15 +4431,16 @@ ${TRAIL_CSS}
           h(Row, {
             label: t('row.expressionStyle'),
             hint: t('row.expressionStyle.hint'),
-            control: h('div', { className: 'qqn-seg', role: 'group', 'aria-label': t('row.expressionStyle') },
-              EXPRESSION_STYLES.map(style => h('button', {
-                key: style,
-                type: 'button',
-                className: 'qqn-seg-button',
-                'aria-pressed': styleOf(emotionForm.expressionStyle) === style,
-                onClick: () => setEmotionForm(prev => ({ ...prev, expressionStyle: style })),
-              }, t('style.' + style))),
-            ),
+            control: h('input', {
+              className: 'qqn-input',
+              type: 'text',
+              value: emotionForm.expressionStyle,
+              maxLength: 200,
+              placeholder: t('row.expressionStyle.placeholder'),
+              'aria-label': t('row.expressionStyle'),
+              spellCheck: false,
+              onChange: event => setEmotionForm(prev => ({ ...prev, expressionStyle: event.target.value })),
+            }),
           }),
           h(Row, {
             label: '作用范围',
@@ -4929,6 +4946,17 @@ ${TRAIL_CSS}
       if (simGates.suppressed) gateBadges.push('收尾抑制')
       const shareRemaining = Number(pendingShare.remainingMs)
       const shareStrength = Math.round((Number(pendingShare.strength) || 0) * 100)
+      const shareFactors = asObject(simShareInfo.factors)
+      const shareDaily = asObject(simDaily.shareDaily)
+      const shareLineText = '命中线 ' + Math.round(Number(simShareInfo.line) || 0) + ' = '
+        + Math.round(Number(simShareInfo.baseLine) || 85)
+        + ' × 生活 ' + roundProb(shareFactors.life ?? 1)
+        + ' × 情绪 ' + roundProb(shareFactors.emotion ?? 1)
+        + ' × 强度 ' + roundProb(shareFactors.strength ?? 1)
+      const shareDailyText = '今日分享 ' + Math.round(Number(shareDaily.count) || 0)
+        + '/' + Math.round(Number(shareDaily.cap) || 0)
+        + ' · 分享冷却 ' + Math.round(Number(simShareInfo.cooldownMinutes) || 0) + ' 分钟'
+        + (simShareInfo.cooldownActive ? '（冷却中）' : '')
       const emotionChips = [
         ['亲近', simEmotion.affection],
         ['愉悦度', simEmotion.valence],
@@ -5010,7 +5038,8 @@ ${TRAIL_CSS}
                   pendingShare.reason ? h('div', { className: 'aura-prob-share-reason' }, '理由：' + String(pendingShare.reason)) : null,
                   h('div', { className: 'aura-prob-share-meta' },
                     '来源 ' + (String(pendingShare.source || '') || '—') + ' · '
-                    + (pendingShare.active ? '命中线固定 ' + Math.round(Number(simShareInfo.line) || 0) : '过期后自动忽略')),
+                    + (pendingShare.active ? shareLineText : '过期后自动忽略')),
+                  h('div', { className: 'aura-prob-share-reason' }, shareDailyText),
                   h('div', { className: 'qqn-actions' },
                     h(Button, {
                       disabled: speakSimBusy !== '',
@@ -5018,7 +5047,7 @@ ${TRAIL_CSS}
                     }, '清除分享'),
                   ),
                 )
-              : h('div', { className: 'qqn-mood-empty' }, '现在没有想分享的事'),
+              : h('div', { className: 'qqn-mood-empty' }, '现在没有想分享的事 · ' + shareDailyText),
           ),
         ) : null,
       )
@@ -5196,6 +5225,88 @@ ${TRAIL_CSS}
               type: 'checkbox',
               checked: lifeSettings.lifeWakeGreeting !== false,
               onChange: event => setLifeSettings(prev => ({ ...prev, lifeWakeGreeting: event.target.checked })),
+            }),
+          }),
+          h(Row, {
+            label: '分享互动窗口',
+            hint: '0 = 不限；超过这个小时数没互动就不尝试分享',
+            control: h(React.Fragment, null,
+              h('input', {
+                className: 'qqn-input qqn-input-narrow',
+                type: 'number', min: 0, max: 72, step: 1,
+                value: lifeSettings.speakShareRecentHours,
+                'aria-label': '分享互动窗口',
+                onChange: event => setLifeSettings(prev => ({
+                  ...prev,
+                  speakShareRecentHours: event.target.value === '' ? '' : Number(event.target.value),
+                })),
+              }),
+              h('span', { className: 'qqn-unit' }, '小时'),
+            ),
+          }),
+          h(Row, {
+            label: '普通主动互动窗口',
+            hint: '0 = 不限；超过这个小时数没互动就不做普通主动（分享/醒来另有窗口）',
+            control: h(React.Fragment, null,
+              h('input', {
+                className: 'qqn-input qqn-input-narrow',
+                type: 'number', min: 0, max: 72, step: 1,
+                value: lifeSettings.speakProactiveRecentHours,
+                'aria-label': '普通主动互动窗口',
+                onChange: event => setLifeSettings(prev => ({
+                  ...prev,
+                  speakProactiveRecentHours: event.target.value === '' ? '' : Number(event.target.value),
+                })),
+              }),
+              h('span', { className: 'qqn-unit' }, '小时'),
+            ),
+          }),
+          h(Row, {
+            label: '分享冷却',
+            hint: '0 = 不冷却；从分享成功发出时开始算',
+            control: h(React.Fragment, null,
+              h('input', {
+                className: 'qqn-input qqn-input-narrow',
+                type: 'number', min: 0, max: 1440, step: 5,
+                value: lifeSettings.speakShareCooldownMinutes,
+                'aria-label': '分享冷却',
+                onChange: event => setLifeSettings(prev => ({
+                  ...prev,
+                  speakShareCooldownMinutes: event.target.value === '' ? '' : Number(event.target.value),
+                })),
+              }),
+              h('span', { className: 'qqn-unit' }, '分钟'),
+            ),
+          }),
+          h(Row, {
+            label: '分享日上限',
+            hint: '0 = 不发分享；与普通主动的每日上限分开计数',
+            control: h(React.Fragment, null,
+              h('input', {
+                className: 'qqn-input qqn-input-narrow',
+                type: 'number', min: 0, max: 10, step: 1,
+                value: lifeSettings.speakShareDailyCap,
+                'aria-label': '分享日上限',
+                onChange: event => setLifeSettings(prev => ({
+                  ...prev,
+                  speakShareDailyCap: event.target.value === '' ? '' : Number(event.target.value),
+                })),
+              }),
+              h('span', { className: 'qqn-unit' }, '次'),
+            ),
+          }),
+          h(Row, {
+            label: '社交需求权重',
+            hint: '0~1，默认 0.2；越高「很久没聊」越容易让她主动（impact = 权重 × 社交需求 × 20）',
+            control: h('input', {
+              className: 'qqn-input qqn-input-narrow',
+              type: 'number', min: 0, max: 1, step: 0.05,
+              value: lifeSettings.speakSocialNeedWeight,
+              'aria-label': '社交需求权重',
+              onChange: event => setLifeSettings(prev => ({
+                ...prev,
+                speakSocialNeedWeight: event.target.value === '' ? '' : Number(event.target.value),
+              })),
             }),
           }),
           h('div', { className: 'qqn-actions' },

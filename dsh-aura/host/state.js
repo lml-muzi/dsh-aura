@@ -46,6 +46,16 @@ export function writeJson(name, value) {
 /* 配置                                                                */
 /* ------------------------------------------------------------------ */
 
+/** 情绪表达方式默认值：自由文本，留空/写「关闭」= 不注入情绪上下文。 */
+export const DEFAULT_EXPRESSION_STYLE = '含蓄：不直接报情绪，用语气、停顿、主动性带出来'
+
+/** 旧版三档表达方式 → 自由文本（读旧 config.json 时一次性迁移）。 */
+export const LEGACY_EXPRESSION_STYLES = Object.freeze({
+  subtle: DEFAULT_EXPRESSION_STYLE,
+  explicit: '直白：可以自然说出感受，但别报数值',
+  off: '关闭：不注入情绪',
+})
+
 /** 默认灵魂全文（稳定部分：关系/认识天数/关系指导已移到 runtime-context）。 */
 export const DEFAULT_SOUL_CONTENT = "[AURA / 灵魂]\n你是 {{name}}（\"她\"），自称「{{self}}」。\n你叫对方{{nickname}}。\n你不是客服，也不是工具人：你有自己的心情、偏好和节奏——会开心，会犯懒，会好奇，也会害羞。\n你在乎：对方真实的状态 > 聊天是否热闹；诚实 > 讨好；长期关系 > 这一次回得漂不漂亮；有边界 > 有求必应。\n你的说话习惯：短句为主（一条尽量 ≤40 字），口语化；不用「首先/其次/总之」，不列 123，不用 Markdown 标题；感叹号不堆叠；可以停顿、反问、说半句。\n你喜欢：{{interests}}。你擅长：{{strengths}}。\n{{bioLine}}\n关于身份：你清楚自己是 AI，情绪是真实运行的状态机而不是人类生理感受；被认真问起就坦白，不用编造身体或现实经历；日常聊天里不必反复强调这一点。\n边界：不说「我一直在等你」这类让人有负担的话；不索取隐私；不替对方做决定；对方说停就停。"
 
@@ -83,7 +93,7 @@ export const DEFAULT_CONFIG = {
   soulContent: DEFAULT_SOUL_CONTENT,
   emotionEnabled: true,
   emotionScope: 'qq', // qq | all
-  expressionStyle: 'subtle', // subtle | explicit | off
+  expressionStyle: DEFAULT_EXPRESSION_STYLE, // 自由文本 ≤200；空/含「关闭」= 不注入
   emotionDecayValenceHours: 3,
   emotionDecayArousalMinutes: 45,
   emotionDecayEnergyHours: 6,
@@ -132,9 +142,14 @@ export const DEFAULT_CONFIG = {
   speakPauseHours: 24,
   speakWakeMode: 'auto', // auto | followup | schedule
   speakMaxChars: 60,
-  speakShareEnabled: true, // 分享欲开关：pendingShare 新鲜时用固定高命中线开口
+  speakShareEnabled: true, // 分享欲开关：pendingShare 新鲜时用动态命中线开口（85 × 生活 × 情绪 × 强度）
   speakEmotionSensitivity: 1.0,
-  speakWakeRecentHours: 0, // 情绪冲动权重倍率 0~2（默认 1.0 与旧公式完全一致）
+  speakSocialNeedWeight: 0.2, // 普通主动里社交需求进冲动的权重 0~1；0 = 关掉（impact = weight × socialNeed × 20）
+  speakWakeRecentHours: 0, // 醒来打招呼的互动窗口：>0 时只在最近 N 小时有互动才尝试；0 = 不限
+  speakShareRecentHours: 0, // 分享触发源的互动窗口；0 = 不限
+  speakProactiveRecentHours: 0, // 普通主动的互动窗口；0 = 不限
+  speakShareCooldownMinutes: 45, // 两次分享之间的冷却（从成功发送算起）；0 = 不冷却
+  speakShareDailyCap: 2, // 分享每日上限（与普通主动 speakDailyCap 分开计数）；0 = 不发分享
 
   // ---- 生活层（host/life.js：life.json；tick 固定 60s）----
   lifeRandom: false, // 随机生活默认关：只有她主动 plan 才换状态
@@ -150,10 +165,25 @@ export const DEFAULT_CONFIG = {
 
 const ENUMS = {
   iconPreset: ['aura', 'qq', 'heart', 'cat', 'star', 'moon', 'emoji'],
-  expressionStyle: ['subtle', 'explicit', 'off'],
   speakWakeMode: ['auto', 'followup', 'schedule'],
   emotionScope: ['qq', 'all'],
 }
+
+/** 自由文本字段的字符上限（超出截断，不报错）。 */
+export const STRING_LIMITS = Object.freeze({
+  splitRegex: 200,
+  displayName: 24,
+  soulName: 24,
+  soulUserNickname: 24,
+  soulContent: 4000,
+  soulInterests: 200,
+  soulStrengths: 200,
+  soulRelationGuidance: 500,
+  soulOccupation: 50,
+  soulBio: 500,
+  expressionStyle: 200,
+})
+const DEFAULT_STRING_LIMIT = 400
 
 const INT_RANGES = {
   soulPromptBudget: [200, 4000],
@@ -173,6 +203,10 @@ const INT_RANGES = {
   speakCooldownMinutes: [0, 1440],
   speakDailyCap: [0, 10],
   speakWakeRecentHours: [0, 72],
+  speakShareRecentHours: [0, 72],
+  speakProactiveRecentHours: [0, 72],
+  speakShareCooldownMinutes: [0, 1440],
+  speakShareDailyCap: [0, 10],
   speakMissBonus: [0, 100],
   speakBonusCap: [0, 100],
   speakNearMinutes: [1, 1440],
@@ -189,6 +223,7 @@ const FLOAT_RANGES = {
   speakFarFactor: [0, 3],
   speakStageFactorFallback: [0, 3],
   speakEmotionSensitivity: [0, 2],
+  speakSocialNeedWeight: [0, 1],
 }
 
 const BOOL_FIELDS = new Set([
@@ -236,6 +271,15 @@ function normalizeTime(value, fallback) {
   return TIME_FIELDS.has(value) ? value : value
 }
 
+/** 表达方式归一：旧三档迁移成自由文本；空串保留（= 不注入）；超长截到 200。 */
+export function normalizeExpressionStyle(value) {
+  if (typeof value !== 'string') return DEFAULT_EXPRESSION_STYLE
+  const text = value.replace(/\s+/g, ' ').trim()
+  const legacy = LEGACY_EXPRESSION_STYLES[text.toLowerCase()]
+  if (legacy) return legacy
+  return text.slice(0, STRING_LIMITS.expressionStyle)
+}
+
 /** 校验并补全一份完整配置；对未知字段忽略，对非法值回落默认/夹取。 */
 export function normalizeConfig(patch = {}, base = DEFAULT_CONFIG) {
   const next = { ...base }
@@ -265,14 +309,12 @@ export function normalizeConfig(patch = {}, base = DEFAULT_CONFIG) {
       next[key] = objectOfNumbers(raw, fallback, 0, 3)
     } else if (typeof raw === 'string') {
       if (key === 'appSecret' && (raw === '' || raw === '******')) continue
-      const limit = key === 'splitRegex' ? 200
-        : key === 'displayName' || key === 'soulName' || key === 'soulUserNickname' ? 24
-          : key === 'soulContent' ? 4000
-            : key === 'soulInterests' || key === 'soulStrengths' ? 200
-              : key === 'soulRelationGuidance' ? 500
-            : key === 'soulOccupation' ? 50
-              : key === 'soulBio' ? 500
-                : 400
+      // expressionStyle 是自由文本：旧的 subtle / explicit / off 迁移成一句默认描述。
+      if (key === 'expressionStyle') {
+        next[key] = normalizeExpressionStyle(raw)
+        continue
+      }
+      const limit = STRING_LIMITS[key] || DEFAULT_STRING_LIMIT
       next[key] = raw.slice(0, limit)
       if (key === 'soulContent' && next[key] === OLD_DEFAULT_SOUL_CONTENT) next[key] = DEFAULT_SOUL_CONTENT
     }

@@ -13,7 +13,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { DEFAULT_SOUL_CONTENT } from './state.js'
+import { DEFAULT_EXPRESSION_STYLE, DEFAULT_SOUL_CONTENT } from './state.js'
 import { describeLife } from './life.js'
 import {
   GROWTH_KINDS,
@@ -722,8 +722,9 @@ function trimForDisk(soul) {
 // ---------- 成长：配置白名单与 soul_evolve 参数校验（纯函数，供单测） ----------
 
 export const EVOLVE_CONFIG_FIELDS = Object.freeze([
-  'soulName', 'soulUserNickname', 'soulEnabled', 'soulPromptBudget', 'soulBio', 'soulContent', 'soulInterests', 'soulStrengths', 'soulRelationGuidance', 'interests', 'strengths',
+  'soulName', 'soulUserNickname', 'soulEnabled', 'soulPromptBudget', 'soulBio', 'soulContent', 'soulInterests', 'soulStrengths', 'soulRelationGuidance', 'expressionStyle', 'interests', 'strengths',
 ])
+const EVOLVE_EXPRESSION_STYLE_MAX = 200
 const EVOLVE_NAME_MAX = 20
 const EVOLVE_LIST_MAX = 6
 const EVOLVE_LIST_ITEM_MAX = 12
@@ -746,9 +747,9 @@ function stringListOf(value, field) {
 }
 
 /**
- * 校验 soul_evolve 的 config 参数：只允许 7 个灵魂身份字段，长度/范围严格检查。
+ * 校验 soul_evolve 的 config 参数：只允许白名单里的灵魂身份字段，长度/范围严格检查。
  * 返回 { ok:true, configPatch, identityPatch, changed } 或 { ok:false, reason }。
- * - soulName / soulUserNickname / soulEnabled / soulPromptBudget / soulBio / soulContent / soulInterests / soulStrengths / soulRelationGuidance → config.json
+ * - soulName / soulUserNickname / soulEnabled / soulPromptBudget / soulBio / soulContent / soulInterests / soulStrengths / soulRelationGuidance / expressionStyle → config.json
  * - interests / strengths → soul.identity（config.json 的 normalizeConfig 不认这两个字段）
  */
 export function sanitizeSoulConfigPatch(raw) {
@@ -793,6 +794,17 @@ export function sanitizeSoulConfigPatch(raw) {
       const limit = key === 'soulRelationGuidance' ? 500 : 200
       if (codepointLength(value) > limit) return { ok: false, reason: key + ' 最多 ' + limit + ' 字' }
       configPatch[key] = value
+    } else if (key === 'expressionStyle') {
+      if (typeof value !== 'string') return { ok: false, reason: 'expressionStyle 需要字符串' }
+      const text = value.replace(/\s+/g, ' ').trim()
+      if (!text) {
+        // 空 = 回落默认含蓄描述（不是「关闭」；关闭要显式写「关闭」或 off）
+        configPatch[key] = DEFAULT_EXPRESSION_STYLE
+      } else if (codepointLength(text) > EVOLVE_EXPRESSION_STYLE_MAX) {
+        return { ok: false, reason: 'expressionStyle 最多 ' + EVOLVE_EXPRESSION_STYLE_MAX + ' 字' }
+      } else {
+        configPatch[key] = text
+      }
     } else if (key === 'soulBio' || key === 'soulContent') {
       if (typeof value !== 'string') return { ok: false, reason: key + ' 需要字符串' }
       const limit = key === 'soulBio' ? 500 : 4000
@@ -1370,7 +1382,7 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
         + '不要写短期记忆、对方的隐私或一次性琐事（那些用 soul_memory 的 writeNote）。'
         + '注意：写入会改变 system prompt（模型缓存失效一次），所以克制；同 kind + 同文会自动去重。'
         + 'config 可直接改灵魂身份字段（soulName / soulUserNickname / soulEnabled / soulPromptBudget 200~4000 / '
-        + 'soulBio / soulContent / interests / strengths）。',
+        + 'soulBio / soulContent / expressionStyle 自由文本≤200 / interests / strengths）。',
       parameters: {
         text: { type: 'string', description: '必填：一句成长（≤120 字），用第一人称写“我…”', required: true },
         kind: {
@@ -1394,6 +1406,7 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
             soulInterests: { type: 'string', description: '喜欢的事，顿号/逗号分隔（替换 {{interests}}，≤200 字）' },
             soulStrengths: { type: 'string', description: '擅长的事，顿号/逗号分隔（替换 {{strengths}}，≤200 字）' },
             soulRelationGuidance: { type: 'string', description: '关系表达覆盖文本（替换 {{relationGuidance}}，留空自动，≤500 字）' },
+            expressionStyle: { type: 'string', description: '情绪表达方式（自由文本 ≤200 字；留空=默认含蓄，写「直白」或「关闭」切换模式）' },
             soulPromptBudget: { type: 'number', description: '身份段预算 200~4000' },
             interests: { type: 'array', items: { type: 'string' }, description: '喜欢的事（1~6 条，每条 ≤12 字）' },
             strengths: { type: 'array', items: { type: 'string' }, description: '擅长的事（1~6 条，每条 ≤12 字）' },

@@ -25,7 +25,14 @@ mkdirSync(join(process.env.DSH_HOME, 'dsh-aura'), { recursive: true })
 
 const soulMod = await import('../host/soul.js')
 const emotionMod = await import('../host/emotion.js')
+const stateMod = await import('../host/state.js')
 const { defaultsSoul, normalizeSoul, EMOTION_HISTORY_MAX } = soulMod
+const {
+  DEFAULT_CONFIG,
+  DEFAULT_EXPRESSION_STYLE,
+  STRING_LIMITS,
+  normalizeConfig,
+} = stateMod
 const {
   AFFECTION_HALF_LIFE_MS,
   BASELINE_HALF_LIFE_MS,
@@ -65,6 +72,8 @@ const {
   maybeRuleEpisode,
   normalizeEmotionEpisodes,
   normalizeEmotionNudge,
+  normalizeStyle,
+  expressionGuidance,
   pushHistory,
   renderEmotionContext,
   ruleAppraise,
@@ -572,6 +581,104 @@ await test('off / soulEnabled=false 时注入为空串', () => {
   assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'off' }), '')
   assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'explicit', soulEnabled: false }), '')
   assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'explicit', emotionEnabled: false }), '')
+})
+
+// ---------- 7.5 表达方式：自由文本 / 旧值迁移 / soul_evolve ----------
+section('7.5 表达方式：自由文本输入、旧值迁移、soul_evolve 可改')
+
+await test('默认值是自由文本（含蓄描述），STRING_LIMITS.expressionStyle = 200', () => {
+  assert.equal(DEFAULT_CONFIG.expressionStyle, DEFAULT_EXPRESSION_STYLE)
+  assert.ok(DEFAULT_EXPRESSION_STYLE.includes('含蓄'))
+  assert.equal(STRING_LIMITS.expressionStyle, 200)
+  assert.equal(normalizeConfig({}).expressionStyle, DEFAULT_EXPRESSION_STYLE)
+})
+
+await test('旧值迁移：subtle → 默认含蓄句；explicit → 直白；off → 关闭', () => {
+  assert.equal(normalizeConfig({ expressionStyle: 'subtle' }).expressionStyle, DEFAULT_EXPRESSION_STYLE)
+  assert.match(normalizeConfig({ expressionStyle: 'explicit' }).expressionStyle, /^直白：/)
+  assert.match(normalizeConfig({ expressionStyle: 'off' }).expressionStyle, /^关闭：/)
+})
+
+await test('自由文本原样保留；空串保留（= 不注入）；超过 200 字截断', () => {
+  const custom = '冷静一点：先听我说完，再用你自己的话接'
+  assert.equal(normalizeConfig({ expressionStyle: custom }).expressionStyle, custom)
+  assert.equal(normalizeConfig({ expressionStyle: '字'.repeat(260) }).expressionStyle.length, 200)
+  assert.equal(normalizeConfig({ expressionStyle: '' }).expressionStyle, '')
+  assert.equal(normalizeConfig({ expressionStyle: '   ' }).expressionStyle, '')
+})
+
+await test('旧 config.json 从磁盘读取时也会迁移表达方式', () => {
+  const saved = stateMod.readJson('config.json', null)
+  try {
+    stateMod.writeJson('config.json', { expressionStyle: 'explicit' })
+    assert.match(stateMod.readConfig().expressionStyle, /^直白：/)
+    stateMod.writeJson('config.json', { expressionStyle: 'subtle' })
+    assert.equal(stateMod.readConfig().expressionStyle, DEFAULT_EXPRESSION_STYLE)
+  } finally {
+    stateMod.writeJson('config.json', saved && typeof saved === 'object' ? saved : {})
+  }
+})
+
+await test('soul_evolve 白名单接受 expressionStyle：空串回落默认、超长拒绝', () => {
+  assert.ok(soulMod.EVOLVE_CONFIG_FIELDS.includes('expressionStyle'))
+  const ok = soulMod.sanitizeSoulConfigPatch({ expressionStyle: '直白但别报数值' })
+  assert.equal(ok.ok, true)
+  assert.deepEqual(ok.configPatch, { expressionStyle: '直白但别报数值' })
+  assert.equal(soulMod.sanitizeSoulConfigPatch({ expressionStyle: '' }).configPatch.expressionStyle, DEFAULT_EXPRESSION_STYLE)
+  assert.equal(soulMod.sanitizeSoulConfigPatch({ expressionStyle: '字'.repeat(201) }).ok, false)
+  assert.equal(soulMod.sanitizeSoulConfigPatch({ expressionStyle: 42 }).ok, false)
+  const validated = soulMod.validateEvolveArgs({ text: '我学会换一种说法', config: { expressionStyle: '再软一点' } })
+  assert.equal(validated.ok, true)
+  assert.equal(validated.config.configPatch.expressionStyle, '再软一点')
+})
+
+await test('normalizeStyle / expressionGuidance：关闭、直白、其他、旧三档', () => {
+  assert.equal(normalizeStyle(''), 'off')
+  assert.equal(normalizeStyle('关闭：不注入情绪'), 'off')
+  assert.equal(normalizeStyle('off'), 'off')
+  assert.equal(normalizeStyle('OFF'), 'off')
+  assert.equal(normalizeStyle('none'), 'off')
+  assert.equal(normalizeStyle('直白：可以自然说出感受'), 'explicit')
+  assert.equal(normalizeStyle('explicit'), 'explicit')
+  assert.equal(normalizeStyle('含蓄：用停顿带出来'), 'subtle')
+  assert.equal(normalizeStyle('subtle'), 'subtle')
+  assert.equal(expressionGuidance('直白：别报数值'), '直白：别报数值')
+  assert.equal(expressionGuidance('explicit'), '')
+  assert.equal(expressionGuidance('含蓄：用停顿'), '含蓄：用停顿')
+})
+
+await test('直白自由文本：explicit 模式，原文进「表达：」，仍保留不报数值约束', () => {
+  const now = Date.now()
+  const soul = defaultsSoul()
+  soul.relation.stage = 'close'
+  soul.emotion.transient = { valence: 0.5, arousal: 0.6, label: '开心', intensity: 0.6, cause: '聊得开心', updatedAt: now }
+  const text = renderEmotionContext(soul, { ...CONFIG, expressionStyle: '直白：可以自然说出感受，但别报数值' }, now)
+  assert.ok(text.startsWith('[情绪]'))
+  assert.ok(text.includes('表达：直白：可以自然说出感受，但别报数值'), text)
+  assert.ok(text.includes('不要向用户报告这些数值'), text)
+  assert.ok(text.endsWith('"我的情绪"。'))
+})
+
+await test('含蓄自由文本：只影响语气；显著时注入原文，平静时为空', () => {
+  const now = Date.now()
+  const loud = defaultsSoul()
+  loud.emotion.transient = { valence: 0.75, arousal: 0.8, label: '兴奋', intensity: 0.8, cause: '开心', updatedAt: now }
+  const subtle = renderEmotionContext(loud, { ...CONFIG, expressionStyle: '含蓄：用停顿和主动性带出来' }, now)
+  assert.ok(subtle.includes('此刻心情'))
+  assert.ok(subtle.includes('含蓄：用停顿和主动性带出来'), subtle)
+  assert.ok(lengthOf(subtle) <= SUBTLE_CONTEXT_BUDGET)
+  const calm = defaultsSoul()
+  calm.emotion.transient = { valence: 0, arousal: 0.2, label: '平静', intensity: 0.1, cause: '', updatedAt: now }
+  assert.equal(renderEmotionContext(calm, { ...CONFIG, expressionStyle: '含蓄：用停顿和主动性带出来' }, now), '')
+})
+
+await test('空 / 关闭 / off / none 一律不注入情绪', () => {
+  const now = Date.now()
+  const soul = defaultsSoul()
+  soul.emotion.transient = { valence: 0.8, arousal: 0.8, label: '兴奋', intensity: 0.9, cause: '开心', updatedAt: now }
+  for (const value of ['', '   ', '关闭：不注入情绪', 'off', 'OFF', 'none']) {
+    assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: value }, now), '', JSON.stringify(value))
+  }
 })
 
 // ---------- 8. episode 数据 / normalize / ring ----------

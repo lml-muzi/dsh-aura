@@ -267,8 +267,10 @@ function simBody() {
       parts,
       emotionParts,
       trigger: simState.share ? 'share' : 'idle',
-      note: (simState.share ? 85 : 45) + ' = ' + (simState.share ? '想分享固定命中线 85' : '晚间 45 × 关系 1.4') + ' × 生活 0.4',
-      formula: '34 = 想分享固定命中线 85 × 生活 0.4',
+      note: (simState.share ? 100 : 45) + ' = ' + (simState.share
+        ? '分享基线 85 × 生活 0.4 × 情绪 1 × 强度 1.3'
+        : '晚间 45 × 关系 1.4') + ' × 生活 0.4',
+      formula: '100 = 分享基线 85 × 生活 0.4 × 情绪 1 × 强度 1.3',
     },
     gates: {
       enabled: true, quiet: false, sleep: simState.gatesSleep, dailyCapReached: false,
@@ -278,8 +280,25 @@ function simBody() {
     byDaypart,
     byValence,
     byTrigger,
-    daily: { intervalMinutes: 30, ticksPerDay: 48, pAtLeastOne: 0.7125, cap: 3 },
-    share: { enabled: config.speakShareEnabled !== false, line: 85, pendingShare: simState.share },
+    daily: {
+      intervalMinutes: 30,
+      ticksPerDay: 48,
+      pAtLeastOne: 0.7125,
+      cap: 3,
+      shareDaily: { cap: 2, count: 1, dayKey: '2026-10-27' },
+    },
+    share: {
+      enabled: config.speakShareEnabled !== false,
+      line: 100,
+      baseLine: 85,
+      strength: 0.8,
+      factors: { life: 0.4, emotion: 1, strength: 1.3 },
+      cooldownMinutes: 45,
+      cooldownActive: false,
+      dailyCap: 2,
+      dailyCount: 1,
+      pendingShare: simState.share,
+    },
   }
 }
 
@@ -471,6 +490,8 @@ check('pendingShare 卡：强度', probText().includes('强度 80%'))
 check('pendingShare 卡：剩余时间', probText().includes('剩余'))
 check('pendingShare 卡：理由/来源', probText().includes('理由：单曲循环') && probText().includes('来源 life'))
 check('pendingShare 卡：清除按钮', !!findByText('清除分享'))
+check('分享卡：命中线构成（生活/情绪/强度倍率）', probText().includes('命中线 100 = 85 × 生活 0.4 × 情绪 1 × 强度 1.3'), probText().slice(-400))
+check('分享卡：分享日上限与冷却', probText().includes('今日分享 1/2') && probText().includes('分享冷却 45 分钟'), probText().slice(-400))
 
 const beforeSimulate = requests.filter(item => item.url === '/dsh-aura/speak-api' && postBody(item)?.action === 'simulate').length
 await clickButton('刷新')
@@ -526,6 +547,36 @@ check('Host 接受分享欲开关（normalizeConfig）', config.speakShareEnable
 check('Host 接受情绪权重（normalizeConfig）', config.speakEmotionSensitivity === 1.5)
 check('保存反馈', !!findContaining('主动搭话设置已保存', 'div'))
 check('原有主动设置仍完整', !!findRowCheckbox('开启主动搭话') && !!findRowCheckbox('主动时允许发表情包'))
+
+// 生活页主动设置：分享/普通主动窗口、分享冷却、分享日上限、社交需求权重
+const shareWindowInput = findInputByAria('分享互动窗口')
+const proactiveWindowInput = findInputByAria('普通主动互动窗口')
+const shareCooldownInput = findInputByAria('分享冷却')
+const shareCapInput = findInputByAria('分享日上限')
+const socialWeightInput = findInputByAria('社交需求权重')
+check('生活设置：五个新输入都在', Boolean(shareWindowInput && proactiveWindowInput && shareCooldownInput && shareCapInput && socialWeightInput))
+check('生活设置：默认值', Number(shareWindowInput?.props.value) === 0
+  && Number(proactiveWindowInput?.props.value) === 0
+  && Number(shareCooldownInput?.props.value) === 45
+  && Number(shareCapInput?.props.value) === 2
+  && Number(socialWeightInput?.props.value) === 0.2,
+{ shareWindow: shareWindowInput?.props.value, cooldown: shareCooldownInput?.props.value, cap: shareCapInput?.props.value, weight: socialWeightInput?.props.value })
+await changeInput(shareWindowInput, '分享互动窗口', 6)
+await changeInput(proactiveWindowInput, '普通主动互动窗口', 12)
+await changeInput(shareCooldownInput, '分享冷却', 30)
+await changeInput(shareCapInput, '分享日上限', 3)
+await changeInput(socialWeightInput, '社交需求权重', 0.5)
+await clickButton('保存生活设置')
+const lifeSettingsSave = postBody(lastPost('/dsh-aura/api/config'))
+check('生活设置保存五个字段', lifeSettingsSave
+  && lifeSettingsSave.speakShareRecentHours === 6
+  && lifeSettingsSave.speakProactiveRecentHours === 12
+  && lifeSettingsSave.speakShareCooldownMinutes === 30
+  && lifeSettingsSave.speakShareDailyCap === 3
+  && lifeSettingsSave.speakSocialNeedWeight === 0.5, lifeSettingsSave)
+check('Host 接受分享/主动窗口', config.speakShareRecentHours === 6 && config.speakProactiveRecentHours === 12)
+check('Host 接受分享冷却/日上限/社交权重', config.speakShareCooldownMinutes === 30
+  && config.speakShareDailyCap === 3 && config.speakSocialNeedWeight === 0.5, config)
 
 // 关闭分享欲后 simulate 的 share 区也应显示关闭
 poll()

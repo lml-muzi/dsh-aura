@@ -887,6 +887,57 @@ await test('生活层 wake 事件 → speak.notifyWake（dry-run 走完一次 wa
   life.dispose()
 })
 
+await test('随机生活分享：切到 play 入队 source=random，同状态 2h 内去重', async () => {
+  const dir = join(root, 'life-random-share')
+  let now = T0 + 3 * HOUR
+  const calls = []
+  const fakeSpeak = { queueShare(args) { calls.push(args); return { ok: true } } }
+  // autoRandomLife 消耗两个 random：第一个过 2% 概率门，第二个 0.3 → pool[1] = play
+  const seq = [0.001, 0.3]
+  let index = 0
+  const timers = fakeTimers()
+  const lifeState = { readConfig: () => ({ lifeRandom: true, speakShareEnabled: true }) }
+  const { ctx } = makeLifeCtx()
+  const life = initLife({
+    ctx,
+    state: lifeState,
+    log: () => {},
+    dir,
+    now: () => now,
+    random: () => seq[(index++) % seq.length],
+    timers,
+    getSpeak: () => fakeSpeak,
+  })
+  try {
+    life.get().startedAt = now - 3 * HOUR
+    life.tick()
+    assert.equal(life.get().state, 'play')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].source, 'random')
+    assert.match(calls[0].text, /我现在在玩/)
+
+    // 同状态 2 小时内：手动回 awake 再随机切回 play，不重复入队
+    calls.length = 0
+    life.get().state = 'awake'
+    life.get().startedAt = now - 3 * HOUR
+    life.tick()
+    assert.equal(life.get().state, 'play')
+    assert.equal(calls.length, 0)
+    assert.equal(life.get().lastShareState, 'play')
+
+    // 超过 2 小时后同一状态可以再次入队
+    now += 2 * HOUR + MIN
+    life.get().state = 'awake'
+    life.get().startedAt = now - 3 * HOUR
+    life.tick()
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].source, 'random')
+  } finally {
+    life.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 await test('initLife HTTP：?action= 路由表 / 参数校验 / 405 / fence', async () => {
   const dir = join(root, 'life-http')
   const timers = fakeTimers()

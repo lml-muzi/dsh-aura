@@ -364,6 +364,16 @@ async function clickButton(label) {
   await settle()
 }
 
+async function changeInput(element, label, value) {
+  if (!element) throw new Error('找不到输入控件：' + label)
+  element.props.onChange && element.props.onChange({ target: { value } })
+  await settle()
+}
+
+function findInputByAria(label) {
+  return findBy(el => el.tag === 'input' && el.props['aria-label'] === label)
+}
+
 function lastPost(prefix) {
   const list = requests.filter(item => item.url.startsWith(prefix) && String(item.init.method || '').toUpperCase() === 'POST')
   return list[list.length - 1] || null
@@ -402,6 +412,20 @@ check('清除后 nudge 卡消失', !findBy(el => el.tag === 'div' && hasClass(el
 check('四维曲线仍在渲染', !!findBy(el => el.tag === 'div' && hasClass(el, 'aura-emotion-chart')))
 check('四维数值仍在渲染', tidy(textOf(tree)).includes('愉悦') && tidy(textOf(tree)).includes('0.55'))
 check('表达方式设置仍在', !!findContaining('表达方式', 'div') || !!findContaining('表达方式', 'h2'))
+const expressionInput = findInputByAria('表达方式')
+check('表达方式：单行自由文本输入框（≤200）', !!expressionInput && expressionInput.props.maxLength === 200, expressionInput && expressionInput.props)
+check('表达方式：展示当前值（默认含蓄描述）', !!expressionInput && String(expressionInput.props.value).includes('含蓄'), expressionInput && expressionInput.props.value)
+await changeInput(expressionInput, '表达方式', '直白一点，但别报数值')
+await clickButton('保存情绪设置')
+const emotionSave = postBody(lastPost('/dsh-aura/api/config'))
+check('面板输入保存 expressionStyle', emotionSave && emotionSave.expressionStyle === '直白一点，但别报数值', emotionSave)
+check('Host 收到自由文本表达方式', config.expressionStyle === '直白一点，但别报数值', config.expressionStyle)
+const blankInput = findInputByAria('表达方式')
+await changeInput(blankInput, '表达方式', '')
+await clickButton('保存情绪设置')
+const blankSave = postBody(lastPost('/dsh-aura/api/config'))
+check('留空保存 = 不注入情绪（空串）', blankSave && blankSave.expressionStyle === '', blankSave)
+check('Host 接受空表达方式', config.expressionStyle === '', config.expressionStyle)
 
 // 空状态：没有 active episode / nudge
 episodes.length = 0
