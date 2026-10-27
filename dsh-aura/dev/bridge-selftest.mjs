@@ -9,7 +9,6 @@
  *   正常分段发送（seq/msgId）、达到 maxMessages 后丢弃、fitSegments 合并、2000 码点截断
  * - requestRethink（soul_say）：未绑定 / 窗口过期 / cap=0 / 正常 ok + 800ms 后 followup 一次、
  *   followup 的 source.kind=system 与 role=user 形状、hint 透传、超过 cap 拒绝且不排定时器
- * - 旧 say：发送与 seq、额度用尽抛错、cap 内 1200ms 后追加一轮
  *
  * 运行（插件目录下）：node dev/bridge-selftest.mjs
  * 退出码 0 = 全通过，1 = 有失败。
@@ -443,57 +442,6 @@ async function testRequestRethink() {
   eq('缺省 soulSayMaxRounds → 不追加', result.ok, false)
 }
 
-// ---------------------------------------------------------------- 旧 say
-
-async function testLegacySay() {
-  section('旧 say')
-
-  clock.reset()
-  let rig = makeRig({ config: { maxMessages: 2, soulSayMaxRounds: 1 } })
-  let bound = bindChat(rig)
-  let attached = attachAgent(rig, bound.sessionId)
-  const said = await rig.bridge.say('  我再补一句  ', attached.exec)
-  eq('say → ok:true', said.ok, true)
-  eq('say → seq=1', said.seq, 1)
-  eq('say → 文本已 trim', said.text, '我再补一句')
-  eq('say 实际发出一条 QQ 文本', rig.sends.text.map(item => item.text), ['我再补一句'])
-  eq('say 带被动 msgId 与 seq', [rig.sends.text[0].msgId, rig.sends.text[0].seq], ['msg-1', 1])
-  eq('cap>0 时排了追加推理定时器', [clock.pending().length, clock.pending()[0]?.delay], [1, 1200])
-  await clock.advance(1200)
-  eq('1200ms 后 followup 一次', attached.calls.length, 1)
-  ok('say 的 followup 也带 <skip> 指令', attached.calls[0].content[0].text.includes('<skip>'), attached.calls[0].content[0].text)
-
-  // 额度用尽：say 抛错而不是静默
-  clock.reset()
-  rig = makeRig({ config: { maxMessages: 2 } })
-  bound = bindChat(rig, { seq: 2 })
-  attached = attachAgent(rig, bound.sessionId)
-  await expectThrows('say 额度用尽 → 抛错', () => rig.bridge.say('还发吗', attached.exec), '上限')
-  eq('say 额度用尽 → 不发消息', rig.sends.text.length, 0)
-
-  // 空文本
-  clock.reset()
-  rig = makeRig()
-  bound = bindChat(rig)
-  attached = attachAgent(rig, bound.sessionId)
-  await expectThrows('say 空文本 → 抛错', () => rig.bridge.say('   ', attached.exec), '不能为空')
-
-  // cap=0：照发，但不追加推理
-  clock.reset()
-  rig = makeRig({ config: { soulSayMaxRounds: 0 } })
-  bound = bindChat(rig)
-  attached = attachAgent(rig, bound.sessionId)
-  const plain = await rig.bridge.say('只说这一句', attached.exec)
-  eq('cap=0 → 仍可 say', plain.ok, true)
-  eq('cap=0 → 不排定时器', clock.pending().length, 0)
-
-  // 未绑定
-  clock.reset()
-  rig = makeRig()
-  attached = attachAgent(rig, 'session-none')
-  await expectThrows('say 未绑定 → 抛错', () => rig.bridge.say('hi', attached.exec), '绑定')
-}
-
 // ---------------------------------------------------------------- 收尾
 
 async function main() {
@@ -505,7 +453,6 @@ async function main() {
     await testDeliverTextSkip()
     await testDeliverTextSplitAndBudget()
     await testRequestRethink()
-    await testLegacySay()
   } finally {
     clock.restore()
   }

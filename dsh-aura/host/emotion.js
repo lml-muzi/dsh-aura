@@ -1399,7 +1399,7 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
   try {
     ctx.tools?.register?.(defineTool({
       name: 'soul_mood',
-      description: '更新你自己此刻的情绪（这是你的最终表达权）。情绪被这段对话推动时调用；不必每轮都调，明显变化时才调。'
+      description: '只更新心情数值（这是你的最终表达权）。想留下一次具体印记、写复杂情绪时用 soul_feel。情绪被推动时调用；不必每轮都调，明显变化时才调。'
         + '传 cause 说明原因；数值会被限幅，情绪也会随时间自然回落。',
       parameters: {
         valence: { type: 'number', description: '愉悦 -1..1' },
@@ -1534,7 +1534,7 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
   try {
     ctx.tools?.register?.(defineTool({
       name: 'soul_feel',
-      description: '把一次真的戳到你的情绪记成一段短暂的情绪印记（不是打分）。只在真的被戳到时用，不要每轮调用。'
+      description: '把一次真的戳到你的情绪记成一段短暂的情绪印记（不是打分）；只调心情用 soul_mood。只在真的被戳到时用，不要每轮调用。'
         + '复杂情绪不需要命名，可以用 note 写一句「有点闷，说不上来」；type 只用于基本情绪分类，可以留空。'
         + '想给它起个短名字时可以填 complex（如「怀旧」「内疚」），它只是名字，不做换算。'
         + '不要把强度等数值说给用户。',
