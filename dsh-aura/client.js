@@ -1952,6 +1952,7 @@ ${TRAIL_CSS}
         soulName: name || 'Aura',
         soulUserNickname: typeof cfg.soulUserNickname === 'string' ? cfg.soulUserNickname.trim().slice(0, 20) : '',
         soulEnabled: cfg.soulEnabled !== false,
+        soulWebEnabled: cfg.soulWebEnabled === true,
         soulPromptBudget: clampInt(cfg.soulPromptBudget, 200, 4000, 1020),
         soulBio: typeof cfg.soulBio === 'string' ? cfg.soulBio.slice(0, 500) : '',
         soulContent: typeof cfg.soulContent === 'string' ? cfg.soulContent.slice(0, 4000) : '',
@@ -3226,6 +3227,8 @@ ${TRAIL_CSS}
                 soulName: soulForm.soulName,
                 soulUserNickname: soulForm.soulUserNickname,
                 soulEnabled: soulForm.soulEnabled === true,
+          soulWebEnabled: soulForm.soulWebEnabled === true,
+                soulWebEnabled: soulForm.soulWebEnabled === true,
                       soulPromptBudget: effectiveSoulBudget(soulForm.soulContent, soulForm.soulPromptBudget),
                 soulBio: soulForm.soulBio,
                 soulContent: soulForm.soulContent,
@@ -4583,6 +4586,16 @@ ${TRAIL_CSS}
               type: 'checkbox',
               checked: soulForm.soulEnabled === true,
               onChange: event => setSoulForm(prev => ({ ...prev, soulEnabled: event.target.checked })),
+            }),
+          }),
+          h(Row, {
+            label: 'Aura 模式（网页会话）',
+            hint: '开启后网页对话也会进情绪/记忆/存档；写代码时建议关掉',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: soulForm.soulWebEnabled === true,
+              onChange: event => setSoulForm(prev => ({ ...prev, soulWebEnabled: event.target.checked })),
             }),
           }),
           h(Row, {

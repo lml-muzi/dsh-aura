@@ -655,6 +655,7 @@ export function renderSoulPreview(soul, config = {}, now = Date.now()) {
 export function isSoulSession(config, sessionId) {
   if (config?.soulEnabled === false) return false
   if (config?.emotionScope === 'all') return true
+  if (config?.soulWebEnabled === true) return true
   return typeof sessionId === 'string' && sessionId.startsWith('qq:')
 }
 

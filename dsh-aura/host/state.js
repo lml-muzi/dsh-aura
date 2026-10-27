@@ -82,6 +82,7 @@ export const DEFAULT_CONFIG = {
 
   // ---- 灵魂身份 ----
   soulEnabled: true,
+  soulWebEnabled: false,
   soulName: 'Aura',
   soulUserNickname: '',
   soulPromptBudget: 1020,
@@ -258,7 +259,7 @@ const FLOAT_RANGES = {
 }
 
 const BOOL_FIELDS = new Set([
-  'autoConnect', 'splitEnabled', 'soulEnabled', 'soulGrowthReflection', 'emotionEnabled',
+  'autoConnect', 'splitEnabled', 'soulEnabled', 'soulWebEnabled', 'soulGrowthReflection', 'emotionEnabled',
   'emotionGuardOnNegative', 'memoryEnabled', 'memoryAutoCompact', 'memoryDiaryEnabled',
   'memoryImmediate', 'memorySessionDigest', 'diaryAuto', 'archiveEnabled',
   'speakEnabled', 'speakDryRun', 'quietEnabled', 'speakStickerEnabled', 'speakShareEnabled', 'proactiveEnabled', 'steerEnabled',
