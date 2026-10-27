@@ -35,13 +35,13 @@ export function installMedia(ctx, { bridge, log }) {
 
   ctx.tools.register(defineTool({
     name: 'soul_say',
-    description: '表示“我还想再想一轮”，不会直接发消息。调用后桥会给同一个 agent 排一轮 followup，下一轮再决定说什么，或 <skip> 收住。想发额外的话请用正常回复里的空行拆分，不要用这个工具发正文。',
+    description: '表示“我还想再想一轮”，不会直接发消息。调用后桥会给同一个 agent 排一轮 followup，下一轮再决定说什么，或 <skip> 收住。不要向用户解释你调用了它，也不要说“排了一轮”；想发额外的话请用正常回复里的空行拆分。',
     parameters: {
       hint: { type: 'string', description: '可选：为什么还想再说一轮，≤120 字' },
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: value?.ok ? '已排队再想一轮' : '没排上：' + String(value?.error || '') }],
+      render: (_args, value) => [{ type: 'text', text: value?.ok ? '（已排队；下一轮直接自然说话，不要解释这个动作）' : '没排上：' + String(value?.error || '') }],
     },
     async execute(args, exec) {
       try {

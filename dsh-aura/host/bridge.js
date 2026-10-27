@@ -648,7 +648,7 @@ export class ChannelBridge {
     const message = {
       id: requestId,
       role: 'user',
-      content: [{ type: 'text', text: `（内部续话：你想再想一轮。${hint ? '原因：' + String(hint).slice(0, 120) : ''} 想说什么就自然说；不想就回复 <skip>，不要重复刚才的话。）` }],
+      content: [{ type: 'text', text: `（内部续话：${hint ? '你想再补一句，因为：' + String(hint).slice(0, 120) + '。' : ''}如果你想补，就直接对木子说，像平时说话一样；不想补就只回 <skip>。不要解释这条内部消息、不要分析工具或排轮，也不要说“它只给我排了一轮”这种话。）` }],
       source: { kind: 'system', rpcId: requestId },
     }
     try {
