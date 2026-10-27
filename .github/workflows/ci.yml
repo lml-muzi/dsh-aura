@@ -1,0 +1,42 @@
+name: CI
+
+# 客户端插件最怕「语法能过、加载即崩」：client.js 顶层一旦 ReferenceError，
+# 整页会显示 Failed to load plugins。这里不装任何依赖，只跑 dsh-aura 自带预检；
+# 其中 client-load-selftest.mjs 会真实执行 ModuleLoader.load / factory / apply。
+#
+# 注意：host/*.js 依赖 DSH profile 提供的 @deepseek-ai/dsh-tools，
+# host/qq-sdk.js 依赖 @tencent-connect/qqbot-nodejs；CI 不安装这些外部包，
+# 所以设 DSH_AURA_PREFLIGHT_OFFLINE=1，只跳过「无法 import 外部包」的测试，
+# 其余自测（含客户端加载自测）照常跑；真正的断言失败仍会让 CI 失败。
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: dsh-aura preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: dsh-aura
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Run preflight (no install, offline external-package skips)
+        env:
+          DSH_AURA_PREFLIGHT_OFFLINE: '1'
+        run: node dev/preflight.mjs

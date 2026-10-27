@@ -489,13 +489,13 @@ export class ChannelBridge {
     const config = this.state.readConfig()
     const raw = String(text ?? '')
     // 模型可以用 <skip> 表示“这一轮不想说话”
-    if (/^<?(skip|silence)>?$|^\[skip\]$/i.test(raw.trim())) {
+    if (/^<?(skip|silence)>?$|^\[(skip|silence)\]$|^（跳过）$/i.test(raw.trim())) {
       this.log(`[qq] 模型选择沉默（<skip>） ${chat.key}`)
       if (sessionId) this.takeProactive(sessionId)
       this.notifyOutbound({ chat, kind: 'skip', proactive: false })
       return
     }
-    const cleaned = raw.replace(/<skip>/gi, '').trim()
+    const cleaned = raw.replace(/<skip>/gi, '').replace(/[ \t]{2,}/g, ' ').trim()
     if (!cleaned) return
     const proactive = sessionId ? this.takeProactive(sessionId) : undefined
     // 表情标记：[表情: 描述] 在 Web 端由 dsh-meme 前端渲染成内联图；
@@ -631,8 +631,9 @@ export class ChannelBridge {
     const config = this.state.readConfig()
     const cap = Math.max(0, Number(config.soulSayMaxRounds) || 0)
     if (cap <= 0) return { ok: false, error: '追加推理轮数为 0，先到连接页打开' }
-    context.sayRounds = (Number(context.sayRounds) || 0) + 1
-    if (context.sayRounds > cap) return { ok: false, error: '本回合追加轮数已到上限' }
+    const round = (Number(context.sayRounds) || 0) + 1
+    if (round > cap) return { ok: false, error: '本回合追加轮数已到上限' }
+    context.sayRounds = round
     const timer = setTimeout(() => { this.rethinkAfterSay(chat, sessionId, hint).catch(() => {}) }, 800)
     if (timer && typeof timer.unref === 'function') timer.unref()
     return { ok: true, queued: true, round: context.sayRounds, cap }
