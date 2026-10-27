@@ -1772,7 +1772,7 @@ export function installSpeak(ctx, deps = {}) {
       const record = sessionRecords[binding.sessionId]
       const recordUpdatedAt = record && typeof record === 'object' ? record.updatedAt : ''
       const recordAt = Number.isFinite(Date.parse(recordUpdatedAt)) ? Date.parse(recordUpdatedAt) : 0
-      const lastActiveAt = num(binding.lastActiveAt, 0) || recordAt
+      const lastActiveAt = num(binding.lastActiveAt, 0) || recordAt || num(data?.relation?.lastUserAt, 0)
       if (!lastActiveAt) { fallbackReason = 'never-interacted'; continue }
       const idleMinutes = Math.max(0, (now - lastActiveAt) / MINUTE_MS)
       const agent = resolveAgent(binding.sessionId)
