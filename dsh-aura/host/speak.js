@@ -1751,6 +1751,8 @@ export function installSpeak(ctx, deps = {}) {
     const data = getData()
     const allowlist = config.groupAllowlist
     const archived = archivedSessionIds()
+    let sessionRecords = {}
+    try { sessionRecords = asObject(state?.readSessions?.()) } catch { sessionRecords = {} }
     const candidates = []
     let fallbackReason = 'no-target'
     for (const binding of bindingsList()) {
@@ -1761,7 +1763,10 @@ export function installSpeak(ctx, deps = {}) {
       const key = binding.key || `${kind}:${chatId}`
       if (kind === 'group' && !allowlist.has(chatId)) { fallbackReason = 'group-not-allowed'; continue }
       if (archived.has(normSessionKey(binding.sessionId))) { fallbackReason = 'archived'; continue }
-      const lastActiveAt = num(binding.lastActiveAt, 0)
+      const record = sessionRecords[binding.sessionId]
+      const recordUpdatedAt = record && typeof record === 'object' ? record.updatedAt : ''
+      const recordAt = Number.isFinite(Date.parse(recordUpdatedAt)) ? Date.parse(recordUpdatedAt) : 0
+      const lastActiveAt = num(binding.lastActiveAt, 0) || recordAt
       if (!lastActiveAt) { fallbackReason = 'never-interacted'; continue }
       const idleMinutes = Math.max(0, (now - lastActiveAt) / MINUTE_MS)
       const agent = resolveAgent(binding.sessionId)
