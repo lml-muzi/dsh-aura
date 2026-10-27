@@ -23,6 +23,7 @@ window.__ModuleLoader__.load({
     const DIARY_API = '/dsh-aura/diary-api'
     /** 事实卡/实体卡只读接口（Host 单独开的路由，web.js 的 /state 不透传这两块）。 */
     const MEMORY_API = '/dsh-aura/memory-api'
+    const ARCHIVE_API = '/dsh-aura/archive-api'
 
     /** 生活层 Host API（host/life.js；面板「生活」页）。 */
     const LIFE_API = '/dsh-aura/life-api'
@@ -449,6 +450,33 @@ window.__ModuleLoader__.load({
       'memory.compactNotice': '整理完成',
       'memory.compactBefore': '整理前：事件 {events} · 笔记 {notes} · 事实 {facts} · 实体 {entities} · 关系 {relations}',
       'memory.compactAfter': '整理后：事件 {events} · 笔记 {notes} · 事实 {facts} · 实体 {entities} · 关系 {relations}',
+      'archive.title': '记忆罗盘',
+      'archive.hint': '翻原始聊天存档找原话；只在你点搜索时读，不会自动进上下文',
+      'archive.searchLabel': '搜索原始聊天',
+      'archive.placeholder': '搜关键词（空格分隔，多个词全中优先）',
+      'archive.search': '搜索',
+      'archive.clear': '清空',
+      'archive.searching': '翻找中…',
+      'archive.loading': '正在读存档…',
+      'archive.empty': '没有翻到相关记录',
+      'archive.emptyHint': '换个词，或把范围放宽到全部',
+      'archive.noArchive': '还没有存档',
+      'archive.noArchiveHint': '她只在 Aura 会话里留原始流水，聊过之后这里会慢慢长出来',
+      'archive.total': '共 {count} 条',
+      'archive.rangeInfo': '最早 {earliest} · 最晚 {latest}',
+      'archive.range.all': '全部',
+      'archive.range.7': '7 天',
+      'archive.range.30': '30 天',
+      'archive.range.90': '90 天',
+      'archive.resultCount': '找到 {count} 条',
+      'archive.timeline': '最近 30 天',
+      'archive.timelineHint': '点某一天，把范围切到那天再搜',
+      'archive.dayCount': '{count} 条',
+      'archive.role.user': '你',
+      'archive.role.assistant': '她',
+      'archive.sessionLabel': '会话 {id}',
+      'archive.expandHint': '点一条展开完整片段',
+      'archive.loadFailed': '存档读取失败',
       'memory.delete': '删除',
       'memory.deleteFactConfirm': '确定删除这张事实卡？',
       'memory.deleteEntityConfirm': '确定删除这个实体？以它为端点的关系边会一起删除。',
@@ -756,6 +784,33 @@ window.__ModuleLoader__.load({
       'memory.compactNotice': 'Organized',
       'memory.compactBefore': 'Before: events {events} · notes {notes} · facts {facts} · entities {entities} · relations {relations}',
       'memory.compactAfter': 'After: events {events} · notes {notes} · facts {facts} · entities {entities} · relations {relations}',
+      'archive.title': 'Memory compass',
+      'archive.hint': 'Search the raw chat archive for exact words; it is read only when you search, never injected into context',
+      'archive.searchLabel': 'Search raw chat',
+      'archive.placeholder': 'Keywords, space separated (all words first)',
+      'archive.search': 'Search',
+      'archive.clear': 'Clear',
+      'archive.searching': 'Searching…',
+      'archive.loading': 'Reading archive…',
+      'archive.empty': 'No matching records',
+      'archive.emptyHint': 'Try another word or widen the range to all',
+      'archive.noArchive': 'No archive yet',
+      'archive.noArchiveHint': 'Raw lines are kept only for Aura sessions and will appear after you chat',
+      'archive.total': '{count} lines',
+      'archive.rangeInfo': 'Earliest {earliest} · latest {latest}',
+      'archive.range.all': 'All',
+      'archive.range.7': '7 days',
+      'archive.range.30': '30 days',
+      'archive.range.90': '90 days',
+      'archive.resultCount': '{count} found',
+      'archive.timeline': 'Last 30 days',
+      'archive.timelineHint': 'Click a day to search that day',
+      'archive.dayCount': '{count} lines',
+      'archive.role.user': 'You',
+      'archive.role.assistant': 'Her',
+      'archive.sessionLabel': 'Session {id}',
+      'archive.expandHint': 'Click a result to expand the full snippet',
+      'archive.loadFailed': 'Failed to read archive',
       'memory.delete': 'Delete',
       'memory.deleteFactConfirm': 'Delete this fact card?',
       'memory.deleteEntityConfirm': 'Delete this entity? Relations touching it will be removed too.',
@@ -1144,6 +1199,32 @@ window.__ModuleLoader__.load({
 .aura-life-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 .aura-life-form{grid-template-columns:1fr}
 }
+.aura-archive-hint{color:var(--dsw-alias-label-tertiary)}
+.aura-archive-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:12px 0;border-bottom:.5px solid var(--dsw-alias-border-l3)}
+.aura-archive-input{flex:1 1 220px;width:auto;min-width:180px}
+.aura-archive-range{flex:none}
+.aura-archive-meta{display:flex;flex-wrap:wrap;gap:8px;padding:8px 0 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
+.aura-archive-total{overflow-wrap:anywhere}
+.aura-archive-timeline{margin-top:10px;padding:10px 0;border-bottom:.5px solid var(--dsw-alias-border-l3)}
+.aura-archive-timeline-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:6px}
+.aura-archive-bars{display:flex;align-items:flex-end;gap:2px;height:74px;padding-top:6px}
+.aura-archive-bar{flex:1 1 0;min-width:3px;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;background:transparent;border:0;padding:0;cursor:pointer}
+.aura-archive-bar-fill{display:block;width:100%;max-width:12px;min-height:2px;border-radius:2px 2px 0 0;background:var(--dsw-alias-state-business-primary);opacity:.45;transition:opacity .15s ease}
+.aura-archive-bar:hover .aura-archive-bar-fill{opacity:.9}
+.aura-archive-bar-active .aura-archive-bar-fill{opacity:1}
+.aura-archive-results{display:flex;flex-direction:column;padding-top:4px}
+.aura-archive-result-count{padding:8px 0 2px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
+.aura-archive-result{padding:8px 0;border-bottom:.5px solid var(--dsw-alias-border-l3);cursor:pointer}
+.aura-archive-result:last-child{border-bottom:0}
+.aura-archive-result:hover .aura-archive-snippet{color:var(--dsw-alias-label-primary)}
+.aura-archive-result-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:3px;font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}
+.aura-archive-result-time{flex:none;color:var(--dsw-alias-label-tertiary)}
+.aura-archive-role{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:10px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary)}
+.aura-archive-role-assistant{color:var(--dsw-alias-state-business-primary)}
+.aura-archive-session{flex:none;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary)}
+.aura-archive-snippet{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;overflow-wrap:anywhere;white-space:pre-wrap}
+.aura-archive-result-open .aura-archive-snippet{color:var(--dsw-alias-label-primary)}
+
 ${TRAIL_CSS}
 `
 
@@ -2044,6 +2125,24 @@ ${TRAIL_CSS}
       return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
     }
 
+    /** 存档时间：YYYY-MM-DD HH:mm；0/非法返回空串。 */
+    function archiveTimeLabel(ms) {
+      const at = Number(ms)
+      if (!Number.isFinite(at) || at <= 0) return ''
+      return diaryDateKey(at) + ' ' + formatClock(at)
+    }
+
+    function archiveDateLabel(ms) {
+      const at = Number(ms)
+      if (!Number.isFinite(at) || at <= 0) return ''
+      return diaryDateKey(at)
+    }
+
+    function archiveSessionLabel(sessionId) {
+      const text = String(sessionId || '')
+      return text.startsWith('qq:') ? text.slice(3) : text.slice(-12)
+    }
+
     function clipText(value, max) {
       const text = String(value === undefined || value === null ? '' : value)
       if (text.length <= max) return text
@@ -2228,6 +2327,17 @@ ${TRAIL_CSS}
       const [memoryBaseline, setMemoryBaseline] = React.useState(() => buildMemoryForm({}))
       const [memoryCompactResult, setMemoryCompactResult] = React.useState(null)
       const [memoryDigestResult, setMemoryDigestResult] = React.useState(null)
+      const [archiveQuery, setArchiveQuery] = React.useState('')
+      const [archiveRange, setArchiveRange] = React.useState('all')
+      const [archiveDay, setArchiveDay] = React.useState('')
+      const [archiveResults, setArchiveResults] = React.useState([])
+      const [archiveStats, setArchiveStats] = React.useState(null)
+      const [archiveTimeline, setArchiveTimeline] = React.useState([])
+      const [archiveBusy, setArchiveBusy] = React.useState('')
+      const [archiveError, setArchiveError] = React.useState('')
+      const [archiveSearched, setArchiveSearched] = React.useState(false)
+      const [archiveOpenKey, setArchiveOpenKey] = React.useState('')
+      const [archiveLoaded, setArchiveLoaded] = React.useState(false)
       const [blocks, setBlocks] = React.useState({})
       const [resetArmed, setResetArmed] = React.useState(false)
       const [timelineOpen, setTimelineOpen] = React.useState(false)
@@ -2311,6 +2421,7 @@ ${TRAIL_CSS}
       const personaBaselineRef = React.useRef(personaBaseline)
       const diaryTimer = React.useRef(null)
       const diaryLoadingRef = React.useRef(false)
+      const archiveLoadingRef = React.useRef(false)
       const diaryFormRef = React.useRef(diaryForm)
       const diaryBaselineRef = React.useRef(diaryBaseline)
       const lifeBusyRef = React.useRef('')
@@ -2621,6 +2732,91 @@ ${TRAIL_CSS}
           diaryLoadingRef.current = false
           if (mounted.current) setDiaryLoading(false)
         }
+      }, [])
+
+      /* ---------------- 记忆罗盘：总览 / 搜索 / 清空（只在记忆 tab 打开时读） ---------------- */
+      const loadArchiveOverview = React.useCallback(async () => {
+        if (archiveLoadingRef.current) return
+        archiveLoadingRef.current = true
+        setArchiveBusy('load')
+        setArchiveError('')
+        try {
+          const [stats, tl] = await Promise.all([
+            fetchJson(ARCHIVE_API + '?action=state'),
+            fetchJson(ARCHIVE_API + '?action=timeline&days=30'),
+          ])
+          if (!mounted.current) return
+          setArchiveStats(asObject(stats))
+          setArchiveTimeline(asArray(tl && tl.timeline).map(row => ({
+            date: String(asObject(row).date || ''),
+            count: Number(asObject(row).count) || 0,
+            user: Number(asObject(row).user) || 0,
+            assistant: Number(asObject(row).assistant) || 0,
+          })).filter(row => row.date))
+          setArchiveLoaded(true)
+        } catch (error) {
+          if (mounted.current) setArchiveError(errorMessage(error))
+        } finally {
+          archiveLoadingRef.current = false
+          if (mounted.current) setArchiveBusy('')
+        }
+      }, [])
+
+      const runArchiveSearch = React.useCallback(async (override = {}) => {
+        if (archiveBusy) return
+        const range = override.range === undefined ? archiveRange : override.range
+        const day = override.day === undefined ? archiveDay : override.day
+        const query = override.query === undefined ? archiveQuery : override.query
+        const params = new URLSearchParams()
+        params.set('action', 'search')
+        params.set('limit', '12')
+        const clean = String(query || '').trim()
+        if (clean) params.set('q', clean)
+        if (range === 'day' && day) {
+          params.set('from', day)
+          params.set('to', day)
+        } else if (range === '7' || range === '30' || range === '90') {
+          params.set('from', String(Date.now() - Number(range) * 24 * 60 * 60 * 1000))
+        }
+        setArchiveBusy('search')
+        setArchiveError('')
+        try {
+          const value = await fetchJson(ARCHIVE_API + '?' + params.toString())
+          if (!mounted.current) return
+          setArchiveResults(asArray(value && value.results).map((row, index) => ({
+            key: String(asObject(row).at || index) + '-' + index,
+            at: Number(asObject(row).at) || 0,
+            sessionId: String(asObject(row).sessionId || ''),
+            role: String(asObject(row).role || ''),
+            snippet: String(asObject(row).snippet || ''),
+            text: String(asObject(row).text || ''),
+            score: Number(asObject(row).score) || 0,
+          })))
+          setArchiveSearched(true)
+          setArchiveOpenKey('')
+        } catch (error) {
+          if (mounted.current) {
+            setArchiveError(errorMessage(error))
+            setArchiveSearched(true)
+          }
+        } finally {
+          if (mounted.current) setArchiveBusy('')
+        }
+      }, [archiveBusy, archiveRange, archiveDay, archiveQuery])
+
+      const clearArchiveSearch = React.useCallback(() => {
+        setArchiveQuery('')
+        setArchiveResults([])
+        setArchiveSearched(false)
+        setArchiveError('')
+        setArchiveOpenKey('')
+        setArchiveRange('all')
+        setArchiveDay('')
+      }, [])
+
+      const chooseArchiveRange = React.useCallback(range => {
+        setArchiveRange(range)
+        setArchiveDay('')
       }, [])
 
       const loadDiaryToday = React.useCallback(async () => {
@@ -3003,6 +3199,13 @@ ${TRAIL_CSS}
         void loadDiary()
         return undefined
       }, [tab, loadDiary])
+
+      /* 切到记忆 tab 时拉一次存档总览 + 最近 30 天时间轴；不进记忆页就不发请求。 */
+      React.useEffect(() => {
+        if (tab !== 'memory') return undefined
+        if (!archiveLoaded) void loadArchiveOverview()
+        return undefined
+      }, [tab, archiveLoaded, loadArchiveOverview])
 
       const toggleMemePack = async pack => {
         const packId = String((pack && pack.id) || '')
@@ -4866,6 +5069,130 @@ ${TRAIL_CSS}
         blockFeedback('memory'),
       )
 
+      /* ---------------- 记忆罗盘：搜索框 / 范围 / 时间轴 / 结果 ---------------- */
+      const archiveTotal = Number(archiveStats && archiveStats.total) || 0
+      const archiveMaxCount = archiveTimeline.reduce((max, row) => Math.max(max, Number(row.count) || 0), 0)
+      const archiveRangeDefs = [
+        ['all', t('archive.range.all')],
+        ['7', t('archive.range.7')],
+        ['30', t('archive.range.30')],
+        ['90', t('archive.range.90')],
+      ]
+      const archiveStatsLine = archiveStats && archiveTotal > 0
+        ? t('archive.total', { count: archiveTotal })
+          + (archiveStats.earliest ? ' · ' + t('archive.rangeInfo', {
+            earliest: archiveDateLabel(archiveStats.earliest),
+            latest: archiveDateLabel(archiveStats.latest),
+          }) : '')
+        : ''
+      const archiveResultRows = archiveResults.map(row => {
+        const open = archiveOpenKey === row.key
+        const shortId = archiveSessionLabel(row.sessionId)
+        const snippet = open && row.text ? row.text : row.snippet
+        return h('div', {
+          key: row.key,
+          className: 'aura-archive-result' + (open ? ' aura-archive-result-open' : ''),
+          role: 'button',
+          tabIndex: 0,
+          title: open ? t('archive.expandHint') : t('archive.expandHint'),
+          onClick: () => setArchiveOpenKey(open ? '' : row.key),
+          onKeyDown: event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              setArchiveOpenKey(open ? '' : row.key)
+            }
+          },
+        },
+          h('div', { className: 'aura-archive-result-head' },
+            h('span', { className: 'aura-archive-result-time' }, archiveTimeLabel(row.at)),
+            h('span', { className: 'aura-archive-role aura-archive-role-' + row.role }, t('archive.role.' + row.role)),
+            h('span', { className: 'aura-archive-session' }, t('archive.sessionLabel', { id: shortId })),
+          ),
+          h('div', { className: 'aura-archive-snippet' }, snippet),
+        )
+      })
+      const archiveSection = h(Section, { title: t('archive.title') },
+        h('div', { className: 'qqn-row-hint aura-archive-hint', style: { marginTop: 0, marginBottom: 8 } }, t('archive.hint')),
+        h('div', { className: 'aura-archive-toolbar' },
+          h('input', {
+            className: 'qqn-input aura-archive-input',
+            type: 'text',
+            value: archiveQuery,
+            placeholder: t('archive.placeholder'),
+            'aria-label': t('archive.searchLabel'),
+            spellCheck: false,
+            onChange: event => setArchiveQuery(event.target.value),
+            onKeyDown: event => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                void runArchiveSearch()
+              }
+            },
+          }),
+          h('div', { className: 'qqn-seg aura-archive-range', role: 'group', 'aria-label': t('archive.searchLabel') },
+            archiveRangeDefs.map(([value, label]) => h('button', {
+              key: value,
+              type: 'button',
+              className: 'qqn-seg-button',
+              'aria-pressed': archiveRange === value,
+              onClick: () => chooseArchiveRange(value),
+            }, label)),
+            archiveRange === 'day' && archiveDay
+              ? h('button', { type: 'button', className: 'qqn-seg-button', 'aria-pressed': true }, archiveDay.slice(5))
+              : null,
+          ),
+          h(Button, {
+            variant: 'primary',
+            disabled: archiveBusy === 'search' || archiveBusy === 'load',
+            onClick: () => { void runArchiveSearch() },
+          }, archiveBusy === 'search' ? t('archive.searching') : t('archive.search')),
+          h(Button, {
+            disabled: archiveBusy !== '' ,
+            onClick: clearArchiveSearch,
+          }, t('archive.clear')),
+        ),
+        h('div', { className: 'aura-archive-meta' },
+          archiveStatsLine ? h('span', { className: 'aura-archive-total' }, archiveStatsLine) : null,
+          archiveLoaded && archiveTotal === 0 ? h('span', { className: 'aura-archive-total' }, t('archive.noArchive')) : null,
+        ),
+        archiveError ? h('div', { className: 'qqn-feedback qqn-feedback-error', role: 'status' }, archiveError) : null,
+        h('div', { className: 'aura-archive-timeline' },
+          h('div', { className: 'aura-archive-timeline-head' },
+            h('span', { className: 'qqn-look-title' }, t('archive.timeline')),
+            h('span', { className: 'qqn-row-hint', style: { marginTop: 0 } }, t('archive.timelineHint')),
+          ),
+          archiveTotal > 0 && archiveTimeline.length > 0
+            ? h('div', { className: 'aura-archive-bars' }, archiveTimeline.map(row => {
+              const count = Number(row.count) || 0
+              const height = archiveMaxCount > 0 ? Math.max(2, Math.round((count / archiveMaxCount) * 100)) : 2
+              return h('button', {
+                key: row.date,
+                type: 'button',
+                className: 'aura-archive-bar' + (archiveDay === row.date ? ' aura-archive-bar-active' : ''),
+                title: row.date + ' · ' + t('archive.dayCount', { count }),
+                'aria-label': row.date + ' · ' + t('archive.dayCount', { count }),
+                onClick: () => {
+                  setArchiveDay(row.date)
+                  setArchiveRange('day')
+                  void runArchiveSearch({ range: 'day', day: row.date })
+                },
+              }, h('span', { className: 'aura-archive-bar-fill', style: { height: height + '%' } }))
+            }))
+            : h('div', { className: 'qqn-mood-empty' },
+                archiveBusy === 'load' ? t('archive.loading') : t('archive.noArchiveHint')),
+        ),
+        archiveSearched
+          ? h('div', { className: 'aura-archive-results' },
+              archiveResults.length > 0
+                ? h(React.Fragment, null,
+                    h('div', { className: 'aura-archive-result-count' }, t('archive.resultCount', { count: archiveResults.length })),
+                    archiveResultRows,
+                  )
+                : h('div', { className: 'qqn-mood-empty' }, t('archive.empty') + ' · ' + t('archive.emptyHint')),
+            )
+          : null,
+      )
+
       /* ---------------- 生活页：状态卡 / 快捷按钮 / 自定义安排 / 记录 / 生活设置 ---------------- */
       const lifeNow = asObject(lifeSnap)
       const lifeStateKey = String(lifeNow.state || '')
@@ -6309,7 +6636,7 @@ ${TRAIL_CSS}
               tabNav,
               tab === 'soul' ? h(React.Fragment, null, soulSection, soulContentSection, soulPreviewSection, growthSection, soulActions, blockFeedback('soul')) : null,
               tab === 'emotion' ? h(React.Fragment, null, emotionSection, relationSection) : null,
-              tab === 'memory' ? memorySection : null,
+              tab === 'memory' ? h(React.Fragment, null, archiveSection, memorySection) : null,
               tab === 'diary' ? diarySection : null,
               tab === 'meme' ? memeSection : null,
               tab === 'speak' ? speakSection : null,

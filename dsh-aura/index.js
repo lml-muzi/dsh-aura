@@ -15,6 +15,7 @@ import { initMeme, dispose as disposeMeme, getMemeState } from './host/meme.js'
 import { createDiary } from './host/diary.js'
 import { installEmotion } from './host/emotion.js'
 import { installMemory } from './host/memory.js'
+import { installArchive } from './host/archive.js'
 import { installSpeak } from './host/speak.js'
 import { registerPanelApi } from './host/web.js'
 
@@ -129,6 +130,8 @@ export function apply(ctx, config = {}) {
   // ---- 情绪 / 记忆 / 主动搭话 ----
   const emotion = installEmotion(ctx, { state, soul, bridge, log })
   const memory = installMemory(ctx, { state, soul, log })
+  // 记忆罗盘：原始会话存档（只存 Aura 会话、只本地、不注入）+ soul_archive 工具 + /dsh-aura/archive-api
+  const archive = installArchive({ ctx, state, soul, log })
   const speak = installSpeak(ctx, { state, soul, emotion, memory, bridge, life, log })
   // 日记：独立 diary.json，不是记忆；自动注册 soul_diary 工具与 /dsh-aura/diary-api
   const diary = createDiary({ home: state.stateDir(), getSoul: () => soul.get(), getMemoryStore: () => memory.store, getConfig: () => state.readConfig(), log, ctx })
@@ -165,6 +168,7 @@ export function apply(ctx, config = {}) {
     meme: () => safe(() => getMemeState(), {}),
     speak: () => safe(() => speak.snapshot(), {}),
     memory: () => safe(() => memory.snapshot(), {}),
+    archive: () => safe(() => archive.stats(), {}),
     diary: () => safe(() => diary.list(7), []),
   })
 
@@ -199,6 +203,7 @@ export function apply(ctx, config = {}) {
     safe(() => life.dispose?.(), 'dispose life')
     void stop()
     void bridge.dispose()
+    safe(() => archive.dispose?.(), 'dispose archive')
     safe(() => soul.saveNow?.(), 'soul.saveNow')
   })
 

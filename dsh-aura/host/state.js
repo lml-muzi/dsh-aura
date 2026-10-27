@@ -116,6 +116,11 @@ export const DEFAULT_CONFIG = {
   memoryDigestIdleMinutes: 360,
   memoryDigestDailyCap: 2,
 
+  // ---- 记忆罗盘（host/archive.js：原始会话存档，只本地保存、不注入） ----
+  archiveEnabled: true,
+  archiveDays: 365,
+  archiveMaxFiles: 120,
+
   // ---- 日记自动写（host/diary.js 每 30 分钟检查一次）----
   diaryAuto: true,
   diaryAutoHour: 22,
@@ -197,6 +202,8 @@ const INT_RANGES = {
   memoryRecallLimit: [1, 3],
   memoryDigestIdleMinutes: [60, 1440],
   memoryDigestDailyCap: [1, 5],
+  archiveDays: [30, 3650],
+  archiveMaxFiles: [12, 120],
   diaryAutoHour: [0, 23],
   diaryAutoMinEvents: [1, 20],
   speakIntervalMinutes: [5, 1440],
@@ -229,7 +236,7 @@ const FLOAT_RANGES = {
 const BOOL_FIELDS = new Set([
   'autoConnect', 'splitEnabled', 'soulEnabled', 'soulGrowthReflection', 'emotionEnabled',
   'emotionGuardOnNegative', 'memoryEnabled', 'memoryAutoCompact', 'memoryDiaryEnabled',
-  'memoryImmediate', 'memorySessionDigest', 'diaryAuto',
+  'memoryImmediate', 'memorySessionDigest', 'diaryAuto', 'archiveEnabled',
   'speakEnabled', 'speakDryRun', 'speakStickerEnabled', 'speakShareEnabled', 'proactiveEnabled', 'steerEnabled',
   'lifeRandom', 'lifeQuietSleep', 'lifeWakeGreeting',
 ])
