@@ -1451,6 +1451,7 @@ export function installSpeak(ctx, deps = {}) {
       lifeWakeGreeting: raw.lifeWakeGreeting !== false,
       // 分享欲：pendingShare 新鲜时固定高命中线；情绪权重倍率 0~2（默认 1.0 = 旧公式）
       shareEnabled: raw.speakShareEnabled !== false,
+      wakeRecentHours: clamp(raw.speakWakeRecentHours ?? 0, 0, 72),
       emotionSensitivity: clamp(raw.speakEmotionSensitivity ?? SPEAK_DEFAULTS.emotionSensitivity, 0, 2),
       shareLine: SHARE_OVERRIDE_LINE,
     }
@@ -2494,7 +2495,9 @@ export function installSpeak(ctx, deps = {}) {
     const picked = pickTarget(now, config)
     if (!picked || !picked.chat) return { done: picked?.reason || 'no-target' }
     const lastUserAt = lastUserAtOf(stateRef, getData(), picked.chat)
-    if (!lastUserAt || now - lastUserAt > WAKE_RECENT_MS) return { done: 'no-recent' }
+    // 默认 0 = 不限互动窗口；旧行为（6 小时硬限制）可通过配置恢复。
+    const recentHours = Math.max(0, num(config.wakeRecentHours, 0))
+    if (recentHours > 0 && (!lastUserAt || now - lastUserAt > recentHours * 60 * 60 * 1000)) return { done: 'no-recent' }
     return tick({ trigger: 'wake', lifeFrom: options?.from || '' })
   }
 

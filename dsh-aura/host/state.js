@@ -133,7 +133,8 @@ export const DEFAULT_CONFIG = {
   speakWakeMode: 'auto', // auto | followup | schedule
   speakMaxChars: 60,
   speakShareEnabled: true, // 分享欲开关：pendingShare 新鲜时用固定高命中线开口
-  speakEmotionSensitivity: 1.0, // 情绪冲动权重倍率 0~2（默认 1.0 与旧公式完全一致）
+  speakEmotionSensitivity: 1.0,
+  speakWakeRecentHours: 0, // 情绪冲动权重倍率 0~2（默认 1.0 与旧公式完全一致）
 
   // ---- 生活层（host/life.js：life.json；tick 固定 60s）----
   lifeRandom: false, // 随机生活默认关：只有她主动 plan 才换状态
@@ -171,6 +172,7 @@ const INT_RANGES = {
   speakIntervalMinutes: [5, 1440],
   speakCooldownMinutes: [0, 1440],
   speakDailyCap: [0, 10],
+  speakWakeRecentHours: [0, 72],
   speakMissBonus: [0, 100],
   speakBonusCap: [0, 100],
   speakNearMinutes: [1, 1440],

@@ -1762,6 +1762,7 @@ ${TRAIL_CSS}
         speakStickerEnabled: cfg.speakStickerEnabled !== false,
         speakShareEnabled: cfg.speakShareEnabled !== false,
         speakEmotionSensitivity: Number.isFinite(sensitivity) ? Math.max(0, Math.min(2, sensitivity)) : 1,
+        speakWakeRecentHours: clampInt(cfg.speakWakeRecentHours, 0, 72, 0),
       }
     }
 
@@ -3527,6 +3528,7 @@ ${TRAIL_CSS}
           speakStickerEnabled: speakForm.speakStickerEnabled === true,
           speakShareEnabled: speakForm.speakShareEnabled !== false,
           speakEmotionSensitivity: Number.isFinite(sensitivity) ? Math.max(0, Math.min(2, sensitivity)) : 1,
+          speakWakeRecentHours: clampInt(speakForm.speakWakeRecentHours, 0, 72, 0),
         }, 'notice.speakSaved')
       }
 
@@ -5095,6 +5097,25 @@ ${TRAIL_CSS}
                 })),
               }),
               h('span', { className: 'qqn-unit' }, t('speak.unitTimes')),
+            ),
+          }),
+          h(Row, {
+            label: '醒来打招呼的互动窗口',
+            hint: '0 = 不限；超过这个小时数没互动就不发早安',
+            control: h(React.Fragment, null,
+              h('input', {
+                className: 'qqn-input qqn-input-narrow',
+                type: 'number',
+                min: 0,
+                max: 72,
+                step: 1,
+                value: speakForm.speakWakeRecentHours,
+                onChange: event => setSpeakForm(prev => ({
+                  ...prev,
+                  speakWakeRecentHours: event.target.value === '' ? '' : Number(event.target.value),
+                })),
+              }),
+              h('span', { className: 'qqn-unit' }, '小时'),
             ),
           }),
           h(Row, {

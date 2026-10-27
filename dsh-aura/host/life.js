@@ -769,7 +769,13 @@ export function describeLife(life, now = Date.now()) {
     const wakeMode = WAKE_MODE_SET.has(str(life.wakeMode)) ? str(life.wakeMode) : 'open'
     const until = numOrNull(life.until)
     if (wakeMode === 'fixed' && until !== null && until > now) text += `，闹钟 ${clockOf(until)}`
-    else if (wakeMode === 'random') text += '，预计自然醒'
+    else if (wakeMode === 'random') {
+      const earliest = numOrNull(life.wakeEarliest)
+      const latest = numOrNull(life.wakeLatest)
+      text += earliest !== null && latest !== null
+        ? `，预计 ${clockOf(earliest)}–${clockOf(latest)} 之间醒`
+        : '，随机醒'
+    }
     else if (wakeMode === 'open') text += '，自然醒'
   }
   return text

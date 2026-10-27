@@ -434,7 +434,7 @@ await test('describeLife：状态 + activity + 醒法；无 life 返回空串', 
 
   const playing = defaultsLife(T0)
   planLife(playing, { state: 'play', activity: '听歌' }, T0)
-  assert.equal(describeLife(playing, T0), '正在玩（听歌），预计自然醒')
+  assert.equal(describeLife(playing, T0), '正在玩（听歌），预计 05:45–07:45 之间醒')
 
   const sleeping = defaultsLife(T0)
   planLife(sleeping, { state: 'sleep', minutes: 480 }, T0)
@@ -651,7 +651,7 @@ await test('renderPresenceContext：有 life 用自己的状态；无 life 回�
   const playing = defaultsLife(T0)
   planLife(playing, { state: 'play', activity: '听歌' }, T0)
   const text = renderPresenceContext(soul, { soulUserNickname: '木子' }, T0, playing)
-  assert.match(text, /（现在是周一 04:45；你正在玩（听歌），预计自然醒；还没和用户聊过）/)
+  assert.match(text, /（现在是周一 04:45；你正在玩（听歌），预计 05:45–07:45 之间醒；还没和用户聊过）/)
   assert.match(text, /关系：熟悉/)
 
   const sleeping = defaultsLife(T0)
@@ -819,10 +819,16 @@ await test('buildIntentBody：传 lifeText 才注入，不传保持原文', () =
 })
 
 await test('notifyWake：最近没互动 → no-recent；有互动 → 掷骰走高优先级线', async () => {
-  const stale = makeSpeakEnv('awake')
+  const stale = makeSpeakEnv('awake', { speakWakeRecentHours: 6 })
   stale.soulData.relation.lastUserAt = stale.clock.ms - 7 * HOUR
   const staleResult = await stale.speak.notifyWake()
   assert.equal(staleResult.done, 'no-recent')
+
+  const noLimit = makeSpeakEnv('awake')
+  noLimit.soulData.relation.lastUserAt = noLimit.clock.ms - 7 * HOUR
+  const noLimitResult = await noLimit.speak.notifyWake()
+  assert.notEqual(noLimitResult.done, 'no-recent')
+  noLimit.speak.stop()
   stale.speak.stop()
 
   const env = makeSpeakEnv('awake')
