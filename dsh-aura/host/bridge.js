@@ -589,6 +589,29 @@ export class ChannelBridge {
     }
   }
 
+  /** soul_say：在同一被动窗口里追加一条短消息（消耗 maxMessages 额度）。 */
+  async say(text, exec) {
+    const session = exec?.agent?.session
+    const sessionId = String(session?.id ?? session?.header?.id ?? '')
+    const chat = this.chatOfSession(sessionId)
+    if (!chat) throw new Error('当前会话没有绑定 QQ 聊天，soul_say 只在 QQ 会话可用')
+    const context = this.contexts.get(chat.key)
+    if (!context || context.expiresAt <= Date.now()) throw new Error('被动回复窗口已关闭，先等对方说话')
+    const config = this.state.readConfig()
+    const budget = Math.max(1, Number(config.maxMessages) || 4) - context.seq
+    if (budget <= 0) throw new Error('本回合消息条数已达上限，这条不发了')
+    const outgoing = String(text ?? '').trim().slice(0, 400)
+    if (!outgoing) throw new Error('text 不能为空')
+    const seq = ++context.seq
+    await this.qq.sendText({ kind: chat.kind, chatId: chat.chatId, msgId: context.msgId, seq, text: outgoing })
+    this.lastAssistantAt = Date.now()
+    this.lastActiveByKey.set(chat.key, this.lastAssistantAt)
+    this.touchRecord(chat)
+    this.log(`[qq] soul_say seq=${seq} ${Array.from(outgoing).length} 字 → ${chat.kind}/${chat.chatId}`)
+    this.notifyOutbound({ chat, kind: 'text', text: outgoing, proactive: false, sessionId })
+    return { ok: true, seq, text: outgoing }
+  }
+
   /** dsh_im_return_file 工具的实现：把表情图/文件作为 QQ 原生消息发出（当回合、文字之前）。 */
   async returnFile(rawPath, exec) {
     const session = exec?.agent?.session

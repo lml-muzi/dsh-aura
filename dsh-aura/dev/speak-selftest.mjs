@@ -662,7 +662,7 @@ await withHarness({}, async ({ harness, speak }) => {
   eq('日志 channel=followup', harness.soulData.speak.log.at(-1).channel, 'followup')
 
   // prompt context 只在命中轮、且会话匹配时非空
-  const entry = harness.contextEntries[0]
+  const entry = harness.contextEntries.find(item => item.name === 'aura:intent')
   eq('注册了 aura:intent context', entry && entry.name, 'aura:intent')
   eq('context order 60', entry && entry.order, 60)
   const intentText = entry.text({ agent: { session: { id: mainBinding.sessionId } } })

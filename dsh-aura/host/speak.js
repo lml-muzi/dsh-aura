@@ -3077,6 +3077,20 @@ export function installSpeak(ctx, deps = {}) {
   try {
     if (ctx?.systemPrompt && typeof ctx.systemPrompt.context === 'function') {
       ctx.systemPrompt.context({
+        name: 'aura:multi-message',
+        order: 57,
+        text: assembly => {
+          try {
+            const sessionId = String(assembly?.agent?.session?.id ?? assembly?.agent?.session?.header?.id ?? '')
+            if (!sessionId.startsWith('qq:')) return ''
+            const cap = Math.max(1, Number(readSpeakConfig().maxMessages) || 4)
+            return `（QQ 连发：想分成几条短消息说时，用空行隔开，一次最多 ${cap} 条；每条短一点。需要我先短说一句、再补一句时，可以调用 soul_say 追加。只有真的想分几句说才用，普通回答别拆。）`
+          } catch {
+            return ''
+          }
+        },
+      })
+      ctx.systemPrompt.context({
         name: 'aura:intent',
         order: 60,
         text: assembly => {

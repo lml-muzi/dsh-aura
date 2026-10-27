@@ -32,6 +32,25 @@ export function installMedia(ctx, { bridge, log }) {
       return bridge.returnFile(args?.path, exec)
     },
   }))
+
+  ctx.tools.register(defineTool({
+    name: 'soul_say',
+    description: '在当前的 QQ 被动回复窗口里追加一条短消息。想分两句说、又不想把正文拆得太碎时用；一次最多 200 字，同回合受 QQ 条数上限约束。不要用它重复你马上要发的正文。',
+    parameters: {
+      text: { type: 'string', description: '要追加的那一句，≤200 字', required: true },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args, value) => [{ type: 'text', text: value?.ok ? '已追加第 ' + String(value.seq) + ' 条消息' : '没发出去：' + String(value?.error || '') }],
+    },
+    async execute(args, exec) {
+      try {
+        return await bridge.say(args?.text, exec)
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    },
+  }))
 }
 
 // hmr probe 1792916654
