@@ -691,12 +691,7 @@ export function renderMemoryContext(source, config = {}, options = {}) {
     pushPart(`（顺着关系想起：${hop.facts.map((fact) => fact.text).join('；')}）`)
   }
 
-  // ④ 最近事件
-  const recent = recentEvents(memory, EVENT_CONTEXT_RECENT)
-  if (recent.length > 0) {
-    pushPart(`（最近：${recent.map((event) => event.summary).join('；')}）`)
-  }
-
+  // ④ 上次没说的念头（比最近聊过更具体，优先级更高）
   const pendingThought = soul?.speak?.pendingThought
   if (pendingThought && typeof pendingThought === 'object' && asNumber(pendingThought.expiresAt, 0) > now) {
     const thought = String(pendingThought.text ?? pendingThought.summary ?? '').trim()
@@ -706,6 +701,22 @@ export function renderMemoryContext(source, config = {}, options = {}) {
   const topics = recentTopics(memory, 3, now)
   if (topics.length > 0 && used < 120) {
     pushPart(`（最近聊过：${topics.map((item) => item.key).join('、')}）`)
+  }
+
+  // ⑤ 旧事（≥N 天前）：最低优先级，只留 1 条；当前会话里的不重复提。
+  const oldDays = clamp(asNumber(config?.memoryOldAfterDays, 14), 7, 365)
+  const oldLimit = clamp(asNumber(config?.memoryOldLimit, 1), 0, 3)
+  const currentSessionId = String(options.sessionId ?? '')
+  if (oldLimit > 0) {
+    const cutoff = now - oldDays * 86_400_000
+    const old = asArray(memory.events)
+      .filter(event => event && asNumber(event.at, 0) > 0 && asNumber(event.at, 0) <= cutoff)
+      .filter(event => !currentSessionId || String(event.sessionId || '') !== currentSessionId)
+      .sort((a, b) => asNumber(b.at, 0) - asNumber(a.at, 0))
+      .slice(0, oldLimit)
+    if (old.length > 0) {
+      pushPart(`（旧事，${oldDays} 天以前：${old.map((event) => event.summary).join('；')}）`)
+    }
   }
 
   return codepointSlice(parts.join(''), budget)
@@ -1279,7 +1290,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           const sessionId = String(assembly?.agent?.session?.id ?? assembly?.agent?.session?.header?.id ?? '')
           if (assembly && !assembly.agent && config.emotionScope !== 'all') return ''
           if (!isSoulSession(config, sessionId)) return ''
-          return renderMemoryContext(store, config, { soul: readSoul() })
+          return renderMemoryContext(store, config, { soul: readSoul(), sessionId })
         } catch (error) {
           logger('[soul] memory context 渲染失败:', error instanceof Error ? error.message : error)
           return ''

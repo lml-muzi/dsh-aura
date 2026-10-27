@@ -399,23 +399,19 @@ await test('压实：事件超过 30 时最旧 10 条汇总成 notes，events �
   assert.equal(memoryNow.events.length, 15)
 })
 
-await test('renderMemoryContext：预算 ≤240，只含最近 2 条事件', () => {
+await test('renderMemoryContext：预算 ≤240，最近事件不自动注入', () => {
   memory.clear()
   memory.note('user', '用户叫木子', 0.9)
   memory.note('user', '用户喜欢听歌', 0.8)
   memory.note('us', '你们约好周末看电影', 0.8)
   for (let index = 1; index <= 5; index += 1) {
-    memory.addEvent(eventText(index, 30_000 + index * 2000))
+    memory.addEvent(eventText(index, Date.now() + index * 2000))
   }
   const config = state.readConfig()
   const context = memory.renderContext(Date.now(), { lastUserText: '木子' })
   assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET_MAX, `预算应 ≤${MEMORY_CONTEXT_BUDGET_MAX}，实际 ${lengthOf(context)}`)
   assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET, `当前预算 ${MEMORY_CONTEXT_BUDGET}`)
-  assert.ok(context.includes('事件编号5'))
-  assert.ok(context.includes('事件编号4'))
-  assert.equal(context.includes('事件编号1'), false)
-  assert.equal(context.includes('事件编号2'), false)
-  assert.equal(context.includes('事件编号3'), false)
+  assert.equal(context.includes('事件编号'), false, '最近事件不再自动注入')
   assert.ok(context.includes('木子'))
 
   // 旧签名兼容：传 soul（带 memory）也能渲染
@@ -953,8 +949,17 @@ await test('context：query 命中事实 + top2 实体，superseded 不注入', 
   assert.equal(context.includes('木子喜欢听歌'), false, 'superseded 不应注入')
   assert.ok(context.includes('团子（宠物）'))
   assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET, `预算应 ≤${MEMORY_CONTEXT_BUDGET}，实际 ${lengthOf(context)}`)
-  assert.ok(context.includes('事件编号5') && context.includes('事件编号4'))
-  assert.equal(context.includes('事件编号1'), false)
+  assert.equal(context.includes('事件编号'), false, '最近事件不再自动注入')
+})
+
+await test('旧事：≥14 天且非当前会话的 events 才注入', () => {
+  const oldAt = Date.now() - 20 * 86_400_000
+  memory.addEvent({ kind: 'chat', summary: '旧的约定', at: oldAt, sessionId: 'qq:dm:old' })
+  const context = memory.renderContext(Date.now(), { sessionId: 'qq:dm:new' })
+  assert.ok(context.includes('旧事'), context)
+  assert.ok(context.includes('旧的约定'))
+  const same = memory.renderContext(Date.now(), { sessionId: 'qq:dm:old' })
+  assert.equal(same.includes('旧的约定'), false)
 })
 
 await test('snapshot 带 facts/entities，且事实不含 superseded', () => {
