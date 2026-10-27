@@ -47,6 +47,20 @@ import { describeLife } from './life.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const MINUTE_MS = 60 * 1000
+const REASON_LABELS = {
+  'no-target': '没有可主动的会话',
+  'never-interacted': '还没在 QQ 上聊过',
+  'group-not-allowed': '这个群不在允许列表',
+  archived: '会话已归档',
+  blocked: '对方说过先别打扰，或未回复太多',
+  'passive-window': '还在被动回复窗口里，先等你说话',
+  'pending-reply': '上一条还没回完',
+  'agent-busy': '我还在忙上一件事',
+  'cold-session': '会话未唤醒，当前模式不主动唤醒',
+  'no-schedule': '没有可用的唤醒通道',
+  'emotion-unsuitable': '情绪不适合主动'
+}
+function reasonTextOf(reason) { return REASON_LABELS[String(reason || '')] || String(reason || '') }
 const SPEAK_LOG_LIMIT = 60
 const EXPLAIN_LOG_LIMIT = 200
 const RECENT_TEXT_LIMIT = 8
@@ -1792,7 +1806,7 @@ export function installSpeak(ctx, deps = {}) {
         + (stateRef.lastProactiveAnswered ? 10 : 0)
       candidates.push({ chat, agent, idleMinutes, score, busy: false })
     }
-    if (!candidates.length) return { reason: fallbackReason }
+    if (!candidates.length) return { reason: fallbackReason, reasonText: reasonTextOf(fallbackReason) }
     candidates.sort((left, right) => right.score - left.score)
     const live = candidates.filter(candidate => candidate.agent)
     if (live.length) return { ...live[0], cold: false }
@@ -2506,7 +2520,7 @@ export function installSpeak(ctx, deps = {}) {
     }
 
     const picked = pickTarget(now, config)
-    if (!picked || !picked.chat) return { done: picked?.reason || 'no-target' }
+    if (!picked || !picked.chat) return { done: picked?.reason || 'no-target', reasonText: picked?.reasonText || reasonTextOf(picked?.reason || 'no-target') }
 
     const lastUserAt = lastUserAtOf(stateRef, data, picked.chat)
     const busy = userBusyFactor(picked.chat.key) < 1
@@ -2854,6 +2868,7 @@ export function installSpeak(ctx, deps = {}) {
       pendingShare: publicShare(),
       nextTriggerIn: Math.max(0, num(stateRef.lastRollAt, 0) + config.intervalMinutes * MINUTE_MS - nowMs()),
       target: picked?.chat ? { sessionId: picked.chat.sessionId, kind: picked.chat.kind, chatId: picked.chat.chatId, cold: Boolean(picked.cold) } : null,
+      targetReason: picked?.chat ? '' : (picked?.reasonText || reasonTextOf(picked?.reason || 'no-target')),
       pendingThought,
       intent: currentIntent(),
       log: (Array.isArray(stateRef.log) ? stateRef.log : []).slice(-10),
