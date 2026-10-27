@@ -1216,7 +1216,7 @@ window.__ModuleLoader__.load({
 .aura-prob-bar-track{flex:1;height:8px;border-radius:4px;background:var(--dsw-alias-bg-base);overflow:hidden}
 .aura-prob-bar-fill{display:block;height:100%;border-radius:4px;background:var(--dsw-alias-state-business-primary);transition:width .2s ease}
 .aura-prob-bar-value{flex:none;min-width:34px;text-align:right;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
-.aura-session-toggle{appearance:none;border:1px solid var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:10px;line-height:1;padding:4px 7px;cursor:pointer;white-space:nowrap}.aura-session-toggle-on{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent)}
+.aura-header-chip{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;line-height:22px;height:22px;padding:0 4px;border-radius:var(--dsw-radius-xs);cursor:pointer}.aura-header-chip:hover{background:var(--dsw-alias-fill-tsp-secondary)}.aura-header-chip-on{color:var(--dsw-alias-state-business-primary)}.aura-session-toggle{appearance:none;border:1px solid var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:10px;line-height:1;padding:4px 7px;cursor:pointer;white-space:nowrap}.aura-session-toggle-on{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent)}
 .aura-prob-svg{display:block;width:100%;height:auto}
 .aura-prob-axis{stroke:var(--dsw-alias-border-l3);stroke-width:1}
 .aura-prob-timeline{margin-bottom:12px}
@@ -2351,80 +2351,37 @@ ${TRAIL_CSS}
 
 
 
-    /** 顶部/输入框的全局 Aura 开关；位置由 soulTogglePlacement 决定。 */
-    function AuraQuickToggle(props) {
-      const placement = props && props.placement ? String(props.placement) : ''
-      const [enabled, setEnabled] = React.useState(false)
-      const [visible, setVisible] = React.useState(false)
-      const [busy, setBusy] = React.useState(false)
-      React.useEffect(() => {
-        let alive = true
-        fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
-          if (!alive) return
-          const cfg = (value && value.config) || {}
-          const where = cfg.soulTogglePlacement || 'session-row'
-          setVisible(where === placement || where === 'both')
-          setEnabled(cfg.soulWebEnabled === true)
-        }).catch(() => {})
-        return () => { alive = false }
-      }, [placement])
-      if (!visible) return null
-      const toggle = () => {
-        if (busy) return
-        setBusy(true)
-        fetch('/dsh-aura/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ soulWebEnabled: !enabled }) })
-          .then(r => r.json()).then(value => { if (value && value.ok) setEnabled(!enabled) })
-          .catch(() => {}).finally(() => setBusy(false))
-      }
-      return h('button', {
-        type: 'button',
-        className: 'aura-session-toggle' + (enabled ? ' aura-session-toggle-on' : ''),
-        title: enabled ? 'Aura 模式已开启（所有网页会话）' : '开启 Aura 模式（所有网页会话）',
-        'aria-pressed': enabled ? 'true' : 'false',
-        disabled: busy,
-        onClick: toggle,
-      }, enabled ? 'Aura' : '＋Aura')
-    }
 
-    /** 会话行里的 Aura 开关：只影响这一条会话是否算灵魂会话。 */
-    function AuraSessionToggle(props) {
-      const sessionId = props && props.sessionId ? String(props.sessionId) : ''
-      const [soul, setSoul] = React.useState(false)
+    /** 顶部标题栏的 Aura 开关：只显示文字，开启后变成 DSH 蓝。 */
+    function AuraHeaderChip() {
+      const [enabled, setEnabled] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
-      const [visible, setVisible] = React.useState(true)
       React.useEffect(() => {
-        if (!sessionId) return undefined
         let alive = true
         fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
-          const where = (value && value.config && value.config.soulTogglePlacement) || 'session-row'
-          if (alive) setVisible(where === 'session-row' || where === 'both')
+          if (alive) setEnabled(Boolean(value && value.config && value.config.soulWebEnabled === true))
         }).catch(() => {})
-        fetch('/dsh-aura/session-api?sessionId=' + encodeURIComponent(sessionId))
-          .then(response => response.json())
-          .then(value => { if (alive) setSoul(value && value.soul === true) })
-          .catch(() => {})
         return () => { alive = false }
-      }, [sessionId])
-      if (!sessionId || !visible) return null
+      }, [])
       const toggle = () => {
         if (busy) return
         setBusy(true)
-        fetch('/dsh-aura/session-api', {
+        fetch('/dsh-aura/api/config', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId, soul: !soul }),
-        }).then(response => response.json()).then(value => {
-          if (value && value.ok) setSoul(value.soul === true)
+          body: JSON.stringify({ soulWebEnabled: !enabled }),
+        }).then(r => r.json()).then(value => {
+          if (value && value.ok) setEnabled(!enabled)
         }).catch(() => {}).finally(() => setBusy(false))
       }
       return h('button', {
         type: 'button',
-        className: 'aura-session-toggle' + (soul ? ' aura-session-toggle-on' : ''),
-        title: soul ? '这个会话已开启 Aura 模式' : '把这个会话设为 Aura 模式',
-        'aria-pressed': soul ? 'true' : 'false',
+        className: 'aura-header-chip' + (enabled ? ' aura-header-chip-on' : ''),
+        title: enabled ? 'Aura 模式已开启（网页会话）' : '开启 Aura 模式（网页会话）',
+        'aria-pressed': enabled ? 'true' : 'false',
         disabled: busy,
         onClick: toggle,
-      }, soul ? 'Aura' : '＋Aura')
+      }, 'Aura')
     }
 
     function Panel(props) {
@@ -4678,21 +4635,6 @@ ${TRAIL_CSS}
               checked: soulForm.soulWebEnabled === true,
               onChange: event => setSoulForm(prev => ({ ...prev, soulWebEnabled: event.target.checked })),
             }),
-          }),
-          h(Row, {
-            label: 'Aura 开关显示位置',
-            hint: '会话行是每个会话单独开关；顶部/输入框是全局开关',
-            control: h('select', {
-              className: 'qqn-input',
-              value: soulForm.soulTogglePlacement || 'session-row',
-              onChange: event => setSoulForm(prev => ({ ...prev, soulTogglePlacement: event.target.value })),
-            },
-              h('option', { value: 'session-row' }, '会话行'),
-              h('option', { value: 'header' }, '页面顶部'),
-              h('option', { value: 'input' }, '输入框左侧'),
-              h('option', { value: 'both' }, '两处都显示'),
-              h('option', { value: 'off' }, '不显示'),
-            ),
           }),
           h(Row, {
             label: '每日自省',
@@ -7871,23 +7813,11 @@ ${TRAIL_CSS}
           id: 'aura-trail',
           order: 50,
         }, AuraTrail))
-
-        ctx.slots.inject('conversation.header.leading', () => ctx.slots.register({
-          name: 'conversation.header.leading',
-          id: 'aura-quick-header',
-          order: 80,
-        }, (props) => h(AuraQuickToggle, { placement: 'header' })))
-        ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
-          name: 'conversation.input.left',
-          id: 'aura-quick-input',
-          order: 80,
-        }, (props) => h(AuraQuickToggle, { placement: 'input' })))
-
-        ctx.slots.inject('sidebar.session.row.hover', () => ctx.slots.register({
-          name: 'sidebar.session.row.hover',
-          id: 'aura-session-toggle',
-          order: 10,
-        }, AuraSessionToggle))
+        ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+          name: 'conversation.session.header.actions',
+          id: 'aura-header-chip',
+          order: 0,
+        }, AuraHeaderChip))
 
         ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main',
