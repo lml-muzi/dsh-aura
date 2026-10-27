@@ -2481,6 +2481,7 @@ ${TRAIL_CSS}
       const [memoryBaseline, setMemoryBaseline] = React.useState(() => buildMemoryForm({}))
       const [memoryCompactResult, setMemoryCompactResult] = React.useState(null)
       const [memoryDigestResult, setMemoryDigestResult] = React.useState(null)
+      const [memoryPreview, setMemoryPreview] = React.useState(null)
       const [archiveQuery, setArchiveQuery] = React.useState('')
       const [archiveRange, setArchiveRange] = React.useState('all')
       const [archiveDay, setArchiveDay] = React.useState('')
@@ -4149,6 +4150,20 @@ ${TRAIL_CSS}
         }
       }
 
+      const previewMemory = async () => {
+        if (blockBusy('memoryPreview')) return
+        setBlock('memoryPreview', { busy: true, error: '', notice: '' })
+        try {
+          const response = await fetch('/dsh-aura/memory-api?action=preview')
+          const value = await response.json().catch(() => ({}))
+          if (!response.ok || value.ok === false) throw new Error(value.error || 'HTTP ' + response.status)
+          if (mounted.current) setMemoryPreview({ text: String(value.text || ''), chars: Number(value.chars) || 0 })
+          setBlock('memoryPreview', { busy: false, error: '', notice: '' })
+        } catch (error) {
+          if (mounted.current) failBlock('memoryPreview', error)
+        }
+      }
+
       const digestMemory = async () => {
         if (blockBusy('memoryDigest')) return
         setBlock('memoryDigest', { busy: true, error: '', notice: '' })
@@ -5332,11 +5347,19 @@ ${TRAIL_CSS}
                 disabled: blockBusy('memoryDigest'),
                 onClick: () => void digestMemory(),
               }, blockBusy('memoryDigest') ? t('memory.digesting') : t('memory.digest')),
+              h(Button, {
+                disabled: blockBusy('memoryPreview'),
+                onClick: () => void previewMemory(),
+              }, blockBusy('memoryPreview') ? '预览中…' : '预览注入'),
             ),
             memoryDirty ? h('div', { className: 'qqn-row-hint' }, t('memory.unsaved')) : null,
             blockFeedback('memorySettings'),
             blockFeedback('memoryCompact'),
             blockFeedback('memoryDigest'),
+            blockFeedback('memoryPreview'),
+            memoryPreview
+              ? h('pre', { className: 'aura-soul-preview', style: { marginTop: 8 } }, memoryPreview.text || '（当前没有会注入的内容）')
+              : null,
             memoryCompactResult
               ? h('div', { className: 'aura-memory-compact-stats' },
                   h('div', null, t('memory.compactBefore', memoryCountParams(memoryCompactResult.before))),

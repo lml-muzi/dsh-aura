@@ -2519,6 +2519,18 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
               })
               return
             }
+            if (req.method === 'GET' && route === '/preview') {
+              const query = String(url.searchParams.get('query') || '').trim()
+              const sessionId = String(url.searchParams.get('sessionId') || '')
+              const text = renderMemoryContext(store, readConfig(), {
+                soul: readSoul(),
+                lastUserText: query,
+                sessionId,
+                force: true,
+              })
+              sendJson(res, 200, { ok: true, text, chars: Array.from(text).length, query, sessionId })
+              return
+            }
             if (req.method === 'POST' && (route === '/' || route === '' || route === '/state')) {
               await handleMemoryApiPost(req, res)
               return
