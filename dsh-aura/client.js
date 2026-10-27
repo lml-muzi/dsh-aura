@@ -2519,6 +2519,8 @@ ${TRAIL_CSS}
       const [emotionBaseline, setEmotionBaseline] = React.useState(() => buildEmotionForm({}))
       const [nudgeBusy, setNudgeBusy] = React.useState(false)
       const [nudgeError, setNudgeError] = React.useState('')
+      const [emotionHistoryRowsState, setEmotionHistory] = React.useState(null)
+      const [emotionHistoryRowsBusy, setEmotionHistoryBusy] = React.useState(false)
       const [speakForm, setSpeakForm] = React.useState(() => buildSpeakForm({}))
       const [speakBaseline, setSpeakBaseline] = React.useState(() => buildSpeakForm({}))
       const [memoryForm, setMemoryForm] = React.useState(() => buildMemoryForm({}))
@@ -4147,6 +4149,16 @@ ${TRAIL_CSS}
         }, 4000)
       }
 
+      const toggleNotePin = async (note) => {
+        if (!note || !note.id) return
+        try {
+          await fetchJson('/dsh-aura/memory-api', { action: note.pinned ? 'unpinNote' : 'pinNote', id: note.id })
+          await load(false)
+        } catch (error) {
+          failBlock('memory', error)
+        }
+      }
+
       const saveMemory = () => {
         void saveBlock('memorySettings', {
           memoryEnabled: memoryForm.memoryEnabled === true,
@@ -4363,6 +4375,8 @@ ${TRAIL_CSS}
       })).filter(row => row.text)
       const noteGroups = ['user', 'us', 'self'].map(category => {
         const items = asArray(asObject(memory.notes)[category]).map(row => ({
+          id: String(asObject(row).id || ''),
+          pinned: asObject(row).pinned === true,
           at: timeOf(asObject(row).at || asObject(row).createdAt || asObject(row).updatedAt),
           text: rowText(row, 'text', 'content', 'note', 'summary'),
         })).filter(row => row.text)
@@ -4837,6 +4851,20 @@ ${TRAIL_CSS}
         ),
       )
 
+      const loadEmotionHistory = async () => {
+        if (emotionHistoryRowsBusy) return
+        setEmotionHistoryBusy(true)
+        try {
+          const response = await fetch('/dsh-aura/emotion-api?action=history&limit=30')
+          const value = await response.json().catch(() => ({}))
+          if (!response.ok || value.ok === false) throw new Error(value.error || 'HTTP ' + response.status)
+          setEmotionHistory(Array.isArray(value.episodes) ? value.episodes : [])
+        } catch (error) {
+          setEmotionHistory({ error: error instanceof Error ? error.message : String(error) })
+        } finally {
+          setEmotionHistoryBusy(false)
+        }
+      }
       const emotionNowCard = h('div', { className: 'aura-emotion-now' },
         h('div', { className: 'aura-emotion-now-title' }, t('emotion.now.title')),
         emotionEpisodes.length
@@ -4857,6 +4885,27 @@ ${TRAIL_CSS}
               )),
             )
           : h('div', { className: 'qqn-mood-empty' }, t('emotion.now.empty')),
+        h('div', { className: 'qqn-actions' },
+          h(Button, { disabled: emotionHistoryRowsBusy, onClick: () => void loadEmotionHistory() }, emotionHistoryRowsBusy ? '读取中…' : 'episode 历史'),
+        ),
+        emotionHistoryRowsState
+          ? h('div', { className: 'aura-emotion-episode-list', style: { marginTop: 8 } },
+              emotionHistoryRowsState.error
+                ? h('div', { className: 'qqn-mood-empty' }, emotionHistoryRowsState.error)
+                : emotionHistoryRowsState.length === 0
+                  ? h('div', { className: 'qqn-mood-empty' }, '还没有 episode')
+                  : emotionHistoryRowsState.map((episode, index) => h('div', { key: String(episode.id || index), className: 'aura-emotion-episode' },
+                      h('div', { className: 'aura-emotion-episode-head' },
+                        h('span', { className: 'aura-emotion-episode-type' }, episode.complex || emotionTypeLabel(episode.type)),
+                        h('span', { className: 'aura-emotion-level aura-emotion-level-' + episode.level }, t('emotion.level.' + episode.level)),
+                        episode.expired ? h('span', { className: 'aura-emotion-episode-time' }, '已过期') : null,
+                        h('span', { className: 'aura-emotion-episode-time' }, new Date(Number(episode.startedAt) || Date.now()).toLocaleString()),
+                      ),
+                      episode.cause ? h('div', { className: 'aura-emotion-episode-cause' }, episode.cause) : null,
+                      episode.note ? h('div', { className: 'aura-emotion-episode-note' }, episode.note) : null,
+                    )),
+            )
+          : null,
         emotionNudge
           ? h('div', { className: 'aura-emotion-nudge' },
               h('div', { className: 'aura-emotion-nudge-head' },
@@ -5523,7 +5572,15 @@ ${TRAIL_CSS}
                   group.items.slice(0, 4).map((row, index) => h('div', {
                     key: 'note-' + group.category + '-' + index,
                     className: 'qqn-memory-item',
-                  }, '· ' + row.text)),
+                  },
+                    h('span', { style: { flex: 1, minWidth: 0 } }, '· ' + row.text),
+                    h('button', {
+                      type: 'button',
+                      title: row.pinned ? '取消钉住' : '钉住这条笔记',
+                      onClick: () => void toggleNotePin(row),
+                      style: { background: 'transparent', border: 0, cursor: 'pointer', color: row.pinned ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)', fontSize: 12, padding: '0 4px' },
+                    }, row.pinned ? '已钉' : '钉住'),
+                  )),
                 )),
           ),
           h('div', { className: 'qqn-memory-block' },

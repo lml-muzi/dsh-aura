@@ -2821,6 +2821,18 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     return result
   }
 
+  function memoryPinNote(input = {}, pinned = true) {
+    const id = String(input?.id ?? '').trim()
+    const text = String(input?.text ?? '').trim()
+    if (!id && !text) return { ok: false, reason: '需要 id 或 text' }
+    let result = { ok: false, reason: 'not-found' }
+    store.update((memory) => {
+      result = (pinned ? pinNoteInMemory : unpinNoteInMemory)(memory, id ? { id } : { text })
+      return memory
+    })
+    return result
+  }
+
   function memoryDeleteNote(input = {}) {
     const id = String(input?.id ?? '').trim()
     const text = String(input?.text ?? '').trim()
@@ -3006,6 +3018,18 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         sendJson(res, 200, { ok: true, action, ...memoryDeleteFact(id) })
         return
       }
+      if (action === 'pinNote' || action === 'unpinNote') {
+        const input = id ? { id } : { text: String(body?.text ?? body?.oldText ?? '').trim() }
+        const peek = locateNoteInMemory(readMemory(), input)
+        if (!peek.ok) {
+          sendJson(res, peek.reason === 'ambiguous' ? 400 : 404, { ok: false, error: peek.reason })
+          return
+        }
+        await backupMemoryBeforeWrite()
+        const result = memoryPinNote(input, action === 'pinNote')
+        sendJson(res, result.ok ? 200 : 400, { ...result, action })
+        return
+      }
       if (action === 'deleteNote') {
         if (!id) {
           sendJson(res, 400, { ok: false, error: 'id required' })
@@ -3036,7 +3060,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       }
       sendJson(res, 400, {
         ok: false,
-        error: 'unknown action（compact | digest | deleteFact | deleteNote | deleteEntity）',
+        error: 'unknown action（compact | digest | deleteFact | deleteNote | pinNote | unpinNote | deleteEntity）',
       })
     } catch (error) {
       logger('[soul] memory-api POST 失败:', error instanceof Error ? error.message : error)
