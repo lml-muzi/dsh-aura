@@ -4678,7 +4678,24 @@ ${TRAIL_CSS}
         blockFeedback('steer'),
       )
 
+      const rhythmCard = h('div', { className: 'qqn-memory-block' },
+        h('div', { className: 'qqn-look-title' }, '运行节奏'),
+        h('div', { className: 'qqn-row-hint', style: { marginBottom: 6 } }, '只读总览；点按钮去对应页改。'),
+        h('div', { style: { display: 'grid', gap: 6, fontSize: 12, lineHeight: '20px' } },
+          h('div', null, '主动：每 ' + String(config.speakIntervalMinutes ?? 90) + ' 分钟 · 每日 ' + String(config.speakDailyCap ?? 3) + ' 条 · ' + (config.speakEnabled === false ? '关' : '开') + (config.speakDryRun === false ? '' : '（试运行）')),
+          h('div', null, '静默：' + (config.quietEnabled === false ? '关' : String(config.quietStart || '23:30') + '–' + String(config.quietEnd || '07:30'))),
+          h('div', null, '分享：窗口 ' + String(config.speakShareRecentHours ?? 0) + 'h · 冷却 ' + String(config.speakShareCooldownMinutes ?? 45) + ' 分 · 每日 ' + String(config.speakShareDailyCap ?? 2) + ' 条'),
+          h('div', null, '追加推理：' + String(config.soulSayMaxRounds ?? 0) + ' 轮'),
+          h('div', null, '记忆：预算 ' + String(config.memoryContextBudget ?? 240) + ' 字 · 锚点 ' + String(config.memoryAnchorEveryTurns ?? 8) + ' 轮 · 旧事 ' + String(config.memoryOldAfterDays ?? 30) + ' 天'),
+        ),
+        h('div', { className: 'qqn-actions', style: { marginTop: 10 } },
+          h(Button, { variant: 'secondary', onClick: () => setTab('speak') }, '去生活'),
+          h(Button, { variant: 'secondary', onClick: () => setTab('connect') }, '去连接'),
+          h(Button, { variant: 'secondary', onClick: () => setTab('memory') }, '去记忆'),
+        ),
+      )
       const soulSection = h(Section, { title: t('section.soul') },
+        rhythmCard,
         h('div', { className: 'qqn-rows' },
           h(Row, {
             label: t('row.soulName'),
