@@ -17,8 +17,6 @@ window.__ModuleLoader__.load({
     /** 表情包 Host API（dsh-aura 自有路由，不再依赖已停用的 dsh-meme 前端）。 */
     const MEME_API = '/dsh-aura/memes-api'
     const MEME_BASE = '/dsh-aura/memes'
-    /** 人设 Host API（收编 dsh-soul）。 */
-    const PERSONA_API = '/dsh-aura/persona-api'
     /** 日记 Host API（本机同源；mode=rule 零 token）。 */
     const DIARY_API = '/dsh-aura/diary-api'
     /** 事实卡/实体卡只读接口（Host 单独开的路由，web.js 的 /state 不透传这两块）。 */
@@ -69,7 +67,6 @@ window.__ModuleLoader__.load({
       note: '',
     }
     /** 人设保存成功后广播的 window 事件：光轨等常驻组件据此立即刷新配置。 */
-    const PERSONA_SAVED_EVENT = 'aura:persona-saved'
     const MEME_TAG_LABELS = {
       angry: '生气',
       happy: '开心',
@@ -2271,16 +2268,6 @@ ${TRAIL_CSS}
      * 人设落盘成功后通知订阅者（输入框光轨等）立即刷新，不必等下一轮 15s 轮询。
      * 用 window 事件而不是共享 store：光轨常驻在 composer 里，人设页可能从未打开过。
      */
-    function notifyPersonaSaved() {
-      if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return
-      if (typeof CustomEvent !== 'function') return
-      try {
-        window.dispatchEvent(new CustomEvent(PERSONA_SAVED_EVENT))
-      } catch (error) {
-        // 派发失败不影响保存结果
-        console.warn('[dsh-aura] 人设已保存事件派发失败：', error)
-      }
-    }
 
     function buildPersonaForm(config) {
       const cfg = asObject(config)
@@ -2556,17 +2543,8 @@ ${TRAIL_CSS}
       const [memeUploadName, setMemeUploadName] = React.useState('')
       const [memeUploadTag, setMemeUploadTag] = React.useState('daily')
       const [memeEdit, setMemeEdit] = React.useState(null)
-      const [persona, setPersona] = React.useState(null)
-      const [personaLoading, setPersonaLoading] = React.useState(false)
-      const [personaError, setPersonaError] = React.useState('')
-      const [personaNotice, setPersonaNotice] = React.useState('')
-      const [personaBusy, setPersonaBusy] = React.useState('')
       const [personaForm, setPersonaForm] = React.useState(() => buildPersonaForm({}))
       const [personaBaseline, setPersonaBaseline] = React.useState(() => buildPersonaForm({}))
-      const [personaPresetId, setPersonaPresetId] = React.useState('')
-      const [personaPresetName, setPersonaPresetName] = React.useState('')
-      const [personaPreviewOpen, setPersonaPreviewOpen] = React.useState(false)
-      const [personaPreview, setPersonaPreview] = React.useState('')
       const [diaryEntries, setDiaryEntries] = React.useState([])
       const [diaryLoading, setDiaryLoading] = React.useState(false)
       const [diaryLoaded, setDiaryLoaded] = React.useState(false)
@@ -2901,15 +2879,6 @@ ${TRAIL_CSS}
         memeTimer.current = setTimeout(() => {
           memeTimer.current = null
           if (mounted.current) setMemeNotice('')
-        }, 3000)
-      }, [])
-
-      const flashPersona = React.useCallback(text => {
-        setPersonaNotice(text)
-        if (personaTimer.current !== null) clearTimeout(personaTimer.current)
-        personaTimer.current = setTimeout(() => {
-          personaTimer.current = null
-          if (mounted.current) setPersonaNotice('')
         }, 3000)
       }, [])
 
@@ -3345,26 +3314,6 @@ ${TRAIL_CSS}
         }
       }, [])
 
-      const loadPersona = React.useCallback(async force => {
-        setPersonaLoading(true)
-        try {
-          const value = await fetchJson(PERSONA_API + '/state')
-          if (!mounted.current) return
-          setPersona(value)
-          setPersonaError('')
-          if (value && value.config) syncPersona(value.config, force === true)
-          const list = buildPresetList(value)
-          setPersonaPresetId(previous => {
-            if (list.some(item => item.id === previous)) return previous
-            return String((value && value.activeId) || '') || (list[0] && list[0].id) || ''
-          })
-        } catch (error) {
-          if (mounted.current) setPersonaError(errorMessage(error))
-        } finally {
-          if (mounted.current) setPersonaLoading(false)
-        }
-      }, [syncPersona])
-
       React.useEffect(() => {
         if (tab !== 'meme') return undefined
         const timer = setTimeout(() => {
@@ -3619,192 +3568,6 @@ ${TRAIL_CSS}
         }
       }
 
-      /* ---------------- 人设操作 ---------------- */
-      /* 昵称只留灵魂层的 soulUserNickname；启用人设跟随灵魂开关。 */
-      const personaPayload = () => ({
-        enabled: soulForm.soulEnabled === true,
-        occupation: personaForm.occupation.trim(),
-        bio: personaForm.bio.trim(),
-        style: personaForm.style,
-        headingLists: personaForm.headingLists,
-        emoji: personaForm.emoji,
-        tables: personaForm.tables,
-        replyLength: personaForm.replyLength,
-        language: personaForm.language,
-        customInstructions: personaForm.customInstructions.trim(),
-        trailEnabled: personaForm.trailEnabled === true,
-        trailColor: personaColorOf(personaForm.trailColor),
-        trailSpeed: personaForm.trailSpeed,
-        trailWidth: personaForm.trailWidth,
-      })
-
-      const applyPersonaConfig = config => {
-        if (!config) return null
-        const next = buildPersonaForm(config)
-        setPersonaForm(next)
-        setPersonaBaseline(next)
-        return config
-      }
-
-      const refreshPersonaPreview = async (config, quiet) => {
-        if (!quiet) {
-          setPersonaBusy('preview')
-          setPersonaError('')
-        }
-        try {
-          const value = await fetchJson(PERSONA_API + '/preview', { config: config || personaPayload() })
-          if (mounted.current) setPersonaPreview(typeof value.prompt === 'string' ? value.prompt : '')
-        } catch (error) {
-          if (mounted.current && !quiet) setPersonaError(errorMessage(error))
-        } finally {
-          if (mounted.current && !quiet) setPersonaBusy('')
-        }
-      }
-
-      const savePersona = async () => {
-        if (personaBusy) return
-        const payload = personaPayload()
-        setPersonaBusy('save')
-        setPersonaError('')
-        setPersonaNotice('')
-        let savedConfig = null
-        try {
-          const value = await fetchJson(PERSONA_API + '/save', { config: payload })
-          notifyPersonaSaved()
-          if (!mounted.current) return
-          savedConfig = applyPersonaConfig(value && value.config)
-          if (value && Array.isArray(value.changed) && value.changed.length === 0) flashPersona('没有需要保存的改动')
-          else flashPersona('人设已保存')
-          await loadPersona(true)
-        } catch (error) {
-          if (mounted.current) setPersonaError(errorMessage(error))
-        } finally {
-          if (mounted.current) setPersonaBusy('')
-        }
-        if (savedConfig && personaPreviewOpen) void refreshPersonaPreview(savedConfig, true)
-      }
-
-      const resetPersona = async () => {
-        if (personaBusy) return
-        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm('把人设重置为默认值？自定义指令等字段会清空。')) return
-        setPersonaBusy('reset')
-        setPersonaError('')
-        setPersonaNotice('')
-        let resetConfig = null
-        try {
-          const value = await fetchJson(PERSONA_API + '/reset', {})
-          notifyPersonaSaved()
-          if (!mounted.current) return
-          resetConfig = applyPersonaConfig(value && value.config)
-          flashPersona('已重置为默认人设')
-          await loadPersona(true)
-        } catch (error) {
-          if (mounted.current) setPersonaError(errorMessage(error))
-        } finally {
-          if (mounted.current) setPersonaBusy('')
-        }
-        if (resetConfig && personaPreviewOpen) void refreshPersonaPreview(resetConfig, true)
-      }
-
-      const applyPersonaPreset = async () => {
-        if (personaBusy || !personaPresetId) return
-        setPersonaBusy('apply')
-        setPersonaError('')
-        setPersonaNotice('')
-        let appliedConfig = null
-        try {
-          const value = await fetchJson(PERSONA_API + '/preset/apply', { id: personaPresetId })
-          notifyPersonaSaved()
-          if (!mounted.current) return
-          appliedConfig = applyPersonaConfig(value && value.config)
-          flashPersona('预设已应用')
-          await loadPersona(true)
-        } catch (error) {
-          if (mounted.current) setPersonaError(errorMessage(error))
-        } finally {
-          if (mounted.current) setPersonaBusy('')
-        }
-        if (appliedConfig && personaPreviewOpen) void refreshPersonaPreview(appliedConfig, true)
-      }
-
-      const savePersonaPreset = async () => {
-        if (personaBusy) return
-        const name = personaPresetName.trim()
-        if (!name) {
-          setPersonaError('给预设起个名字')
-          return
-        }
-        setPersonaBusy('savePreset')
-        setPersonaError('')
-        setPersonaNotice('')
-        try {
-          // /preset/save 拍的是“已保存配置”的快照；草稿有改动时先落盘，避免另存为拿到旧人设。
-          if (personaDirty) {
-            const saved = await fetchJson(PERSONA_API + '/save', { config: personaPayload() })
-            notifyPersonaSaved()
-            if (saved && saved.config) applyPersonaConfig(saved.config)
-          }
-          const value = await fetchJson(PERSONA_API + '/preset/save', { name })
-          notifyPersonaSaved()
-          if (!mounted.current) return
-          if (value && value.saved) setPersonaPresetId(String(value.saved))
-          setPersonaPresetName('')
-          flashPersona('预设已保存')
-          await loadPersona(true)
-        } catch (error) {
-          if (mounted.current) setPersonaError(errorMessage(error))
-        } finally {
-          if (mounted.current) setPersonaBusy('')
-        }
-      }
-
-      const deletePersonaPreset = async () => {
-        if (personaBusy || !personaPresetId) return
-        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm('删除预设「' + personaPresetId + '」？')) return
-        setPersonaBusy('deletePreset')
-        setPersonaError('')
-        setPersonaNotice('')
-        try {
-          await fetchJson(PERSONA_API + '/preset/delete', { id: personaPresetId })
-          if (!mounted.current) return
-          setPersonaPresetId('')
-          flashPersona('预设已删除')
-          await loadPersona(true)
-        } catch (error) {
-          if (mounted.current) setPersonaError(errorMessage(error))
-        } finally {
-          if (mounted.current) setPersonaBusy('')
-        }
-      }
-
-      const undoPersona = async entry => {
-        const index = Number(entry && entry.index)
-        if (personaBusy || !Number.isInteger(index)) return
-        setPersonaBusy('undo')
-        setPersonaError('')
-        setPersonaNotice('')
-        let undoneConfig = null
-        try {
-          const value = await fetchJson(PERSONA_API + '/history/undo', { index })
-          notifyPersonaSaved()
-          if (!mounted.current) return
-          undoneConfig = applyPersonaConfig(value && value.config)
-          flashPersona('已撤销')
-          await loadPersona(true)
-        } catch (error) {
-          if (mounted.current) setPersonaError(errorMessage(error))
-        } finally {
-          if (mounted.current) setPersonaBusy('')
-        }
-        if (undoneConfig && personaPreviewOpen) void refreshPersonaPreview(undoneConfig, true)
-      }
-
-      const togglePersonaPreview = () => {
-        const next = !personaPreviewOpen
-        setPersonaPreviewOpen(next)
-        if (next) void refreshPersonaPreview()
-      }
-
       const setField = (key, value) => {
         setForm(prev => ({ ...prev, [key]: value }))
       }
@@ -3994,7 +3757,7 @@ ${TRAIL_CSS}
        * 两边都成功才对草稿基线并提示成功；任一边失败都保持 dirty，等用户重试。
        */
       const saveSoul = async () => {
-        if (blockBusy('soul') || personaBusy) return
+        if (blockBusy('soul')) return
         const name = soulForm.soulName.trim().slice(0, 20)
         if (!name) {
           setBlock('soul', { busy: false, notice: '', error: t('error.soulName') })
@@ -4017,10 +3780,7 @@ ${TRAIL_CSS}
           trailWidth: personaForm.trailWidth,
         }
         setBlock('soul', { busy: true, error: '', notice: '' })
-        setPersonaError('')
-        setPersonaNotice('')
         let nextSoul = null
-        let nextPersona = null
         try {
           const soulValue = await api('/config', soulPayload)
           if (!mounted.current) return
@@ -4034,14 +3794,12 @@ ${TRAIL_CSS}
             syncDrafts(nextSoul, false)
             syncSoul(nextSoul, true)
           }
-          if (nextPersona) applyPersonaConfig(nextPersona)
           flashBlock('soul', t('notice.soulSaved'))
         } catch (error) {
           if (mounted.current) failBlock('soul', error)
         } finally {
           if (mounted.current) setBlock('soul', { busy: false })
         }
-        if (nextPersona && personaPreviewOpen) void refreshPersonaPreview(nextPersona, true)
       }
 
       const saveEmotion = () => {
@@ -6649,16 +6407,6 @@ ${TRAIL_CSS}
           : null,
       )
 
-      /* ---------------- 人设片段（已并入灵魂 tab） ---------------- */
-      const personaData = asObject(persona)
-      const personaConfigError = typeof personaData.configError === 'string' ? personaData.configError : ''
-      const personaPresetOptions = buildPresetList(personaData)
-      const personaHistoryRows = Array.isArray(personaData.history) ? personaData.history : []
-      const personaDirty = draftKey(personaForm) !== draftKey(personaBaseline)
-      const personaSelectedPreset = personaPresetOptions.find(item => item.id === personaPresetId) || null
-      const personaFeedback = personaError
-        ? h('div', { className: 'qqn-feedback qqn-feedback-error', role: 'status', 'aria-live': 'polite' }, personaError)
-        : (personaNotice ? h('div', { className: 'qqn-feedback', role: 'status', 'aria-live': 'polite' }, personaNotice) : null)
       const growthSection = h(Section, {
         title: '成长',
         action: h('span', null, '共 ' + growthTotal + ' 条'),
@@ -6775,191 +6523,13 @@ ${TRAIL_CSS}
         ),
       )
 
+      const trailDirty = ['trailEnabled', 'trailColor', 'trailSpeed', 'trailWidth'].some(key => personaForm[key] !== personaBaseline[key])
       const soulActions = h('div', { className: 'qqn-actions' },
         h(Button, {
           variant: 'primary',
-          disabled: blockInfo('soul').busy || personaBusy !== '' || !(soulDirty || personaDirty),
+          disabled: blockInfo('soul').busy || !(soulDirty || trailDirty),
           onClick: () => void saveSoul(),
         }, blockInfo('soul').busy ? t('busy.save') : t('button.soulSave')),
-      )
-
-      const personaSection = h(React.Fragment, null,
-        h(Section, { title: t('section.expression') },
-          h('div', { className: 'qqn-row-hint', style: { marginTop: 0, marginBottom: 8 } }, t('section.expression.hint')),
-          personaConfigError
-            ? h('div', { className: 'qqn-error' }, '人设配置有问题：' + personaConfigError)
-            : null,
-          personaLoading && !persona
-            ? h('div', { className: 'qqn-loading' }, '正在读取人设…')
-            : null,
-          h('div', { className: 'qqn-rows' },
-            h(Row, {
-              label: '回复风格',
-              hint: '影响语气和用词',
-              control: selectField(PERSONA_STYLES, personaForm.style, value => setPersonaForm(previous => ({ ...previous, style: value })), '回复风格'),
-            }),
-            h(Row, {
-              label: '标题与列表',
-              hint: '更多 = 更爱用标题/列表；更少 = 更多段落',
-              control: selectField(PERSONA_TRAITS, personaForm.headingLists, value => setPersonaForm(previous => ({ ...previous, headingLists: value })), '标题与列表'),
-            }),
-            h(Row, {
-              label: '表情符号',
-              hint: '更多 = 更常用 emoji',
-              control: selectField(PERSONA_TRAITS, personaForm.emoji, value => setPersonaForm(previous => ({ ...previous, emoji: value })), '表情符号'),
-            }),
-            h(Row, {
-              label: '表格',
-              hint: '更多 = 优先用表格整理信息',
-              control: selectField(PERSONA_TRAITS, personaForm.tables, value => setPersonaForm(previous => ({ ...previous, tables: value })), '表格'),
-            }),
-            h(Row, {
-              label: '回复长度',
-              control: selectField(PERSONA_REPLY_LENGTHS, personaForm.replyLength, value => setPersonaForm(previous => ({ ...previous, replyLength: value })), '回复长度'),
-            }),
-            h(Row, {
-              label: '语言',
-              control: selectField(PERSONA_LANGUAGES, personaForm.language, value => setPersonaForm(previous => ({ ...previous, language: value })), '语言'),
-            }),
-            h(Row, {
-              label: '自定义指令',
-              hint: '追加在人设提示词末尾（≤2000 字）',
-              control: h('textarea', {
-                className: 'qqn-input aura-persona-textarea',
-                rows: 4,
-                maxLength: 2000,
-                value: personaForm.customInstructions,
-                onChange: event => setPersonaForm(previous => ({ ...previous, customInstructions: event.target.value })),
-              }),
-            }),
-          ),
-        ),
-        growthSection,
-        h(Section, {
-          title: '预设',
-          action: personaData.activeId ? h('span', null, '当前：' + personaData.activeId) : null,
-        },
-          h('div', { className: 'aura-persona-presets' },
-            personaPresetOptions.length > 0
-              ? h('select', {
-                  className: 'qqn-input',
-                  value: personaPresetId,
-                  'aria-label': '人设预设',
-                  onChange: event => setPersonaPresetId(event.target.value),
-                }, personaPresetOptions.map(item => h('option', { key: item.id, value: item.id }, item.name + (item.builtin ? '（内置）' : ''))))
-              : h('span', { className: 'qqn-unit' }, '没有可用预设'),
-            h(Button, {
-              disabled: personaBusy !== '' || !personaPresetId,
-              onClick: () => void applyPersonaPreset(),
-            }, personaBusy === 'apply' ? '应用中…' : '应用'),
-            h('input', {
-              className: 'qqn-input',
-              value: personaPresetName,
-              placeholder: '新预设名字',
-              maxLength: 40,
-              spellCheck: false,
-              'aria-label': '新预设名字',
-              onChange: event => setPersonaPresetName(event.target.value),
-            }),
-            h(Button, {
-              disabled: personaBusy !== '' || !personaPresetName.trim(),
-              onClick: () => void savePersonaPreset(),
-            }, personaBusy === 'savePreset' ? '保存中…' : '另存为'),
-            h(Button, {
-              variant: 'danger',
-              disabled: personaBusy !== '' || !personaSelectedPreset || personaSelectedPreset.builtin === true,
-              onClick: () => void deletePersonaPreset(),
-            }, personaBusy === 'deletePreset' ? '删除中…' : '删除'),
-          ),
-        ),
-        h(Section, {
-          title: '最近变更',
-          action: h('span', null, personaHistoryRows.length > 0 ? personaHistoryRows.length + ' 条' : ''),
-        },
-          personaHistoryRows.length > 0
-            ? h('div', { className: 'aura-persona-history' }, personaHistoryRows.map(entry => {
-                const row = asObject(entry)
-                const at = timeOf(row.at)
-                const stamp = [formatRelative(at, t), formatClock(at)].filter(Boolean).join(' ') || '—'
-                const meta = [personaSourceLabel(row.source), stamp, row.preset ? '预设：' + row.preset : ''].filter(Boolean).join(' · ')
-                return h('div', { key: 'persona-history-' + String(row.index) + '-' + String(row.at || ''), className: 'aura-persona-history-row' },
-                  h('div', { className: 'aura-persona-history-main' },
-                    h('div', { className: 'aura-persona-history-meta' }, meta),
-                    h('div', { className: 'aura-persona-history-changes' }, personaChangesText(row.changes)),
-                  ),
-                  h(Button, {
-                    disabled: personaBusy !== '',
-                    onClick: () => void undoPersona(row),
-                  }, '撤销到这条之前'),
-                )
-              }))
-            : h('div', { className: 'qqn-mood-empty' }, personaLoading ? '加载中…' : '还没有变更记录'),
-        ),
-        h(Section, {
-          title: '提示词预览',
-          action: h('button', {
-            type: 'button',
-            className: 'qqn-seg-button',
-            'aria-expanded': personaPreviewOpen,
-            onClick: togglePersonaPreview,
-          }, personaPreviewOpen ? '收起' : '展开'),
-        },
-          personaPreviewOpen
-            ? (personaBusy === 'preview' && !personaPreview
-                ? h('div', { className: 'qqn-mood-empty' }, '生成中…')
-                : (personaPreview
-                    ? h('pre', { className: 'aura-persona-prompt' }, personaPreview)
-                    : h('div', { className: 'qqn-mood-empty' }, '当前还没有可预览的提示词')))
-            : h('div', { className: 'qqn-mood-empty' }, '展开后可查看当前表单编译出的提示词'),
-        ),
-        h(Section, { title: t('section.trail') },
-          h('div', { className: 'qqn-rows' },
-            h(Row, {
-              label: '光轨动画',
-              hint: '聊天里流动的光轨；跟灵魂总开关一起生效',
-              control: h('input', {
-                className: 'qqn-checkbox',
-                type: 'checkbox',
-                checked: personaForm.trailEnabled === true,
-                onChange: event => setPersonaForm(previous => ({ ...previous, trailEnabled: event.target.checked })),
-              }),
-            }),
-            h(Row, {
-              label: '光轨颜色',
-              control: h('div', { className: 'aura-persona-inline' },
-                h('input', {
-                  type: 'color',
-                  className: 'aura-persona-color',
-                  value: personaForm.trailColor,
-                  'aria-label': '光轨颜色',
-                  onChange: event => setPersonaForm(previous => ({ ...previous, trailColor: personaColorOf(event.target.value) })),
-                }),
-                h('span', { className: 'qqn-unit' }, personaForm.trailColor),
-              ),
-            }),
-            h(Row, {
-              label: '光轨速度',
-              control: selectField(PERSONA_TRAIL_SPEEDS, personaForm.trailSpeed, value => setPersonaForm(previous => ({ ...previous, trailSpeed: value })), '光轨速度'),
-            }),
-            h(Row, {
-              label: '光轨粗细',
-              control: selectField(PERSONA_TRAIL_WIDTHS, personaForm.trailWidth, value => setPersonaForm(previous => ({ ...previous, trailWidth: value })), '光轨粗细'),
-            }),
-          ),
-        ),
-        h('div', { className: 'qqn-actions' },
-          h(Button, {
-            variant: 'primary',
-            disabled: blockInfo('soul').busy || personaBusy !== '' || !(soulDirty || personaDirty),
-            onClick: () => void saveSoul(),
-          }, blockInfo('soul').busy ? t('busy.save') : t('button.soulSave')),
-          h(Button, {
-            disabled: blockInfo('soul').busy || personaBusy !== '',
-            onClick: () => void resetPersona(),
-          }, personaBusy === 'reset' ? '重置中…' : '重置'),
-        ),
-        blockFeedback('soul'),
-        personaFeedback,
       )
 
       /* ---------------- 日记 tab ---------------- */
@@ -7462,16 +7032,9 @@ ${TRAIL_CSS}
         }
         void refresh()
         const timer = setInterval(() => { void refresh() }, TRAIL_POLL_MS)
-        const onSaved = () => { void refresh() }
-        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-          window.addEventListener(PERSONA_SAVED_EVENT, onSaved)
-        }
         return () => {
           alive = false
           clearInterval(timer)
-          if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
-            window.removeEventListener(PERSONA_SAVED_EVENT, onSaved)
-          }
         }
       }, [])
 
