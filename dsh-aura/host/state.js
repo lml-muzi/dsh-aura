@@ -106,7 +106,7 @@ export const DEFAULT_CONFIG = {
   // ---- 记忆 ----
   memoryEnabled: true,
   memoryAutoCompact: true,
-  memoryMaxEvents: 40,
+  memoryMaxEvents: 120,
   memoryMaxNotes: 20,
   memoryReflectionEvery: 3,
   memoryDiaryEnabled: false,
@@ -200,7 +200,7 @@ const INT_RANGES = {
   emotionDecayArousalMinutes: [5, 1440],
   emotionDecayEnergyHours: [1, 72],
   emotionRecheckEvery: [0, 100],
-  memoryMaxEvents: [5, 40],
+  memoryMaxEvents: [5, 120],
   memoryMaxNotes: [5, 200],
   memoryReflectionEvery: [1, 50],
   memoryRecallLimit: [1, 3],

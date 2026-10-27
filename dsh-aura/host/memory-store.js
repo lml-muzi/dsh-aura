@@ -41,7 +41,7 @@ import { snapshotSync as backupSnapshotSync } from './backup.js'
 export const MEMORY_VERSION = 2
 export const MEMORY_FILE = 'memory.json'
 /** 短期 ring 硬上限（与 memory.js 的 EVENT_MAX 同口径）。 */
-export const EVENT_LIMIT = 40
+export const EVENT_LIMIT = 120
 /** 每类笔记上限。 */
 export const NOTE_LIMIT = 30
 /** 单条笔记硬上限（码点）：普通笔记 80，约定类 120，会话整理摘要 200。 */

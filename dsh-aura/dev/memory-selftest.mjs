@@ -213,11 +213,11 @@ await test('坏 JSON：回退空记忆，原文件备份成 memory.json.corrupt'
   store.dispose()
 })
 
-await test('归一化：事件 ≤40、每类笔记 ≤30 且单条 ≤80 字、话题限长', () => {
+await test('归一化：事件 ≤120、每类笔记 ≤30 且单条 ≤80 字、话题限长', () => {
   const dir = join(root, 'store-normalize')
   const store = createMemoryStore({ home: dir, log: () => {} })
   store.write({
-    events: Array.from({ length: 55 }, (_, index) => eventText(index, index + 1)),
+    events: Array.from({ length: 155 }, (_, index) => eventText(index, index + 1)),
     notes: {
       user: Array.from({ length: 40 }, (_, index) => ({ text: `用户笔记${index}-${'长'.repeat(100)}` })),
       us: [{ text: '   ' }],
@@ -227,7 +227,7 @@ await test('归一化：事件 ≤40、每类笔记 ≤30 且单条 ≤80 字、
   })
   const memory = store.read()
   assert.equal(memory.events.length, EVENT_MAX)
-  assert.deepEqual(memory.events.map((item) => item.at), Array.from({ length: 40 }, (_, index) => index + 16))
+  assert.deepEqual(memory.events.map((item) => item.at), Array.from({ length: 120 }, (_, index) => index + 36))
   assert.equal(memory.notes.user.length, NOTE_MAX)
   assert.equal(memory.notes.self.length, 1)
   assert.ok(memory.notes.user.every((note) => lengthOf(note.text) <= NOTE_MAX_CHARS))
@@ -376,7 +376,7 @@ await test('短期 ring：memoryMaxEvents=5 时只留最近 5 条', () => {
   assert.equal(events.length, 5)
   assert.equal(events.at(-1).summary, '事件编号10')
   assert.equal(events.some((event) => event.summary === '事件编号1'), false)
-  state.writeConfig({ memoryMaxEvents: 40 })
+  state.writeConfig({ memoryMaxEvents: 120 })
 })
 
 await test('压实：事件超过 30 时最旧 10 条汇总成 notes，events 减少且去重', () => {
@@ -1585,7 +1585,7 @@ await test('memoryAutoCompact=false：onTurnEnd 不自动整理；打开后当�
   state.writeConfig({ memoryAutoCompact: true, memoryReflectionEvery: 3 })
 })
 
-await test('配置范围：memoryEnabled/memoryAutoCompact 持久化；events 5-40、notes 5-200、recall 1-3、reflection 1-50', () => {
+await test('配置范围：memoryEnabled/memoryAutoCompact 持久化；events 5-120、notes 5-200、recall 1-3、reflection 1-50', () => {
   state.writeConfig({
     memoryEnabled: false,
     memoryAutoCompact: false,
@@ -1597,7 +1597,7 @@ await test('配置范围：memoryEnabled/memoryAutoCompact 持久化；events 5-
   const config = state.readConfig()
   assert.equal(config.memoryEnabled, false)
   assert.equal(config.memoryAutoCompact, false)
-  assert.equal(config.memoryMaxEvents, 40)
+  assert.equal(config.memoryMaxEvents, 120)
   assert.equal(config.memoryMaxNotes, 5)
   assert.equal(config.memoryRecallLimit, 3)
   assert.equal(config.memoryReflectionEvery, 50)

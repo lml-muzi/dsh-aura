@@ -80,7 +80,7 @@ export {
 
 export const NOTE_MAX_CHARS = 80
 export const NOTE_MAX = 30
-export const EVENT_MAX = 40
+export const EVENT_MAX = 120
 export const TOPIC_MAX = 60
 /** 短期 ring 里只把最近 2 条事件放进 context。 */
 export const EVENT_CONTEXT_RECENT = 2
