@@ -489,7 +489,7 @@ export class ChannelBridge {
     const config = this.state.readConfig()
     const raw = String(text ?? '')
     // 模型可以用 <skip> 表示“这一轮不想说话”
-    if (/^<skip>$|^<silence>$|^\[skip\]$/i.test(raw.trim())) {
+    if (/^<?(skip|silence)>?$|^\[skip\]$/i.test(raw.trim())) {
       this.log(`[qq] 模型选择沉默（<skip>） ${chat.key}`)
       if (sessionId) this.takeProactive(sessionId)
       this.notifyOutbound({ chat, kind: 'skip', proactive: false })
