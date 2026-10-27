@@ -656,6 +656,8 @@ export function isSoulSession(config, sessionId) {
   if (config?.soulEnabled === false) return false
   if (config?.emotionScope === 'all') return true
   if (config?.soulWebEnabled === true) return true
+  const allow = String(config?.soulSessionIds ?? '').split(',').map(s => s.trim()).filter(Boolean)
+  if (allow.includes(String(sessionId ?? ''))) return true
   return typeof sessionId === 'string' && sessionId.startsWith('qq:')
 }
 

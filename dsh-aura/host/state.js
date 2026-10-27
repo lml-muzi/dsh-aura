@@ -83,6 +83,7 @@ export const DEFAULT_CONFIG = {
   // ---- 灵魂身份 ----
   soulEnabled: true,
   soulWebEnabled: false,
+  soulSessionIds: '',
   soulName: 'Aura',
   soulUserNickname: '',
   soulPromptBudget: 1020,

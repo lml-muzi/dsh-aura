@@ -1216,6 +1216,7 @@ window.__ModuleLoader__.load({
 .aura-prob-bar-track{flex:1;height:8px;border-radius:4px;background:var(--dsw-alias-bg-base);overflow:hidden}
 .aura-prob-bar-fill{display:block;height:100%;border-radius:4px;background:var(--dsw-alias-state-business-primary);transition:width .2s ease}
 .aura-prob-bar-value{flex:none;min-width:34px;text-align:right;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.aura-session-toggle{appearance:none;border:1px solid var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:10px;line-height:1;padding:4px 7px;cursor:pointer;white-space:nowrap}.aura-session-toggle-on{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent)}
 .aura-prob-svg{display:block;width:100%;height:auto}
 .aura-prob-axis{stroke:var(--dsw-alias-border-l3);stroke-width:1}
 .aura-prob-timeline{margin-bottom:12px}
@@ -2345,6 +2346,43 @@ ${TRAIL_CSS}
     function personaSourceLabel(source) {
       const key = String(source || '')
       return PERSONA_SOURCE_LABELS[key] || key || '未知'
+    }
+
+
+    /** 会话行里的 Aura 开关：只影响这一条会话是否算灵魂会话。 */
+    function AuraSessionToggle(props) {
+      const sessionId = props && props.sessionId ? String(props.sessionId) : ''
+      const [soul, setSoul] = React.useState(false)
+      const [busy, setBusy] = React.useState(false)
+      React.useEffect(() => {
+        if (!sessionId) return undefined
+        let alive = true
+        fetch('/dsh-aura/session-api?sessionId=' + encodeURIComponent(sessionId))
+          .then(response => response.json())
+          .then(value => { if (alive) setSoul(value && value.soul === true) })
+          .catch(() => {})
+        return () => { alive = false }
+      }, [sessionId])
+      if (!sessionId) return null
+      const toggle = () => {
+        if (busy) return
+        setBusy(true)
+        fetch('/dsh-aura/session-api', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId, soul: !soul }),
+        }).then(response => response.json()).then(value => {
+          if (value && value.ok) setSoul(value.soul === true)
+        }).catch(() => {}).finally(() => setBusy(false))
+      }
+      return h('button', {
+        type: 'button',
+        className: 'aura-session-toggle' + (soul ? ' aura-session-toggle-on' : ''),
+        title: soul ? '这个会话已开启 Aura 模式' : '把这个会话设为 Aura 模式',
+        'aria-pressed': soul ? 'true' : 'false',
+        disabled: busy,
+        onClick: toggle,
+      }, soul ? 'Aura' : '＋Aura')
     }
 
     function Panel(props) {
@@ -7775,6 +7813,12 @@ ${TRAIL_CSS}
           id: 'aura-trail',
           order: 50,
         }, AuraTrail))
+
+        ctx.slots.inject('sidebar.session.row.hover', () => ctx.slots.register({
+          name: 'sidebar.session.row.hover',
+          id: 'aura-session-toggle',
+          order: 10,
+        }, AuraSessionToggle))
 
         ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main',

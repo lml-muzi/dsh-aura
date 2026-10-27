@@ -134,6 +134,37 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
     }
   }
 
+  // 会话级 Aura 开关：只改 config.soulSessionIds（逗号分隔）
+  ctx.effect(() => webServer.register({
+    kind: 'prefix',
+    path: '/dsh-aura/session-api',
+    async handler(req, res) {
+      if (!fence(req)) return json(res, 403, { ok: false, error: 'forbidden' })
+      try {
+        if (req.method === 'GET') {
+          const url = new URL(String(req.url || '/'), 'http://localhost')
+          const sessionId = String(url.searchParams.get('sessionId') || '')
+          const cfg = state.readConfig()
+          const ids = String(cfg.soulSessionIds || '').split(',').map(s => s.trim()).filter(Boolean)
+          return json(res, 200, { ok: true, sessionId, soul: ids.includes(sessionId), global: cfg.soulWebEnabled === true })
+        }
+        if (req.method === 'POST') {
+          const body = await readBody(req, 64 * 1024)
+          const sessionId = String(body.sessionId || '').trim()
+          if (!sessionId) return json(res, 400, { ok: false, error: 'sessionId required' })
+          const cfg = state.readConfig()
+          const set = new Set(String(cfg.soulSessionIds || '').split(',').map(s => s.trim()).filter(Boolean))
+          if (body.soul === true) set.add(sessionId); else set.delete(sessionId)
+          state.writeConfig({ soulSessionIds: [...set].join(',') })
+          return json(res, 200, { ok: true, sessionId, soul: body.soul === true })
+        }
+        return json(res, 405, { ok: false, error: 'method not allowed' })
+      } catch (error) {
+        return json(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }))
+
   ctx.effect(() => webServer.register({
     kind: 'prefix',
     path: '/dsh-aura/api',
