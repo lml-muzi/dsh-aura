@@ -1954,6 +1954,7 @@ ${TRAIL_CSS}
         soulUserNickname: typeof cfg.soulUserNickname === 'string' ? cfg.soulUserNickname.trim().slice(0, 20) : '',
         soulEnabled: cfg.soulEnabled !== false,
         soulWebEnabled: cfg.soulWebEnabled === true,
+        soulTogglePlacement: ['off','session-row','header','input','both'].includes(cfg.soulTogglePlacement) ? cfg.soulTogglePlacement : 'session-row',
         soulPromptBudget: clampInt(cfg.soulPromptBudget, 200, 4000, 1020),
         soulBio: typeof cfg.soulBio === 'string' ? cfg.soulBio.slice(0, 500) : '',
         soulContent: typeof cfg.soulContent === 'string' ? cfg.soulContent.slice(0, 4000) : '',
@@ -2349,21 +2350,62 @@ ${TRAIL_CSS}
     }
 
 
+
+    /** 顶部/输入框的全局 Aura 开关；位置由 soulTogglePlacement 决定。 */
+    function AuraQuickToggle(props) {
+      const placement = props && props.placement ? String(props.placement) : ''
+      const [enabled, setEnabled] = React.useState(false)
+      const [visible, setVisible] = React.useState(false)
+      const [busy, setBusy] = React.useState(false)
+      React.useEffect(() => {
+        let alive = true
+        fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
+          if (!alive) return
+          const cfg = (value && value.config) || {}
+          const where = cfg.soulTogglePlacement || 'session-row'
+          setVisible(where === placement || where === 'both')
+          setEnabled(cfg.soulWebEnabled === true)
+        }).catch(() => {})
+        return () => { alive = false }
+      }, [placement])
+      if (!visible) return null
+      const toggle = () => {
+        if (busy) return
+        setBusy(true)
+        fetch('/dsh-aura/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ soulWebEnabled: !enabled }) })
+          .then(r => r.json()).then(value => { if (value && value.ok) setEnabled(!enabled) })
+          .catch(() => {}).finally(() => setBusy(false))
+      }
+      return h('button', {
+        type: 'button',
+        className: 'aura-session-toggle' + (enabled ? ' aura-session-toggle-on' : ''),
+        title: enabled ? 'Aura 模式已开启（所有网页会话）' : '开启 Aura 模式（所有网页会话）',
+        'aria-pressed': enabled ? 'true' : 'false',
+        disabled: busy,
+        onClick: toggle,
+      }, enabled ? 'Aura' : '＋Aura')
+    }
+
     /** 会话行里的 Aura 开关：只影响这一条会话是否算灵魂会话。 */
     function AuraSessionToggle(props) {
       const sessionId = props && props.sessionId ? String(props.sessionId) : ''
       const [soul, setSoul] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
+      const [visible, setVisible] = React.useState(true)
       React.useEffect(() => {
         if (!sessionId) return undefined
         let alive = true
+        fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
+          const where = (value && value.config && value.config.soulTogglePlacement) || 'session-row'
+          if (alive) setVisible(where === 'session-row' || where === 'both')
+        }).catch(() => {})
         fetch('/dsh-aura/session-api?sessionId=' + encodeURIComponent(sessionId))
           .then(response => response.json())
           .then(value => { if (alive) setSoul(value && value.soul === true) })
           .catch(() => {})
         return () => { alive = false }
       }, [sessionId])
-      if (!sessionId) return null
+      if (!sessionId || !visible) return null
       const toggle = () => {
         if (busy) return
         setBusy(true)
@@ -3266,6 +3308,7 @@ ${TRAIL_CSS}
                 soulUserNickname: soulForm.soulUserNickname,
                 soulEnabled: soulForm.soulEnabled === true,
           soulWebEnabled: soulForm.soulWebEnabled === true,
+          soulTogglePlacement: soulForm.soulTogglePlacement || 'session-row',
                 soulWebEnabled: soulForm.soulWebEnabled === true,
                       soulPromptBudget: effectiveSoulBudget(soulForm.soulContent, soulForm.soulPromptBudget),
                 soulBio: soulForm.soulBio,
@@ -4635,6 +4678,21 @@ ${TRAIL_CSS}
               checked: soulForm.soulWebEnabled === true,
               onChange: event => setSoulForm(prev => ({ ...prev, soulWebEnabled: event.target.checked })),
             }),
+          }),
+          h(Row, {
+            label: 'Aura 开关显示位置',
+            hint: '会话行是每个会话单独开关；顶部/输入框是全局开关',
+            control: h('select', {
+              className: 'qqn-input',
+              value: soulForm.soulTogglePlacement || 'session-row',
+              onChange: event => setSoulForm(prev => ({ ...prev, soulTogglePlacement: event.target.value })),
+            },
+              h('option', { value: 'session-row' }, '会话行'),
+              h('option', { value: 'header' }, '页面顶部'),
+              h('option', { value: 'input' }, '输入框左侧'),
+              h('option', { value: 'both' }, '两处都显示'),
+              h('option', { value: 'off' }, '不显示'),
+            ),
           }),
           h(Row, {
             label: '每日自省',
@@ -7813,6 +7871,17 @@ ${TRAIL_CSS}
           id: 'aura-trail',
           order: 50,
         }, AuraTrail))
+
+        ctx.slots.inject('conversation.header.leading', () => ctx.slots.register({
+          name: 'conversation.header.leading',
+          id: 'aura-quick-header',
+          order: 80,
+        }, (props) => h(AuraQuickToggle, { placement: 'header' })))
+        ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+          name: 'conversation.input.left',
+          id: 'aura-quick-input',
+          order: 80,
+        }, (props) => h(AuraQuickToggle, { placement: 'input' })))
 
         ctx.slots.inject('sidebar.session.row.hover', () => ctx.slots.register({
           name: 'sidebar.session.row.hover',

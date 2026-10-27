@@ -84,6 +84,7 @@ export const DEFAULT_CONFIG = {
   soulEnabled: true,
   soulWebEnabled: false,
   soulSessionIds: '',
+  soulTogglePlacement: 'session-row',
   soulName: 'Aura',
   soulUserNickname: '',
   soulPromptBudget: 1020,
@@ -186,6 +187,7 @@ const ENUMS = {
   iconPreset: ['aura', 'qq', 'heart', 'cat', 'star', 'moon', 'emoji'],
   speakWakeMode: ['auto', 'followup', 'schedule'],
   emotionScope: ['qq', 'all'],
+  soulTogglePlacement: ['off', 'session-row', 'header', 'input', 'both'],
   memoryOldMode: ['days', 'exceptRecent'],
 }
 
