@@ -1216,7 +1216,7 @@ window.__ModuleLoader__.load({
 .aura-prob-bar-track{flex:1;height:8px;border-radius:4px;background:var(--dsw-alias-bg-base);overflow:hidden}
 .aura-prob-bar-fill{display:block;height:100%;border-radius:4px;background:var(--dsw-alias-state-business-primary);transition:width .2s ease}
 .aura-prob-bar-value{flex:none;min-width:34px;text-align:right;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
-.aura-header-chip{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;line-height:22px;height:22px;padding:0 4px;border-radius:var(--dsw-radius-xs);cursor:pointer}.aura-header-chip:hover{background:var(--dsw-alias-fill-tsp-secondary)}.aura-header-chip-on{color:var(--dsw-alias-state-business-primary)}.aura-session-toggle{appearance:none;border:1px solid var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:10px;line-height:1;padding:4px 7px;cursor:pointer;white-space:nowrap}.aura-session-toggle-on{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent)}
+.aura-header-chip{appearance:none!important;border:0!important;box-shadow:none!important;outline:0;background:transparent!important;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;line-height:22px;height:22px;padding:0 4px;border-radius:var(--dsw-radius-xs);cursor:pointer}.aura-header-chip:hover{background:var(--dsw-alias-fill-tsp-secondary)}.aura-header-chip-on{color:var(--dsw-alias-state-business-primary)}.aura-session-toggle{appearance:none;border:1px solid var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:10px;line-height:1;padding:4px 7px;cursor:pointer;white-space:nowrap}.aura-session-toggle-on{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent)}
 .aura-prob-svg{display:block;width:100%;height:auto}
 .aura-prob-axis{stroke:var(--dsw-alias-border-l3);stroke-width:1}
 .aura-prob-timeline{margin-bottom:12px}
@@ -2351,6 +2351,39 @@ ${TRAIL_CSS}
 
 
 
+
+
+    /** 顶部/输入框里的 Aura 文字开关（全局）。 */
+    function AuraQuickToggle() {
+      const [enabled, setEnabled] = React.useState(false)
+      const [busy, setBusy] = React.useState(false)
+      React.useEffect(() => {
+        let alive = true
+        fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
+          if (alive) setEnabled(Boolean(value && value.config && value.config.soulWebEnabled === true))
+        }).catch(() => {})
+        return () => { alive = false }
+      }, [])
+      const toggle = () => {
+        if (busy) return
+        setBusy(true)
+        fetch('/dsh-aura/api/config', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ soulWebEnabled: !enabled }),
+        }).then(r => r.json()).then(value => {
+          if (value && value.ok) setEnabled(!enabled)
+        }).catch(() => {}).finally(() => setBusy(false))
+      }
+      return h('button', {
+        type: 'button',
+        className: 'aura-header-chip' + (enabled ? ' aura-header-chip-on' : ''),
+        title: enabled ? 'Aura 模式已开启（所有网页会话）' : '开启 Aura 模式（所有网页会话）',
+        'aria-pressed': enabled ? 'true' : 'false',
+        disabled: busy,
+        onClick: toggle,
+      }, 'Aura')
+    }
 
     /** 顶部标题栏的 Aura 开关：只显示文字，开启后变成 DSH 蓝。 */
     function AuraHeaderChip() {
@@ -7813,6 +7846,12 @@ ${TRAIL_CSS}
           id: 'aura-trail',
           order: 50,
         }, AuraTrail))
+        ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+          name: 'conversation.input.left',
+          id: 'aura-quick-input',
+          order: 80,
+        }, AuraQuickToggle))
+
         ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
           name: 'conversation.session.header.actions',
           id: 'aura-header-chip',
