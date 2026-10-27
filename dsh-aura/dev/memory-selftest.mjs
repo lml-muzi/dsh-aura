@@ -411,7 +411,7 @@ await test('renderMemoryContext：预算 ≤240，最近事件不自动注入', 
   const context = memory.renderContext(Date.now(), { lastUserText: '木子' })
   assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET_MAX, `预算应 ≤${MEMORY_CONTEXT_BUDGET_MAX}，实际 ${lengthOf(context)}`)
   assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET, `当前预算 ${MEMORY_CONTEXT_BUDGET}`)
-  assert.equal(context.includes('事件编号'), false, '最近事件不再自动注入')
+  assert.equal(context.includes('（最近：'), false, '最近事件不再按旧格式注入')
   assert.ok(context.includes('木子'))
 
   // 旧签名兼容：传 soul（带 memory）也能渲染
@@ -949,7 +949,7 @@ await test('context：query 命中事实 + top2 实体，superseded 不注入', 
   assert.equal(context.includes('木子喜欢听歌'), false, 'superseded 不应注入')
   assert.ok(context.includes('团子（宠物）'))
   assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET, `预算应 ≤${MEMORY_CONTEXT_BUDGET}，实际 ${lengthOf(context)}`)
-  assert.equal(context.includes('事件编号'), false, '最近事件不再自动注入')
+  assert.equal(context.includes('（最近：'), false, '最近事件不再按旧格式注入')
 })
 
 await test('旧事：≥14 天且非当前会话的 events 才注入', () => {

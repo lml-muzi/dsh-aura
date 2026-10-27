@@ -643,6 +643,30 @@ function recallOneHop(memory, query, options = {}) {
  * 总预算 ≤240，优先级：笔记 → 直接事实/实体 → 1 跳关系/关联事实 → 最近事件 → 念头 → 话题。
  * 任一优先级放不下就跳过（后面的更靠后），最后再按预算硬截断。
  */
+
+/** 注意力窗口：从最近事件里按显著性/新鲜度/未解决挑 1–N 条，给上下文一句提醒。 */
+export function attentionEvents(source, options = {}) {
+  const memory = memoryOf(source)
+  const now = asNumber(options.now, Date.now())
+  const currentSessionId = String(options.sessionId ?? '')
+  const limit = clamp(asNumber(options.limit, 2), 0, 3)
+  const threshold = clamp(asNumber(options.threshold, 0.35), 0, 1)
+  if (limit <= 0) return []
+  const scored = []
+  for (const event of asArray(memory.events)) {
+    if (!event || !event.summary) continue
+    const at = asNumber(event.at, 0)
+    if (at <= 0 || now - at > 7 * 86_400_000) continue
+    if (currentSessionId && String(event.sessionId || '') === currentSessionId && now - at < 2 * 60 * 60 * 1000) continue
+    const recency = Math.exp(-(now - at) / (72 * 60 * 60 * 1000))
+    const unresolved = /约定|答应|还没|下次|说好|承诺|等你|回头|没定/.test(String(event.summary)) ? 1 : 0
+    const score = 0.5 * clamp(asNumber(event.salience, 0.3), 0, 1) + 0.3 * recency + 0.2 * unresolved
+    if (score >= threshold) scored.push({ event, score })
+  }
+  scored.sort((a, b) => b.score - a.score)
+  return scored.slice(0, limit).map(item => item.event)
+}
+
 export function renderMemoryContext(source, config = {}, options = {}) {
   if (config?.soulEnabled === false) return ''
   const now = asNumber(options.now, Date.now())
@@ -696,6 +720,22 @@ export function renderMemoryContext(source, config = {}, options = {}) {
   if (pendingThought && typeof pendingThought === 'object' && asNumber(pendingThought.expiresAt, 0) > now) {
     const thought = String(pendingThought.text ?? pendingThought.summary ?? '').trim()
     if (thought) pushPart(`（你上次想说但没说出口的念头：${thought.slice(0, 80)}）`)
+  }
+
+  // ④.5 注意力窗口：只挑最近 7 天里仍挂着的 1–2 件，和已有笔记/事实去重。
+  const attentionLimit = clamp(asNumber(config?.memoryAttentionCount, 2), 0, 3)
+  const attentionThreshold = clamp(asNumber(config?.memoryAttentionThreshold, 0.35), 0, 1)
+  const attention = attentionEvents(memory, {
+    now,
+    sessionId: options.sessionId,
+    limit: attentionLimit,
+    threshold: attentionThreshold,
+  }).filter((event) => {
+    const snippet = String(event.summary || '').slice(0, 10)
+    return snippet && !parts.some(part => String(part).includes(snippet))
+  })
+  if (attention.length > 0) {
+    pushPart(`（你脑子里还挂着：${attention.map((event) => event.summary).join('；')}）`)
   }
 
   const topics = recentTopics(memory, 3, now)

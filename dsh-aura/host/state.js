@@ -113,6 +113,8 @@ export const DEFAULT_CONFIG = {
   memoryRecallLimit: 3,
   memoryOldAfterDays: 14,
   memoryOldLimit: 1,
+  memoryAttentionCount: 2,
+  memoryAttentionThreshold: 0.35,
   memoryImmediate: true,
   memorySessionDigest: true,
   memoryDigestIdleMinutes: 360,
@@ -203,7 +205,9 @@ const INT_RANGES = {
   memoryReflectionEvery: [1, 50],
   memoryRecallLimit: [1, 3],
   memoryOldAfterDays: [7, 365],
+  memoryAttentionThreshold: [0, 1],
   memoryOldLimit: [0, 3],
+  memoryAttentionCount: [0, 3],
   memoryDigestIdleMinutes: [60, 1440],
   memoryDigestDailyCap: [1, 5],
   archiveDays: [30, 3650],
@@ -230,6 +234,7 @@ const INT_RANGES = {
 }
 
 const FLOAT_RANGES = {
+  memoryAttentionThreshold: [0, 1],
   speakNearFactor: [0, 3],
   speakFarFactor: [0, 3],
   speakStageFactorFallback: [0, 3],
