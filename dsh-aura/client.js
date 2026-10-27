@@ -3373,11 +3373,6 @@ ${TRAIL_CSS}
         return () => clearTimeout(timer)
       }, [tab, memeQuery, memeTag, loadMemes])
 
-      /* 首次挂载就和 /api/state 一起拉取人设，之后只在保存/预设操作后主动刷新，避免切 tab 覆盖草稿。 */
-      React.useEffect(() => {
-        void loadPersona(true)
-      }, [loadPersona])
-
       React.useEffect(() => {
         const timer = setTimeout(() => {
           void (async () => {
@@ -4041,7 +4036,6 @@ ${TRAIL_CSS}
           }
           if (nextPersona) applyPersonaConfig(nextPersona)
           flashBlock('soul', t('notice.soulSaved'))
-          await loadPersona(true)
         } catch (error) {
           if (mounted.current) failBlock('soul', error)
         } finally {

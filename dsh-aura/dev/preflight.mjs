@@ -20,7 +20,7 @@ const sources = [
   'host/soul.js', 'host/emotion.js', 'host/memory.js', 'host/memory-store.js',
   'host/speak.js', 'host/life.js', 'host/diary.js', 'host/archive.js',
   'host/backup.js', 'host/bridge.js', 'host/media.js', 'host/config-tool.js',
-  'host/web.js', 'host/meme.js', 'host/persona.js',
+  'host/web.js', 'host/meme.js',
 ]
 
 /** 由 DSH profile / npm 提供、本仓库不自带的外部包。 */
