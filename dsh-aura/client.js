@@ -1612,7 +1612,7 @@ ${TRAIL_CSS}
       steerEnabled: true,
       splitRegex: '',
       maxMessages: 4,
-      soulSayMaxRounds: clampInt(cfg.soulSayMaxRounds, 0, 3, 0),
+      soulSayMaxRounds: 0,
       cwd: '',
       proactiveEnabled: false,
       proactiveEveryMinutes: 90,
