@@ -2354,16 +2354,24 @@ ${TRAIL_CSS}
 
 
     /** 顶部/输入框里的 Aura 文字开关（全局）。 */
-    function AuraQuickToggle() {
+    function AuraQuickToggle(props) {
+      const placement = props && props.placement ? String(props.placement) : ''
       const [enabled, setEnabled] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
+      const [visible, setVisible] = React.useState(true)
       React.useEffect(() => {
         let alive = true
         fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
-          if (alive) setEnabled(Boolean(value && value.config && value.config.soulWebEnabled === true))
+          if (alive) {
+            const cfg = (value && value.config) || {}
+            const where = cfg.soulTogglePlacement || 'both'
+            setEnabled(cfg.soulWebEnabled === true)
+            setVisible(where === 'both' || where === placement)
+          }
         }).catch(() => {})
         return () => { alive = false }
       }, [])
+      if (!visible) return null
       const toggle = () => {
         if (busy) return
         setBusy(true)
@@ -2378,6 +2386,18 @@ ${TRAIL_CSS}
       return h('button', {
         type: 'button',
         className: 'aura-header-chip' + (enabled ? ' aura-header-chip-on' : ''),
+        style: {
+          appearance: 'none', border: 0, background: 'transparent', boxShadow: 'none',
+          color: enabled ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)',
+          font: 'inherit', fontSize: 12, lineHeight: '22px', height: 22, padding: '0 4px',
+          borderRadius: 4, cursor: 'pointer',
+        },
+        style: {
+          appearance: 'none', border: 0, background: 'transparent', boxShadow: 'none',
+          color: enabled ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)',
+          font: 'inherit', fontSize: 12, lineHeight: '22px', height: 22, padding: '0 4px',
+          borderRadius: 4, cursor: 'pointer',
+        },
         title: enabled ? 'Aura 模式已开启（所有网页会话）' : '开启 Aura 模式（所有网页会话）',
         'aria-pressed': enabled ? 'true' : 'false',
         disabled: busy,
@@ -2389,10 +2409,15 @@ ${TRAIL_CSS}
     function AuraHeaderChip() {
       const [enabled, setEnabled] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
+      const [visible, setVisible] = React.useState(true)
       React.useEffect(() => {
         let alive = true
         fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
-          if (alive) setEnabled(Boolean(value && value.config && value.config.soulWebEnabled === true))
+          if (!alive) return
+          const cfg = (value && value.config) || {}
+          const where = cfg.soulTogglePlacement || 'both'
+          setEnabled(cfg.soulWebEnabled === true)
+          setVisible(where === 'both' || where === 'header')
         }).catch(() => {})
         return () => { alive = false }
       }, [])
@@ -2410,6 +2435,12 @@ ${TRAIL_CSS}
       return h('button', {
         type: 'button',
         className: 'aura-header-chip' + (enabled ? ' aura-header-chip-on' : ''),
+        style: {
+          appearance: 'none', border: 0, background: 'transparent', boxShadow: 'none',
+          color: enabled ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)',
+          font: 'inherit', fontSize: 12, lineHeight: '22px', height: 22, padding: '0 4px',
+          borderRadius: 4, cursor: 'pointer',
+        },
         title: enabled ? 'Aura 模式已开启（网页会话）' : '开启 Aura 模式（网页会话）',
         'aria-pressed': enabled ? 'true' : 'false',
         disabled: busy,
@@ -4668,6 +4699,20 @@ ${TRAIL_CSS}
               checked: soulForm.soulWebEnabled === true,
               onChange: event => setSoulForm(prev => ({ ...prev, soulWebEnabled: event.target.checked })),
             }),
+          }),
+          h(Row, {
+            label: 'Aura 开关显示位置',
+            hint: '顶部和输入框都是全局开关',
+            control: h('select', {
+              className: 'qqn-input',
+              value: ['both','header','input','off'].includes(soulForm.soulTogglePlacement) ? soulForm.soulTogglePlacement : 'both',
+              onChange: event => setSoulForm(prev => ({ ...prev, soulTogglePlacement: event.target.value })),
+            },
+              h('option', { value: 'both' }, '顶部和输入框'),
+              h('option', { value: 'header' }, '只显示顶部'),
+              h('option', { value: 'input' }, '只显示输入框'),
+              h('option', { value: 'off' }, '不显示'),
+            ),
           }),
           h(Row, {
             label: '每日自省',
@@ -7850,7 +7895,7 @@ ${TRAIL_CSS}
           name: 'conversation.input.left',
           id: 'aura-quick-input',
           order: 80,
-        }, AuraQuickToggle))
+        }, (props) => h(AuraQuickToggle, { placement: 'input' })))
 
         ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
           name: 'conversation.session.header.actions',
