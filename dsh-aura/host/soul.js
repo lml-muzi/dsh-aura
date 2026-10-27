@@ -652,8 +652,9 @@ export function renderSoulPreview(soul, config = {}, now = Date.now()) {
 // ---------- 会话判定 ----------
 
 /** 灵魂只在 QQ 陪伴会话（或 emotionScope=all）里活着，网页工作会话默认不受影响。 */
-export function isSoulSession(config, sessionId) {
+export function isSoulSession(config, sessionId, agentPreset) {
   if (config?.soulEnabled === false) return false
+  if (String(agentPreset || '') === 'aura') return true
   if (config?.emotionScope === 'all') return true
   if (config?.soulWebEnabled === true) return true
   const allow = String(config?.soulSessionIds ?? '').split(',').map(s => s.trim()).filter(Boolean)
@@ -1197,7 +1198,7 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
       const sessionId = String(session?.id ?? session?.header?.id ?? '')
       if (!sessionId) return
       const config = readConfig()
-      if (!isSoulSession(config, sessionId)) return
+      if (!isSoulSession(config, sessionId, session?.header?.agentPreset)) return
       const at = asNumber(event.time, Date.now())
 
       if (event.type === 'user/message') {

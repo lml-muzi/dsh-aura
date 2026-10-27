@@ -95,6 +95,19 @@ export function apply(ctx, config = {}) {
   // 人设（收编 dsh-soul）：独立 persona.json，注入人设段并注册 /dsh-aura/persona-api 与 set_persona 工具
   const persona = initPersona({ ctx, state, log })
   const disposers = []
+  // Aura 模式：一个只带灵魂能力的会话预设；工具由本插件全局注册。
+  try {
+    void ctx.agentPresets?.register?.({
+      id: 'aura',
+      name: 'Aura',
+      description: '和 Aura 聊天：灵魂、情绪、记忆、日记、生活与主动搭话；不附带写代码的工具。',
+      order: 0,
+      plugins: [],
+    }).then(unregister => { if (typeof unregister === 'function') disposers.push(unregister) })
+      .catch(error => log('[aura] Aura preset 注册失败:', error instanceof Error ? error.message : error))
+  } catch (error) {
+    log('[aura] Aura preset 注册异常:', error instanceof Error ? error.message : error)
+  }
   safe(() => disposers.push(soul.on('user', payload => {
     safe(() => emotion.onUserMessage?.(payload), 'emotion.onUserMessage')
     safe(() => memory.onUserMessage?.(payload), 'memory.onUserMessage')

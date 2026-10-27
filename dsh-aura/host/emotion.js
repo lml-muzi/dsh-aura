@@ -1175,8 +1175,9 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
     try {
       if (config.emotionEnabled === false || config.soulEnabled === false) return false
       const sessionId = String(assembly?.agent?.session?.id ?? assembly?.agent?.session?.header?.id ?? '')
+      const preset = String(assembly?.agent?.session?.header?.agentPreset ?? '')
       if (assembly && !assembly.agent && config.emotionScope !== 'all') return false
-      return isSoulSession(config, sessionId)
+      return isSoulSession(config, sessionId, preset)
     } catch {
       return false
     }

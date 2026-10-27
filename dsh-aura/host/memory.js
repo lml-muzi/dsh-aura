@@ -1540,7 +1540,8 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           if (config.memoryEnabled === false) return ''
           const sessionId = String(assembly?.agent?.session?.id ?? assembly?.agent?.session?.header?.id ?? '')
           if (assembly && !assembly.agent && config.emotionScope !== 'all') return ''
-          if (!isSoulSession(config, sessionId)) return ''
+          const preset = String(assembly?.agent?.session?.header?.agentPreset ?? '')
+          if (!isSoulSession(config, sessionId, preset)) return ''
           return renderMemoryContext(store, config, {
             soul: readSoul(),
             sessionId,
