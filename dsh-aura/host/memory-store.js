@@ -23,6 +23,8 @@
  * - 关系边 from/to 只认 entity id：坏值（悬空/自环/重复）在归一化时清掉。
  * - 首次升级：memory.json 不存在且旧 soul.memory 有内容时迁移一次，迁移前备份（失败只 warn），
  *   写完后清掉 soul.memory，之后 soul.json 不再存短期记忆。
+ * - 笔记带 pinned 布尔：pin 住的笔记永不参与上限淘汰，只有显式 unpin / 删除才会消失；
+ *   每类上限仍是 NOTE_LIMIT（全 pinned 且超限时宁可超限，也不偷偷丢钉子）。
  * - 本模块不注册定时器、不依赖 Cordis；纯 Host 侧文件存储，方便自测与以后复用。
  */
 import {
@@ -845,6 +847,61 @@ export function compactMemoryFacts(memory, now = Date.now()) {
 
 // ---------- 归一化 ----------
 
+/**
+ * 笔记强度：importance 为主，召回次数少量加分，更新时间新一点的轻微加分。
+ * pinned 不参与强度排序（淘汰时整条跳过）。
+ */
+export function noteStrength(note, now = Date.now()) {
+  if (!note || typeof note !== 'object') return 0
+  const importance = clamp(asNumber(note.importance, 0.5), 0, 1)
+  const hits = Math.min(5, Math.max(0, asNumber(note.hits, 0)))
+  const ageDays = Math.max(0, asNumber(now, Date.now()) - asNumber(note.updatedAt, 0)) / DAY_MS
+  const freshness = ageDays <= 7 ? 0.05 : ageDays <= 30 ? 0.02 : 0
+  return importance * 0.7 + hits * 0.06 + freshness
+}
+
+/**
+ * 淘汰最弱的一条「未 pin」笔记（原地 splice）。
+ * pinned 永远不参与，全是 pinned 时返回 null（宁可超限也不丢钉子）。
+ */
+export function evictWeakestNote(list, now = Date.now()) {
+  if (!Array.isArray(list) || list.length === 0) return null
+  let weakestIndex = -1
+  let weakestScore = Infinity
+  list.forEach((note, index) => {
+    if (!note || typeof note !== 'object' || note.pinned === true) return
+    const score = noteStrength(note, now)
+    if (score < weakestScore) {
+      weakestScore = score
+      weakestIndex = index
+    }
+  })
+  if (weakestIndex < 0) return null
+  const [removed] = list.splice(weakestIndex, 1)
+  return removed ?? null
+}
+
+/**
+ * 把一类笔记裁到 max：pinned 全部保留，其余按强度留最强的，保持原数组顺序。
+ * 全 pinned 且超过 max 时直接返回 pinned（不硬删）。
+ */
+export function trimNotesToLimit(list, max = NOTE_LIMIT, now = Date.now()) {
+  const notes = asArray(list).filter((note) => note && typeof note === 'object')
+  const limit = Math.max(1, Math.round(asNumber(max, NOTE_LIMIT)))
+  if (notes.length <= limit) return notes
+  const pinned = notes.filter((note) => note.pinned === true)
+  if (pinned.length >= limit) return pinned
+  const keep = new Set(pinned)
+  const unpinned = notes
+    .filter((note) => note.pinned !== true)
+    .sort((left, right) => noteStrength(right, now) - noteStrength(left, now))
+  for (const note of unpinned) {
+    if (keep.size >= limit) break
+    keep.add(note)
+  }
+  return notes.filter((note) => keep.has(note))
+}
+
 function normalizeNote(raw, category, now) {
   if (!raw || typeof raw !== 'object') return null
   const kind = asString(raw.kind, '').slice(0, 16)
@@ -857,6 +914,7 @@ function normalizeNote(raw, category, now) {
     kind,
     text,
     importance: clamp(asNumber(raw.importance, 0.5), 0, 1),
+    pinned: raw.pinned === true,
     createdAt: asNumber(raw.createdAt, now),
     updatedAt: asNumber(raw.updatedAt, now),
     hits: Math.max(0, Math.round(asNumber(raw.hits, 0))),
@@ -950,16 +1008,21 @@ export function normalizeMemory(raw, now = Date.now()) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return base
   base.events = asArray(raw.events).map((event) => normalizeEvent(event, now)).filter(Boolean).slice(-EVENT_LIMIT)
   for (const key of NOTE_CATEGORIES) {
-    const seen = new Set()
-    base.notes[key] = asArray(raw.notes?.[key])
-      .map((note) => normalizeNote(note, key, now))
-      .filter((note) => {
-        if (!note) return false
-        if (seen.has(note.text)) return false
-        seen.add(note.text)
-        return true
-      })
-      .slice(-NOTE_LIMIT)
+    const byText = new Map()
+    const deduped = []
+    for (const rawNote of asArray(raw.notes?.[key])) {
+      const note = normalizeNote(rawNote, key, now)
+      if (!note) continue
+      const existingIndex = byText.get(note.text)
+      if (existingIndex === undefined) {
+        byText.set(note.text, deduped.length)
+        deduped.push(note)
+        continue
+      }
+      // 同文本重复时优先保留 pinned 的那条（普通笔记仍保留先出现的那条）。
+      if (note.pinned && !deduped[existingIndex].pinned) deduped[existingIndex] = note
+    }
+    base.notes[key] = trimNotesToLimit(deduped, NOTE_LIMIT, now)
   }
   base.topics = normalizeTopics(raw.topics)
   base.digests = normalizeDigests(raw.digests)
@@ -1455,6 +1518,33 @@ export function updateNote(memory, input = {}, now = Date.now()) {
   if (updated.length === 0) return { ok: false, reason: 'nothing-to-update' }
   note.updatedAt = asNumber(now, Date.now())
   return { ok: true, id: note.id, category: located.category, note, updated }
+}
+
+/**
+ * pin / unpin 一条笔记：id 或 oldText/text 定位；只改 pinned，不动文本和 updatedAt。
+ * 幂等：重复 pin 同一条仍返回 ok。
+ */
+export function setNotePinned(memory, input = {}, pinned = true) {
+  if (!memory || typeof memory !== 'object') return { ok: false, reason: 'empty-memory' }
+  const located = locateNote(memory, input)
+  if (!located.ok) return located
+  const note = located.note
+  note.pinned = pinned === true
+  return {
+    ok: true,
+    id: asString(note.id, ''),
+    category: located.category,
+    note,
+    pinned: note.pinned,
+  }
+}
+
+export function pinNote(memory, input = {}) {
+  return setNotePinned(memory, input, true)
+}
+
+export function unpinNote(memory, input = {}) {
+  return setNotePinned(memory, input, false)
 }
 
 /** 删除笔记：id 或 text 精确/唯一匹配；顺手清掉指向它的到点提醒。 */

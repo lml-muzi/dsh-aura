@@ -2408,45 +2408,89 @@ ${TRAIL_CSS}
       }, 'Aura')
     }
 
-    /** 顶部标题栏的 Aura 开关：只显示文字，开启后变成 DSH 蓝。 */
-    function AuraHeaderChip() {
-      const [enabled, setEnabled] = React.useState(false)
+    /**
+     * 顶部标题栏的 Aura 开关：只显示文字，开启后变成 DSH 蓝。
+     * 会话级：只切换当前会话的白名单（/dsh-aura/session-api），不动全局 soulWebEnabled。
+     * 全局开关仍在 Aura 面板里；输入框左侧的 AuraQuickToggle 也仍是全局的。
+     */
+    function AuraHeaderChip(props) {
+      const sessionId = props && props.sessionId ? String(props.sessionId) : ''
+      // 会话级 slot 会注入 useSessions；预设名以列表投影 projectionValues.agentPreset 为准，
+      // 再兼容行上的 agentPreset / preset 写法。只读，不尝试改预设。
+      const useSessions = props && typeof props.useSessions === 'function' ? props.useSessions : null
+      const presetValue = useSessions
+        ? useSessions(state => {
+          const row = state && state.byId ? state.byId[sessionId] : undefined
+          if (!row) return undefined
+          const projection = row.projectionValues && row.projectionValues.agentPreset
+          return projection || row.agentPreset || row.preset
+        })
+        : undefined
+      const presetName = typeof presetValue === 'string' ? presetValue : ''
+      const presetAura = presetName === 'aura'
+      const [soul, setSoul] = React.useState(false)
+      const [global, setGlobal] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
       const [visible, setVisible] = React.useState(true)
       React.useEffect(() => {
+        if (!sessionId) return undefined
         let alive = true
+        // state 只为 soulTogglePlacement（顶部/输入框显隐）；会话态以 session-api 为准。
         fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
           if (!alive) return
           const cfg = (value && value.config) || {}
           const where = cfg.soulTogglePlacement || 'both'
-          setEnabled(cfg.soulWebEnabled === true)
           setVisible(where === 'both' || where === 'header')
         }).catch(() => {})
+        fetch('/dsh-aura/session-api?sessionId=' + encodeURIComponent(sessionId)).then(r => r.json()).then(value => {
+          if (!alive || !value) return
+          setSoul(value.soul === true)
+          setGlobal(value.global === true)
+        }).catch(() => {})
         return () => { alive = false }
-      }, [])
+      }, [sessionId])
+      if (!sessionId || !visible) return null
+      const active = global || soul || presetAura
+      const locked = global || presetAura
+      const title = global
+        ? 'Aura 已全局开启（本会话跟随；去 Aura 面板关闭全局）'
+        : presetAura
+          ? '本会话由 Aura 预设提供（不能在这里切换）'
+          : soul
+            ? '本会话已开启 Aura，点击关闭本会话'
+            : '开启本会话的 Aura（不影响其他会话）'
+      const ariaLabel = global
+        ? 'Aura：全局已开启'
+        : presetAura
+          ? 'Aura：由预设提供'
+          : soul
+            ? 'Aura：本会话已开启'
+            : 'Aura：本会话已关闭'
       const toggle = () => {
-        if (busy) return
+        if (busy || locked) return
+        const next = !soul
         setBusy(true)
-        fetch('/dsh-aura/api/config', {
+        fetch('/dsh-aura/session-api', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ soulWebEnabled: !enabled }),
+          body: JSON.stringify({ sessionId, soul: next }),
         }).then(r => r.json()).then(value => {
-          if (value && value.ok) setEnabled(!enabled)
+          if (value && value.ok) setSoul(value.soul === true)
         }).catch(() => {}).finally(() => setBusy(false))
       }
       return h('button', {
         type: 'button',
-        className: 'aura-header-chip' + (enabled ? ' aura-header-chip-on' : ''),
+        className: 'aura-header-chip' + (active ? ' aura-header-chip-on' : ''),
         style: {
           appearance: 'none', border: 0, background: 'transparent', boxShadow: 'none',
-          color: enabled ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)',
+          color: active ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)',
           font: 'inherit', fontSize: 12, lineHeight: '22px', height: 22, padding: '0 4px',
-          borderRadius: 4, cursor: 'pointer',
+          borderRadius: 4, cursor: locked || busy ? 'default' : 'pointer',
         },
-        title: enabled ? 'Aura 模式已开启（网页会话）' : '开启 Aura 模式（网页会话）',
-        'aria-pressed': enabled ? 'true' : 'false',
-        disabled: busy,
+        title,
+        'aria-label': ariaLabel,
+        'aria-pressed': active ? 'true' : 'false',
+        disabled: busy || locked,
         onClick: toggle,
       }, 'Aura')
     }

@@ -38,6 +38,28 @@ export const ARCHIVE_MAX_FILES = 120
 /** 随机旧事：候选文本长度范围（码点）。 */
 export const OLD_MIN_CHARS = 6
 export const OLD_MAX_CHARS = 200
+/**
+ * 搜索结果排序权重（无外部依赖）：
+ * - 基础分 = 命中词数 / 总词数；
+ * - 全部词命中额外加分（保留旧的「全词优先」语义）；
+ * - 每个命中词再加一点（命中词越多越前）；
+ * - query 原样作为短语出现时加分；
+ * - user 消息略优先（用户的原始话通常更像证据）；
+ * - 越近的时间略加分。
+ * 权重都写在这里，自测可以直接引用，调排序不用改散落的魔法数。
+ */
+export const ARCHIVE_SCORE_WEIGHTS = Object.freeze({
+  allTerms: 0.4,
+  perHit: 0.05,
+  phrase: 0.3,
+  user: 0.08,
+})
+export const ARCHIVE_RECENCY_BUCKETS = Object.freeze([
+  Object.freeze({ maxAgeMs: 3_600_000, bonus: 0.06 }),
+  Object.freeze({ maxAgeMs: 86_400_000, bonus: 0.045 }),
+  Object.freeze({ maxAgeMs: 7 * 86_400_000, bonus: 0.03 }),
+  Object.freeze({ maxAgeMs: 30 * 86_400_000, bonus: 0.015 }),
+])
 
 export const ARCHIVE_DEFAULT_CONFIG = Object.freeze({
   archiveEnabled: true,
@@ -322,21 +344,41 @@ function splitTerms(query) {
     .filter(Boolean)
 }
 
-function scoreOf(entry, terms) {
-  if (terms.length === 0) return { score: 0, all: false, hits: 0 }
+function recencyBonusOf(at, now) {
+  const age = Math.max(0, asNumber(now, Date.now()) - asNumber(at, 0))
+  for (const bucket of ARCHIVE_RECENCY_BUCKETS) {
+    if (age <= bucket.maxAgeMs) return bucket.bonus
+  }
+  return 0
+}
+
+/**
+ * 单条命中的排序信息。query 为空时返回 0 分（调用方按时间倒序）。
+ * 命中词数、是否全词、完整短语、是否 user、时间新旧都进 score。
+ */
+function scoreOf(entry, terms, phrase = '', now = Date.now()) {
+  if (terms.length === 0) return { score: 0, all: false, hits: 0, phrase: false }
   const lower = entry.text.toLowerCase()
   let hits = 0
   for (const term of terms) {
     if (lower.includes(term.toLowerCase())) hits += 1
   }
-  if (hits === 0) return { score: 0, all: false, hits: 0 }
+  if (hits === 0) return { score: 0, all: false, hits: 0, phrase: false }
   const all = hits === terms.length
-  return { score: all ? 1 : (hits / terms.length) * 0.5, all, hits }
+  const exactPhrase = phrase !== '' && lower.includes(phrase.toLowerCase())
+  const score = hits / terms.length
+    + (all ? ARCHIVE_SCORE_WEIGHTS.allTerms : 0)
+    + Math.min(hits, 5) * ARCHIVE_SCORE_WEIGHTS.perHit
+    + (exactPhrase ? ARCHIVE_SCORE_WEIGHTS.phrase : 0)
+    + (entry.role === 'user' ? ARCHIVE_SCORE_WEIGHTS.user : 0)
+    + recencyBonusOf(entry.at, now)
+  return { score: Math.round(score * 1000) / 1000, all, hits, phrase: exactPhrase }
 }
 
 /**
  * 搜索原始存档。
- * @param {{query?:string,from?:number|string,to?:number|string,sessionId?:string,limit?:number}} options
+ * 排序：全词优先 → 加权分（命中词数、完整短语、user、越近时间略加分）→ 时间倒序。
+ * @param {{query?:string,from?:number|string,to?:number|string,sessionId?:string,role?:'user'|'assistant',limit?:number,now?:number}} options
  * @param {string} [dir]
  * @returns {Array<{at:number,sessionId:string,role:string,snippet:string,score:number,text:string}>}
  */
@@ -344,18 +386,28 @@ export function searchArchive(options = {}, dir = resolveArchiveDir()) {
   const limit = clampInt(options.limit, 1, ARCHIVE_LIMIT_MAX, ARCHIVE_DEFAULT_LIMIT)
   const from = parseArchiveTime(options.from)
   const to = parseArchiveTime(options.to, { endOfDay: true })
+  const now = asNumber(options.now, Date.now())
   const sessionId = String(options.sessionId ?? options.session ?? '').trim()
-  const terms = splitTerms(options.query)
+  // role 过滤是可选的：只认 user / assistant，其它值当作不过滤。
+  const roleText = String(options.role ?? '').trim().toLowerCase()
+  const role = ROLE_SET.has(roleText) ? roleText : ''
+  const queryText = String(options.query ?? '').trim()
+  const terms = splitTerms(queryText)
   const rows = readArchiveEntries(dir, { from, to })
   const matched = []
   for (const entry of rows) {
     if (sessionId && entry.sessionId !== sessionId) continue
-    const info = scoreOf(entry, terms)
+    if (role && entry.role !== role) continue
+    const info = scoreOf(entry, terms, queryText, now)
     if (terms.length > 0 && info.hits === 0) continue
     matched.push({ entry, info })
   }
   matched.sort((left, right) => {
+    // 空 query：只按时间倒序（保持旧行为）。
+    if (terms.length === 0) return right.entry.at - left.entry.at
+    // 全词命中仍然整体优先，然后看加权分（命中词数 / 短语 / user / 时间）。
     if (left.info.all !== right.info.all) return left.info.all ? -1 : 1
+    if (left.info.score !== right.info.score) return right.info.score - left.info.score
     return right.entry.at - left.entry.at
   })
   return matched.slice(0, limit).map(({ entry, info }) => ({
@@ -578,6 +630,7 @@ function registerArchiveTool(ctx, api, logger) {
         from: { type: 'string', description: 'search：起始时间，epoch ms 或 YYYY-MM-DD' },
         to: { type: 'string', description: 'search：结束时间，epoch ms 或 YYYY-MM-DD（含当天）' },
         sessionId: { type: 'string', description: 'search：只搜这个会话（精确匹配）' },
+        role: { type: 'string', description: 'search：只搜 user 或 assistant（可选）' },
         limit: { type: 'number', description: 'search：返回条数，1–30，默认 10' },
         days: { type: 'number', description: 'timeline：最近几天，默认 30' },
       },
@@ -594,6 +647,7 @@ function registerArchiveTool(ctx, api, logger) {
               from: args.from,
               to: args.to,
               sessionId: args.sessionId,
+              role: args.role,
               limit: args.limit,
             })
             return { ok: true, action, query: String(args.query ?? ''), count: results.length, results }
@@ -814,6 +868,7 @@ function registerArchiveApi(ctx, api, state, logger) {
           from: params.from,
           to: params.to,
           sessionId: params.session ?? params.sessionId,
+          role: params.role,
           limit: params.limit,
         })
         return {
@@ -862,6 +917,7 @@ function registerArchiveApi(ctx, api, state, logger) {
               from: url.searchParams.get('from') ?? '',
               to: url.searchParams.get('to') ?? '',
               session: url.searchParams.get('session') ?? url.searchParams.get('sessionId') ?? '',
+              role: url.searchParams.get('role') ?? '',
               limit: url.searchParams.get('limit') ?? undefined,
               days: url.searchParams.get('days') ?? undefined,
             }
@@ -887,6 +943,7 @@ function registerArchiveApi(ctx, api, state, logger) {
               from: body.from ?? '',
               to: body.to ?? '',
               session: body.session ?? body.sessionId ?? '',
+              role: body.role ?? '',
               limit: body.limit,
               days: body.days,
             }

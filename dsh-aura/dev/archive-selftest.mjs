@@ -6,6 +6,7 @@
  *   写入 schema / 追加写 / 5 秒去重 / 空文本与 tool/system 跳过 / 4000 码点截断；
  *   只存 Aura 会话（qq 或 emotionScope=all），普通网页会话不存；
  *   搜索：全词优先、任一词兜底、时间/session/limit、片段、空 query、坏行跳过；
+ *   搜索排序：命中词数 / 完整短语 / user / 时间新旧加权；role 过滤（user|assistant）；
  *   时间轴：补零、天数夹取；保留：archiveDays/archiveMaxFiles 清理；
  *   soul_archive 工具注册/参数/渲染；/dsh-aura/archive-api 的 loopback+Origin fence；
  *   dispose 后不再写。
@@ -310,14 +311,16 @@ soul.emit('user', { sessionId: 'qq:test', text: '项目上线前要加班', at: 
 soul.emit('assistant', { sessionId: 'qq:test', text: '加班也要吃饭', at: tD })
 soul.emit('user', { sessionId: 'qq:other', text: '别的会话也在加班', at: now - 10 * 60 * 1000 })
 
-await test('关键词：命中两条，按时间倒序', () => {
+await test('关键词：命中都返回，score 单调不增', () => {
   const rows = searchArchive({ query: '加班' }, archive.dir)
   assert.equal(rows.length, 4)
-  assert.ok(rows[0].at >= rows[1].at)
   for (const row of rows) {
     assert.ok(row.snippet.includes('加班'))
     assert.ok(row.score > 0)
     assert.ok(row.text.includes('加班'))
+  }
+  for (let index = 1; index < rows.length; index += 1) {
+    assert.ok(rows[index - 1].score >= rows[index].score, 'score 应单调不增')
   }
 })
 
@@ -325,8 +328,8 @@ await test('多个词：全部命中优先，只有部分命中的排在后面',
   const rows = searchArchive({ query: '加班 吃饭' }, archive.dir)
   assert.equal(rows.length, 4)
   assert.equal(rows[0].text, '加班也要吃饭', '全词命中排第一')
-  assert.equal(rows[0].score, 1)
-  for (const row of rows.slice(1)) assert.ok(row.score > 0 && row.score < 1, '只命中一个词排后面')
+  assert.ok(rows[0].score > rows[1].score, '全词命中的加权分应更高')
+  for (const row of rows.slice(1)) assert.ok(row.score > 0 && row.score < rows[0].score, '只命中一个词排后面')
 })
 
 await test('时间过滤：from 之后 / to 之前（epoch ms）', () => {
@@ -374,6 +377,86 @@ await test('片段：命中词前后各 40 码点，带省略号', () => {
   assert.ok(Array.from(snippet).length <= 40 * 2 + Array.from('关键证据').length + 4)
   const emptyQuery = makeArchiveSnippet('短句', [])
   assert.equal(emptyQuery, '短句')
+})
+
+// ---------- 3.5 排序权重 / role 过滤 ----------
+section('3.5 排序权重（命中词数 / 短语 / user / 时间）与 role 过滤')
+
+const rankNow = Date.now()
+const rankingDir = join(root, 'archive-ranking')
+function writeRankRows(rows) {
+  mkdirSync(rankingDir, { recursive: true })
+  for (const row of rows) {
+    const file = join(rankingDir, monthKeyOf(row.at) + '.jsonl')
+    appendFileSync(file, JSON.stringify({
+      t: new Date(row.at).toISOString(),
+      sessionId: row.sessionId || 'qq:rank',
+      ...row,
+    }) + '\n', 'utf8')
+  }
+}
+writeRankRows([
+  { at: rankNow - 2 * 3_600_000, role: 'user', text: '周末想去爬山' },
+  { at: rankNow - 3_600_000, role: 'assistant', text: '爬山不难' },
+  { at: rankNow - 20 * 60_000, role: 'user', text: '爬山 早起 顺便看日出' },
+  { at: rankNow - 10 * 60_000, role: 'assistant', text: '爬山看雨' },
+])
+
+await test('排序：全词命中压过部分命中，命中词数越多分越高', () => {
+  const rows = searchArchive({ query: '爬山 早起', now: rankNow, limit: 30 }, rankingDir)
+  assert.equal(rows[0].text, '爬山 早起 顺便看日出', '两个词都命中且含完整短语排第一')
+  assert.ok(rows[0].score > rows[1].score)
+  for (const row of rows.slice(1)) assert.ok(row.score > 0 && row.score < rows[0].score)
+})
+
+await test('排序：user 消息在同分条件下略优先', () => {
+  const sameAt = rankNow - 40 * 60_000
+  writeRankRows([
+    { at: sameAt, role: 'user', text: '同刻用户说爬山' },
+    { at: sameAt, role: 'assistant', text: '同刻她说爬山' },
+  ])
+  const rows = searchArchive({ query: '爬山', now: rankNow, limit: 30 }, rankingDir)
+  const byText = (value) => rows.find(row => row.text === value)
+  assert.ok(byText('同刻用户说爬山').score > byText('同刻她说爬山').score, 'user 应加 user 权重')
+})
+
+await test('排序：越近的时间略加分（同角色同命中）', () => {
+  writeRankRows([
+    { at: rankNow - 10 * 86_400_000, role: 'assistant', text: '很久以前说爬山看云' },
+    { at: rankNow - 30 * 60_000, role: 'assistant', text: '刚说爬山看云' },
+  ])
+  const rows = searchArchive({ query: '爬山', now: rankNow, limit: 30 }, rankingDir)
+  const byText = (value) => rows.find(row => row.text === value)
+  assert.ok(byText('刚说爬山看云').score > byText('很久以前说爬山看云').score, '越近分越高')
+})
+
+await test('排序：query 原样作为短语出现时加分', () => {
+  writeRankRows([
+    { at: rankNow - 15 * 60_000, role: 'user', text: '今天早起 看日出真好看' },
+    { at: rankNow - 5 * 60_000, role: 'user', text: '早起之后再看日出' },
+  ])
+  const rows = searchArchive({ query: '早起 看日出', now: rankNow, limit: 30 }, rankingDir)
+  assert.equal(rows[0].text, '今天早起 看日出真好看', '完整短语的加分应压过稍新的非短语')
+})
+
+await test('role 过滤：user / assistant / 非法值不过滤 / 与 query 组合', () => {
+  const users = searchArchive({ role: 'user', now: rankNow, limit: 30 }, rankingDir)
+  assert.ok(users.length > 0)
+  assert.ok(users.every(row => row.role === 'user'))
+  const assistants = searchArchive({ role: 'assistant', query: '爬山', now: rankNow, limit: 30 }, rankingDir)
+  assert.ok(assistants.length > 0)
+  assert.ok(assistants.every(row => row.role === 'assistant'))
+  assert.ok(assistants.every(row => row.text.includes('爬山')))
+  const invalid = searchArchive({ role: 'system', query: '爬山', now: rankNow, limit: 30 }, rankingDir)
+  const unfiltered = searchArchive({ query: '爬山', now: rankNow, limit: 30 }, rankingDir)
+  assert.equal(invalid.length, unfiltered.length, '非法 role 当作不过滤')
+})
+
+await test('role 过滤：空 query 也只看指定角色，且仍按时间倒序', () => {
+  const rows = searchArchive({ role: 'assistant', now: rankNow, limit: 3 }, rankingDir)
+  assert.equal(rows.length, 3)
+  assert.ok(rows.every(row => row.role === 'assistant'))
+  assert.ok(rows[0].at >= rows[1].at && rows[1].at >= rows[2].at)
 })
 
 // ---------- 4. 时间轴 ----------
@@ -456,7 +539,7 @@ await test('注册一次，参数完整，description 说明显式调用不注�
   assert.ok(tool, '应注册 soul_archive')
   assert.equal(fake.tools.filter(item => item.name === 'soul_archive').length, 1)
   const props = tool.parameters.properties
-  for (const key of ['action', 'query', 'from', 'to', 'sessionId', 'limit', 'days']) {
+  for (const key of ['action', 'query', 'from', 'to', 'sessionId', 'role', 'limit', 'days']) {
     assert.ok(props[key], '应有参数 ' + key)
   }
   assert.ok(Array.isArray(tool.parameters.required) && tool.parameters.required.includes('action'), 'action 必填')
@@ -479,6 +562,9 @@ await test('execute(search)：返回片段并按参数过滤', async () => {
   const text = tool.output.render({}, value)[0].text
   assert.ok(text.includes('存档搜索'))
   assert.ok(text.includes('加班'))
+  const onlyUser = await tool.execute({ action: 'search', query: '加班', role: 'user', limit: 5 })
+  assert.ok(onlyUser.count > 0)
+  assert.ok(onlyUser.results.every(row => row.role === 'user'))
 })
 
 await test('execute(timeline) 与未知 action / 渲染兜底', async () => {

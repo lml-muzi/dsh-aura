@@ -8,6 +8,8 @@
  *   衰减朝 baseline 回归（不再回中性）、幂等；baseline EWMA 半衰期约 3 天；
  *   history ring 240、historySnapshot(limit)、trend 走高/走低/平稳/波动/退回 baseline；
  *   installEmotion 快照字段（四维 + label + baseline + trend + history 40 + lastChange）；
+ *   episode 历史（GET ?action=history）：startedAt 倒序、含过期 expired、limit ≤30、fence；
+ *   state 快照新增 episodes(active 最近 5)/historyCount；soul_feel 允许只写 note，complex 独立字段（≤20）；
  *   context 文案长度与预算（explicit / subtle / off），趋势句 ≤40 字且不含数值。
  */
 import assert from 'node:assert/strict'
@@ -42,6 +44,9 @@ const {
   SALIENCE_MIN,
   SUBTLE_CONTEXT_BUDGET,
   TREND_THRESHOLD,
+  EMOTION_STATE_EPISODES,
+  EPISODE_COMPLEX_MAX,
+  EPISODE_HISTORY_LIMIT,
   EPISODE_LEVELS,
   EPISODE_RING,
   EPISODE_TYPES,
@@ -64,7 +69,9 @@ const {
   describeTrend,
   ensureEmotionExtras,
   episodeHintOf,
+  episodeHistory,
   episodeLevel,
+  episodeSnapshot,
   historySnapshot,
   installEmotion,
   lastChangeOf,
@@ -1063,6 +1070,182 @@ await test('episodeHintOf：扎到/承诺/难过/旧事/新鲜/亲近/摩擦都�
   assert.equal(episodeHintOf('好想你').key, 'close')
   assert.equal(episodeHintOf('对不起').key, 'conflict')
   assert.equal(episodeHintOf('今天天气不错'), null)
+})
+
+// ---------- 12. episode 历史 / state 视图 / complex ----------
+section('12. episode 历史：排序/过期/limit；state 只读字段；soul_feel complex')
+
+await test('episodeHistory：startedAt 倒序、含过期、limit 夹到 1..30', () => {
+  const now = Date.now()
+  const emotion = { episodes: [] }
+  for (let i = 0; i < 35; i += 1) {
+    addEpisode(emotion, {
+      type: 'calm', intensity: 0.2, cause: 'e' + i, source: 'tool',
+      startedAt: now - (35 - i) * 60_000, expiresAt: now + HOUR,
+    }, now)
+  }
+  const all = episodeHistory(emotion, 999, now)
+  assert.equal(all.length, EPISODE_HISTORY_LIMIT, '最多 30 条')
+  assert.equal(all[0].cause, 'e34', '最新的在最前')
+  assert.equal(all[EPISODE_HISTORY_LIMIT - 1].cause, 'e5')
+  assert.ok(all.every((row) => row.expired === false))
+  assert.ok(all.every((row, i) => i === 0 || all[i - 1].startedAt > row.startedAt), '按 startedAt 倒序')
+
+  assert.deepEqual(episodeHistory(emotion, 2, now).map((row) => row.cause), ['e34', 'e33'])
+  assert.equal(episodeHistory(emotion, 0, now).length, 1, 'limit 下限 1')
+  assert.equal(episodeHistory(emotion, EPISODE_HISTORY_LIMIT + 5, now).length, EPISODE_HISTORY_LIMIT, 'limit 上限 30')
+
+  const expiredEmotion = { episodes: [] }
+  addEpisode(expiredEmotion, {
+    type: 'joy', note: '已经过期的那条', startedAt: now - 2 * HOUR, expiresAt: now - HOUR,
+  }, now)
+  addEpisode(expiredEmotion, {
+    type: 'calm', note: '还在的一条', startedAt: now - 60_000, expiresAt: now + HOUR,
+  }, now)
+  const withExpired = episodeHistory(expiredEmotion, 30, now)
+  assert.equal(withExpired.length, 2)
+  assert.equal(withExpired[0].note, '还在的一条')
+  assert.equal(withExpired[0].expired, false)
+  assert.equal(withExpired[1].note, '已经过期的那条', '过期条目仍留在历史里')
+  assert.equal(withExpired[1].expired, true, '过期标记')
+  const fields = ['id', 'type', 'level', 'intensity', 'cause', 'note', 'tendency', 'source', 'startedAt', 'expiresAt', 'expired', 'complex']
+  assert.ok(fields.every((key) => key in withExpired[0]), '历史字段齐全')
+})
+
+await test('episode complex：normalize 20 字上限、缺省空串、快照保留', () => {
+  const now = Date.now()
+  const emotion = {
+    episodes: [
+      { type: 'sadness', note: '说不上来', complex: '怀旧', startedAt: now, expiresAt: now + HOUR },
+      { type: 'sadness', note: '说不上来', complex: '怀'.repeat(30), startedAt: now + 1, expiresAt: now + 1 + HOUR },
+      { type: 'calm', note: '没事', startedAt: now + 2, expiresAt: now + 2 + HOUR },
+    ],
+  }
+  const list = normalizeEmotionEpisodes(emotion, now)
+  assert.equal(list.length, 3)
+  assert.equal(list[0].complex, '怀旧')
+  assert.equal(lengthOf(list[1].complex), EPISODE_COMPLEX_MAX, '超过 20 字被截断')
+  assert.equal(list[2].complex, '', '没有 complex 时为空串')
+  const snap = episodeSnapshot(list[0], now)
+  assert.equal(snap.complex, '怀旧')
+  assert.equal(snap.expired, false)
+  assert.equal(episodeSnapshot({ ...list[0], expiresAt: now - 1 }, now).expired, true)
+})
+
+await test('soul_feel：type 可缺失（只写 note）；complex 独立字段、不冒充基本情绪', async () => {
+  const bundle = makeFakeCtx()
+  const soul = makeSoulContainer(defaultsSoul())
+  const api = installEmotion(bundle.ctx, { state: { readConfig: () => CONFIG }, soul, log: () => {} })
+  const tool = bundle.tools.find((item) => item.name === 'soul_feel')
+  assert.ok(tool)
+  assert.equal(tool.parameters.properties.complex.type, 'string', 'schema 暴露 complex')
+  assert.equal(tool.parameters.properties.type.enum.length, EPISODE_TYPES.length)
+
+  const noteOnly = await tool.execute({ note: '有点闷，说不上来' })
+  assert.equal(noteOnly.ok, true)
+  assert.equal(noteOnly.episode.type, null, 'type 缺失不拒绝')
+  assert.equal(noteOnly.episode.level, 'medium')
+  assert.equal(noteOnly.episode.complex, '')
+
+  const named = await tool.execute({ note: '想起小时候', complex: '怀旧', tendency: 'quiet' })
+  assert.equal(named.ok, true)
+  assert.equal(named.episode.complex, '怀旧')
+  assert.equal(named.episode.note, '想起小时候')
+  assert.equal(named.episode.tendency, 'quiet')
+  assert.equal(named.episode.type, null, 'complex 不冒充基本情绪')
+  assert.deepEqual(Object.keys(named.episode).sort(), [
+    'cause', 'complex', 'expired', 'expiresAt', 'id', 'intensity', 'level', 'note',
+    'source', 'startedAt', 'tendency', 'type', 'updatedAt',
+  ])
+
+  const longName = await tool.execute({ complex: '内'.repeat(50) })
+  assert.equal(longName.ok, true)
+  assert.equal(lengthOf(longName.episode.complex), EPISODE_COMPLEX_MAX, 'complex 截到 20 字')
+  assert.equal(longName.episode.note, '', '只有 complex 也能写')
+
+  assert.equal((await tool.execute({})).ok, false, 'type/note/complex 全空仍拒绝')
+  const stored = soul.get().emotion.episodes
+  assert.ok(stored.some((row) => row.complex === '怀旧'))
+  assert.ok(api.episodeHistory(1).some((row) => row.complex === '内'.repeat(20)))
+  assert.equal(api.episodeHistoryCount(), stored.length)
+  assert.equal(api.episodeHistory(99).length, Math.min(stored.length, EPISODE_HISTORY_LIMIT))
+})
+
+await test('emotion-api：GET history（limit/倒序/过期/fence）+ state 新字段不破坏旧字段', async () => {
+  let registration = null
+  const ctx = {
+    on() {},
+    systemPrompt: { context() {} },
+    effect(fn) { fn(); return () => {} },
+    get(name) {
+      if (name === 'webServer') return { register(route) { registration = route; return () => {} } }
+      return undefined
+    },
+    tools: { register() {} },
+  }
+  const state = defaultsSoul()
+  const now = Date.now()
+  for (let i = 0; i < 8; i += 1) {
+    addEpisode(state.emotion, {
+      type: 'calm', intensity: 0.3, cause: 'h' + i, note: '', source: 'tool',
+      startedAt: now - (8 - i) * 60_000, expiresAt: now + HOUR,
+    }, now)
+  }
+  addEpisode(state.emotion, {
+    type: 'joy', cause: 'old', note: '过期', startedAt: now - 3 * HOUR, expiresAt: now - HOUR,
+  }, now)
+  const soul = makeSoulContainer(state)
+  installEmotion(ctx, { state: { readConfig: () => CONFIG }, soul, log: () => {} })
+  assert.ok(registration && registration.path === '/dsh-aura/emotion-api')
+
+  const get = (url, headers = { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' }) => new Promise((resolve) => {
+    const req = new EventEmitter()
+    req.method = 'GET'
+    req.url = url
+    req.headers = headers
+    const res = {
+      status: 0,
+      body: '',
+      writeHead(status) { this.status = status },
+      end(payload) { this.body = String(payload); resolve(res) },
+    }
+    registration.handler(req, res)
+  })
+
+  const limited = await get('/dsh-aura/emotion-api?action=history&limit=3')
+  assert.equal(limited.status, 200)
+  const limitedBody = JSON.parse(limited.body)
+  assert.equal(limitedBody.ok, true)
+  assert.equal(limitedBody.count, 3)
+  assert.deepEqual(limitedBody.episodes.map((row) => row.cause), ['h7', 'h6', 'h5'])
+  assert.equal(limitedBody.historyCount, 9, 'historyCount 含过期')
+  assert.ok(limitedBody.episodes.every((row) => row.expired === false))
+
+  const all = JSON.parse((await get('/dsh-aura/emotion-api?action=history&limit=99')).body)
+  assert.equal(all.episodes.length, 9, '上限 30 内返回全部 9 条')
+  assert.equal(all.episodes[all.episodes.length - 1].cause, 'old')
+  assert.equal(all.episodes[all.episodes.length - 1].expired, true, '历史包含过期条目')
+
+  const stateRes = await get('/dsh-aura/emotion-api?action=state')
+  assert.equal(stateRes.status, 200)
+  const stateBody = JSON.parse(stateRes.body)
+  assert.equal(stateBody.ok, true)
+  assert.equal(stateBody.emotion.episodes.length, EMOTION_STATE_EPISODES, 'active 最近 5 条')
+  assert.deepEqual(stateBody.emotion.episodes.map((row) => row.cause), ['h7', 'h6', 'h5', 'h4', 'h3'])
+  assert.equal(stateBody.emotion.episodeCount, 8, 'episodeCount 仍是 active 总数')
+  assert.equal(stateBody.emotion.historyCount, 9, 'historyCount 含过期')
+  for (const key of ['label', 'valence', 'arousal', 'affection', 'energy', 'mood', 'baseline', 'trend', 'history', 'lastChange', 'nudge']) {
+    assert.ok(key in stateBody.emotion, '旧字段 ' + key + ' 还在')
+  }
+
+  const legacy = await get('/dsh-aura/emotion-api')
+  assert.equal(legacy.status, 200)
+  assert.equal(typeof JSON.parse(legacy.body).emotion, 'object', '不带 action 仍是旧 state 行为')
+  assert.equal((await get('/dsh-aura/emotion-api?action=nope')).status, 400)
+  assert.equal((await get('/dsh-aura/emotion-api?action=history&limit=0')).status, 400)
+  assert.equal((await get('/dsh-aura/emotion-api?action=history&limit=abc')).status, 400)
+  const blocked = await get('/dsh-aura/emotion-api?action=history', { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' })
+  assert.equal(blocked.status, 403, 'history 也走同一 fence')
 })
 
 console.log(`\n${passed}/${passed + failed} passed${failed ? `, ${failed} failed` : ''}`)

@@ -12,6 +12,7 @@
  *   compact 去重/清理/衰减、soul_memory addFact、context 事实注入、实体别名去重。
  *   v2.1 实体图：relations schema/坏值清洗/300 上限、addFact 建边、co 共现加权、
  *   1 跳召回（context / soul_recall / memory-api / snapshot）、compactRelations 衰减清理。
+ *   v2.3 笔记 pin：pinned 默认字段、pinNote/unpinNote、淘汰保护、state/render 优先；
  *   v2.2 记忆控制面：soul_memory 九种 action、笔记 id 迁移/更新/删除、实体删除清边、
  *   实体合并重定向、写前 backup('memory')、memory-api POST compact/delete*、
  *   memoryAutoCompact 自动整理开关、配置范围夹取。
@@ -52,6 +53,7 @@ const {
   FACT_LIMIT,
   ENTITY_LIMIT,
   RELATION_LIMIT,
+  NOTE_LIMIT,
   createMemoryStore,
   emptyMemory,
   normalizeMemory,
@@ -74,6 +76,7 @@ const {
   listEntities,
   listFacts,
   listRelations,
+  mergeNote,
   queryFacts,
   relationsForEntity,
   renderMemoryContext,
@@ -1376,6 +1379,137 @@ await test('soul_memory updateNote：按 id / 旧文本定位；deleteNote 按 i
   assert.equal(byTextDeleted.dueRemoved, 1)
   assert.equal(memory.store.read().reflection.pendingDue.length, 0)
   assert.equal((await memoryTool().execute({ action: 'deleteNote', text: '不存在的笔记' })).ok, false)
+})
+
+// ---------- 17.5 笔记 pin ----------
+section('17.5 笔记 pin：pin/unpin / 淘汰保护 / state 字段 / render 优先')
+
+const latestMemoryBackup = () => {
+  const dir = join(dataDir, 'backups')
+  if (!existsSync(dir)) return ''
+  const ids = readdirSync(dir).filter((id) => id.endsWith('-memory')).sort()
+  return ids.at(-1) || ''
+}
+
+await test('pinNote/unpinNote：按 id 或 oldText 定位、写前备份、updateNote 保留 pinned', async () => {
+  memory.clear()
+  const made = await memoryTool().execute({
+    action: 'writeNote', category: 'user', text: '用户对芒果过敏', importance: 0.4,
+  })
+  assert.equal(made.note.pinned, false, '新笔记默认不 pin')
+  assert.equal(memory.store.read().notes.user.find((note) => note.id === made.note.id).pinned, false)
+
+  const before = latestMemoryBackup()
+  const pinned = await memoryTool().execute({ action: 'pinNote', id: made.note.id })
+  assert.equal(pinned.ok, true)
+  assert.equal(pinned.pinned, true)
+  assert.notEqual(latestMemoryBackup(), before, 'pin 前应做一次新的 memory 备份')
+  assert.equal(memory.store.read().notes.user.find((note) => note.id === made.note.id).pinned, true)
+
+  const updated = await memoryTool().execute({
+    action: 'updateNote', id: made.note.id, text: '用户对芒果严重过敏',
+  })
+  assert.equal(updated.ok, true)
+  assert.equal(updated.note.pinned, true, 'updateNote 不应清掉 pinned')
+  assert.equal(memory.store.read().notes.user.find((note) => note.id === made.note.id).pinned, true)
+
+  const unpinned = await memoryTool().execute({ action: 'unpinNote', oldText: '用户对芒果严重过敏' })
+  assert.equal(unpinned.ok, true)
+  assert.equal(unpinned.pinned, false)
+  assert.equal(memory.store.read().notes.user.find((note) => note.id === made.note.id).pinned, false)
+
+  // 幂等 + 定位失败
+  assert.equal((await memoryTool().execute({ action: 'pinNote', oldText: '用户对芒果严重过敏' })).pinned, true)
+  assert.equal((await memoryTool().execute({ action: 'pinNote' })).ok, false)
+  assert.equal((await memoryTool().execute({ action: 'pinNote', id: 'note-nope' })).ok, false)
+  assert.equal((await memoryTool().execute({ action: 'unpinNote', oldText: '没有这条' })).ok, false)
+  assert.equal((await memoryTool().execute({ action: 'pinNote', id: 'note-nope', oldText: '用户对芒果严重过敏' })).ok, false)
+})
+
+await test('store normalize：pinned 默认 false、非法值归一为布尔、超上限不裁 pinned', () => {
+  const dir = join(root, 'store-note-pinned')
+  const store = createMemoryStore({ home: dir, log: () => {} })
+  const notes = [{
+    id: 'note-pinned', text: '最重要的钉子', pinned: true, importance: 0.01, updatedAt: 1,
+  }]
+  for (let index = 0; index < 35; index += 1) {
+    notes.push({
+      id: 'note-' + index,
+      text: '普通笔记' + index,
+      pinned: index % 2 === 1 ? 'yes' : false,
+      importance: 0.1 + index * 0.02,
+      updatedAt: index,
+    })
+  }
+  store.write({ notes: { user: notes, us: [], self: [] } })
+  const memoryNow = store.read()
+  assert.equal(memoryNow.notes.user.length, NOTE_LIMIT, '每类上限仍是 ' + NOTE_LIMIT)
+  assert.equal(memoryNow.notes.user.some((note) => note.id === 'note-pinned'), true, 'pinned 不能被裁掉')
+  assert.equal(memoryNow.notes.user.every((note) => typeof note.pinned === 'boolean'), true, 'pinned 应是布尔')
+  assert.equal(memoryNow.notes.user.filter((note) => note.pinned).length, 1, '字符串 yes 不算 pinned')
+  const disk = JSON.parse(readFileSync(store.file, 'utf8'))
+  assert.equal(disk.notes.user.some((note) => note.id === 'note-pinned' && note.pinned === true), true)
+  store.dispose()
+})
+
+await test('笔记淘汰：pinned 永不淘汰；超上限先淘汰未 pinned 最弱；全 pinned 宁可超限', () => {
+  const pinnedNote = { id: 'note-pin', text: '钉住的约定', importance: 0.01, hits: 0, pinned: true, updatedAt: 1 }
+  const weak = { id: 'note-weak', text: '几乎没用的旧事', importance: 0.02, hits: 0, pinned: false, updatedAt: 1 }
+  const strong = { id: 'note-strong', text: '很重要的事', importance: 0.95, hits: 4, pinned: false, updatedAt: Date.now() }
+  const list = [pinnedNote, weak, strong]
+  const merged = mergeNote(list, {
+    id: 'note-new', text: '新写进来的笔记', importance: 0.5, hits: 0, pinned: false, updatedAt: Date.now(),
+  }, 3)
+  assert.equal(merged.merged, false)
+  assert.equal(list.length, 3, 'pinned 不计入淘汰，但数量仍受上限约束')
+  assert.equal(list.some((note) => note.id === 'note-pin'), true, 'pinned 不能被淘汰')
+  assert.equal(list.some((note) => note.id === 'note-weak'), false, '应先淘汰最弱未 pinned')
+  assert.equal(list.some((note) => note.id === 'note-strong'), true)
+
+  const allPinned = [1, 2, 3, 4].map((index) => ({
+    id: 'pin-' + index, text: '钉子' + index, importance: 0.1, hits: 0, pinned: true,
+  }))
+  mergeNote(allPinned, { id: 'pin-new', text: '新钉子', importance: 0.1, hits: 0, pinned: false }, 3)
+  assert.equal(allPinned.filter((note) => note.pinned).length, 4, '全 pinned 时宁可超限也不删')
+})
+
+await test('state / render：snapshot recentNotes 带 pinned；context 里 pinned 优先且预算不变', async () => {
+  memory.clear()
+  const ordinary = await memoryTool().execute({
+    action: 'writeNote', category: 'user', text: '普通的重要笔记', importance: 0.95,
+  })
+  const pinnedNote = await memoryTool().execute({
+    action: 'writeNote', category: 'user', text: '钉住的一件小事', importance: 0.1,
+  })
+  await memoryTool().execute({ action: 'pinNote', id: pinnedNote.note.id })
+
+  // web 面板的 GET state 直接透传 store.read() 的 note 对象（web.js soulPayload），
+  // 这里同时验证 store 与 snapshot 两条出口都带 pinned。
+  const disk = memory.store.read()
+  assert.equal(disk.notes.user.find((note) => note.id === pinnedNote.note.id).pinned, true)
+  assert.equal(disk.notes.user.find((note) => note.id === ordinary.note.id).pinned, false)
+  const snap = memory.snapshot()
+  assert.equal(snap.recentNotes.find((note) => note.id === pinnedNote.note.id).pinned, true)
+  assert.equal(snap.recentNotes.find((note) => note.id === ordinary.note.id).pinned, false)
+
+  const now = Date.now()
+  const config = state.readConfig()
+  const context = renderMemoryContext(memory.store, config, { now, lastUserText: '' })
+  assert.ok(context.includes('钉住的一件小事'))
+  assert.ok(context.includes('普通的重要笔记'))
+  assert.ok(
+    context.indexOf('钉住的一件小事') < context.indexOf('普通的重要笔记'),
+    'pinned 笔记应排在前面（条数/预算不变）',
+  )
+  assert.ok(lengthOf(context) <= MEMORY_CONTEXT_BUDGET, '总预算不变，实际 ' + lengthOf(context))
+  const tight = renderMemoryContext(memory.store, { ...config, memoryContextBudget: 60 }, { now, lastUserText: '' })
+  assert.ok(lengthOf(tight) <= MEMORY_CONTEXT_BUDGET_MIN, '低预算仍夹到 60，实际 ' + lengthOf(tight))
+
+  // pinned 不受关键词门槛影响：聊到无关话题也仍被记住；普通笔记则按关键词召回。
+  const unrelated = renderMemoryContext(memory.store, config, { now, lastUserText: '火星天气怎么样' })
+  assert.ok(unrelated.includes('钉住的一件小事'), 'pinned 笔记应始终优先注入')
+  assert.equal(unrelated.includes('普通的重要笔记'), false, '普通笔记不应无视关键词')
+  assert.ok(lengthOf(unrelated) <= MEMORY_CONTEXT_BUDGET)
 })
 
 await test('旧笔记补 id：读取时写回，二次读取 id 不变', () => {

@@ -39,17 +39,21 @@ import {
   deleteNote as deleteNoteInMemory,
   emptyMemory,
   entitiesInText,
+  evictWeakestNote,
   forgetFact as forgetFactInMemory,
   hasMemoryContent,
   linkCooccurrence,
   locateNote as locateNoteInMemory,
   mergeEntities as mergeEntitiesInMemory,
+  pinNote as pinNoteInMemory,
   listEntities as listEntitiesInMemory,
   listFacts as listFactsInMemory,
   listRelations as listRelationsInMemory,
   queryEntities as queryEntitiesInMemory,
   queryFacts as queryFactsInMemory,
   relationsForEntity as relationsForEntityInMemory,
+  trimNotesToLimit,
+  unpinNote as unpinNoteInMemory,
   updateNote as updateNoteInMemory,
   upsertEntity as upsertEntityInMemory,
   upsertRelation as upsertRelationInMemory,
@@ -240,6 +244,7 @@ export function makeNote(category, text, importance, now = Date.now(), dueAt = 0
     category: ['user', 'us', 'self'].includes(category) ? category : 'user',
     text: clean,
     importance: clamp(asNumber(importance, 0.5), 0, 1),
+    pinned: false,
     createdAt: now,
     updatedAt: now,
     hits: 0,
@@ -269,17 +274,8 @@ export function mergeNote(notes, note, max = NOTE_MAX) {
   }
   notes.push(note)
   if (notes.length > max) {
-    // 先淘汰「重要性低 + 很久没被召回」的
-    let weakest = 0
-    let weakestScore = Infinity
-    notes.forEach((item, index) => {
-      const score = asNumber(item.importance, 0.5) * 0.7 + Math.min(5, asNumber(item.hits, 0)) * 0.06
-      if (score < weakestScore) {
-        weakestScore = score
-        weakest = index
-      }
-    })
-    notes.splice(weakest, 1)
+    // 先淘汰「重要性低 + 很久没被召回」的未 pin 笔记；pinned 永不淘汰。
+    evictWeakestNote(notes)
   }
   return { merged: false, note }
 }
@@ -349,18 +345,30 @@ export function recallNotes(source, query, options = {}) {
     if (!note || typeof note.text !== 'string') continue
     const overlap = queryGrams.size > 0 ? jaccard(queryGrams, bigrams(note.text)) : 0
     const charScore = queryGrams.size > 0 ? charOverlap(query, note.text) : 0
-    if (queryGrams.size > 0 && overlap <= 0 && charScore <= 0) continue
+    // pinned 笔记不受关键词门槛限制：钉住就是「始终想记得」，排序时排最前，仍受总预算约束。
+    if (queryGrams.size > 0 && overlap <= 0 && charScore <= 0 && note.pinned !== true) continue
     const score = overlap * 1.0 + charScore * 0.7 + asNumber(note.importance, 0.5) * 0.6
       + Math.min(5, asNumber(note.hits, 0)) * 0.04 + recencyBonus(note.updatedAt, now)
     scored.push({ note, score })
   }
-  scored.sort((a, b) => b.score - a.score)
+  // pinned 笔记优先（条数与总预算不变，只是排在前面）；同组内仍按相关度。
+  scored.sort((a, b) => {
+    const leftPinned = a.note.pinned === true
+    const rightPinned = b.note.pinned === true
+    if (leftPinned !== rightPinned) return leftPinned ? -1 : 1
+    return b.score - a.score
+  })
   const result = scored.slice(0, limit).map(({ note }) => note)
   if (result.length === 0 && queryGrams.size > 0 && options.fallback !== false) {
-    // 关键词没命中时，退而给「最重要的长期事实」（≤2 条），避免记忆段整段空掉
+    // 关键词没命中时，退而给「最重要的长期事实（含 pinned）」（≤2 条），避免记忆段整段空掉
     return pool
-      .filter((note) => asNumber(note.importance, 0.5) >= 0.75)
-      .sort((a, b) => asNumber(b.importance, 0.5) - asNumber(a.importance, 0.5))
+      .filter((note) => note.pinned === true || asNumber(note.importance, 0.5) >= 0.75)
+      .sort((a, b) => {
+        const leftPinned = a.pinned === true
+        const rightPinned = b.pinned === true
+        if (leftPinned !== rightPinned) return leftPinned ? -1 : 1
+        return asNumber(b.importance, 0.5) - asNumber(a.importance, 0.5)
+      })
       .slice(0, Math.min(2, limit))
   }
   return result
@@ -978,7 +986,7 @@ export function compactEvents(memory, options = {}) {
     if (!result.merged) notesAdded += 1
   }
   for (const key of ['user', 'us', 'self']) {
-    memory.notes[key] = asArray(memory.notes[key]).slice(-maxNotes)
+    memory.notes[key] = trimNotesToLimit(memory.notes[key], maxNotes)
   }
   return { compacted: oldest.length, notesAdded, eventsLeft: memory.events.length }
 }
@@ -1460,6 +1468,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
             kind,
             text: clean,
             importance: clamp(asNumber(importance, 0.6), 0, 1),
+            pinned: false,
             createdAt: now,
             updatedAt: now,
             hits: 0,
@@ -1808,24 +1817,14 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
             kind: 'digest',
             text,
             importance: 0.7,
+            pinned: false,
             createdAt: now,
             updatedAt: now,
             hits: 0,
             dueAt: 0,
           }
           list.push(made)
-          if (list.length > maxNotes) {
-            let weakest = 0
-            let weakestScore = Infinity
-            list.forEach((item, index) => {
-              const score = asNumber(item.importance, 0.5) * 0.7 + Math.min(5, asNumber(item.hits, 0)) * 0.06
-              if (score < weakestScore) {
-                weakestScore = score
-                weakest = index
-              }
-            })
-            list.splice(weakest, 1)
-          }
+          if (list.length > maxNotes) evictWeakestNote(list, now)
           noteResult = { ...made, category: 'us', created: true }
         }
         if (!memory.digests || typeof memory.digests !== 'object') memory.digests = {}
@@ -2353,6 +2352,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       description: '记忆库控制面：stats=统计，search=搜索笔记/事实/实体/关系，'
         + 'writeNote=写一条长期笔记（category：user=关于对方的事实/偏好/边界，us=你们之间的约定和共同经历，'
         + 'self=你对自己的认识；≤80 字，重复的会自动合并），updateNote/deleteNote=改/删笔记，'
+        + 'pinNote/unpinNote=钉住/取消钉住一条笔记（pinned 笔记不会被上限淘汰，且优先注入），'
         + 'addFact=记一条结构化事实卡（subject · predicate · value，如 木子 · 喜欢 · 听歌），'
         + 'forgetFact=忘掉一条事实卡（同 deleteFact），deleteEntity=删除实体卡，'
         + 'mergeEntities=合并两个实体（事实与关系一起迁移），compact=立即整理，'
@@ -2360,14 +2360,14 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       parameters: {
         action: {
           type: 'string',
-          description: 'stats | search | writeNote | updateNote | deleteNote | addFact | forgetFact | deleteFact | deleteEntity | mergeEntities | compact | digest',
+          description: 'stats | search | writeNote | updateNote | deleteNote | pinNote | unpinNote | addFact | forgetFact | deleteFact | deleteEntity | mergeEntities | compact | digest',
           required: true,
         },
         sessionId: { type: 'string', description: 'digest：要整理的会话 id；省略时取最近活动的会话' },
         query: { type: 'string', description: 'search 关键词；为空时返回最近/最重的几条' },
         category: { type: 'string', description: 'writeNote：user | us | self，默认 user' },
         text: { type: 'string', description: 'writeNote 新笔记 / updateNote 新文本（≤200 字，落盘受笔记上限截断）；addFact 时可当 value 兜底' },
-        oldText: { type: 'string', description: 'updateNote / deleteNote 定位用的旧文本（也可改用 id）' },
+        oldText: { type: 'string', description: 'updateNote / deleteNote / pinNote / unpinNote 定位用的旧文本（也可改用 id）' },
         importance: { type: 'number', description: '0..1，越重要越不容易被淘汰' },
         dueAt: { type: 'string', description: 'writeNote：到时要问的约定，填 ISO 时间（如"面试是明天"）' },
         subject: { type: 'string', description: 'addFact：主体，如 木子 / 你们 / 团子' },
@@ -2375,7 +2375,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         value: { type: 'string', description: 'addFact：≤60 字的值' },
         confidence: { type: 'number', description: 'addFact：0..1；省略时默认 0.9（显式）' },
         source: { type: 'string', description: 'addFact：user | aura | reflection，默认 user' },
-        id: { type: 'string', description: 'updateNote / deleteNote / addFact 之后忘卡用 forgetFact / deleteFact / deleteEntity 的 id' },
+        id: { type: 'string', description: 'updateNote / deleteNote / pinNote / unpinNote 用的 id；事实/实体删除也用 id' },
         fromId: { type: 'string', description: 'mergeEntities 被合并的实体 id（也接受名字/别名）' },
         toId: { type: 'string', description: 'mergeEntities 保留的实体 id（也接受名字/别名）' },
         limit: { type: 'number', description: 'search 每类条数，默认 5，最多 5' },
@@ -2405,6 +2405,14 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
             await backupMemoryBeforeWrite()
             return memoryDeleteNote(args)
           }
+          if (action === 'pinNote') {
+            await backupMemoryBeforeWrite()
+            return memorySetNotePinned(args, true)
+          }
+          if (action === 'unpinNote') {
+            await backupMemoryBeforeWrite()
+            return memorySetNotePinned(args, false)
+          }
           if (action === 'addFact') {
             const parsed = factInputOf(args)
             if (!parsed.ok) return parsed
@@ -2429,7 +2437,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           }
           return {
             ok: false,
-            reason: '未知 action（stats | search | writeNote | updateNote | deleteNote | addFact | forgetFact | deleteFact | deleteEntity | mergeEntities | compact | digest）',
+            reason: '未知 action（stats | search | writeNote | updateNote | deleteNote | pinNote | unpinNote | addFact | forgetFact | deleteFact | deleteEntity | mergeEntities | compact | digest）',
           }
         } catch (error) {
           logger('[soul] soul_memory 失败:', error instanceof Error ? error.message : error)
@@ -2591,7 +2599,14 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           ...asArray(notes.user).slice(-3),
           ...asArray(notes.us).slice(-3),
           ...asArray(notes.self).slice(-3),
-        ].map((item) => ({ id: item.id, category: item.category, text: item.text, importance: item.importance, updatedAt: item.updatedAt })),
+        ].map((item) => ({
+          id: item.id,
+          category: item.category,
+          text: item.text,
+          importance: item.importance,
+          pinned: item.pinned === true,
+          updatedAt: item.updatedAt,
+        })),
         userState: memory.reflection?.userState ?? null,
         reflectionLlm: readConfig().memoryReflectionLlm === true,
         store: stats,
@@ -2742,6 +2757,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       category: String(note?.category ?? ''),
       text: String(note?.text ?? ''),
       importance: asNumber(note?.importance, 0.5),
+      pinned: note?.pinned === true,
       updatedAt: asNumber(note?.updatedAt, 0),
     }))
     const facts = queryFactsInMemory(memory, text, max, now)
@@ -2814,6 +2830,23 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     let result = { ok: false, reason: 'not-found' }
     store.update((memory) => {
       result = deleteNoteInMemory(memory, id ? { id } : { text })
+      return memory
+    })
+    return result
+  }
+
+  /** pinNote / unpinNote：id 或 oldText 定位；只改 pinned，不动文本和 updatedAt。 */
+  function memorySetNotePinned(input = {}, pinned = true) {
+    const id = String(input?.id ?? '').trim()
+    const oldText = String(input?.oldText ?? input?.text ?? '').trim()
+    if (!id && !oldText) return { ok: false, reason: '需要 id 或 oldText' }
+    const peek = locateNoteInMemory(readMemory(), id ? { id } : { text: oldText })
+    if (!peek.ok) return peek
+    let result = { ok: false, reason: 'not-found' }
+    store.update((memory) => {
+      result = pinned
+        ? pinNoteInMemory(memory, id ? { id } : { text: oldText })
+        : unpinNoteInMemory(memory, id ? { id } : { text: oldText })
       return memory
     })
     return result
@@ -3129,6 +3162,8 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     writeNote: memoryWriteNote,
     updateNote: memoryUpdateNote,
     deleteNote: memoryDeleteNote,
+    pinNote: (input = {}) => memorySetNotePinned(input, true),
+    unpinNote: (input = {}) => memorySetNotePinned(input, false),
     deleteFact: memoryDeleteFact,
     deleteEntity: memoryDeleteEntity,
     mergeEntities: memoryMergeEntities,

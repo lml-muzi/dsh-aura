@@ -63,6 +63,9 @@ export const EPISODE_SOURCES = ['self', 'rule', 'tool']
 export const EPISODE_RING = 60
 export const EPISODE_CAUSE_MAX = 80
 export const EPISODE_NOTE_MAX = 120
+export const EPISODE_COMPLEX_MAX = 20
+export const EPISODE_HISTORY_LIMIT = 30
+export const EMOTION_STATE_EPISODES = 5
 export const EPISODE_TTL_MINUTES = { min: 30, max: 1440, default: 240 }
 export const RULE_EPISODE_TTL_MINUTES = { light: 120, medium: 240, heavy: 480 }
 export const NUDGE_TTL_MS = 2 * 3_600_000
@@ -184,7 +187,7 @@ export function episodeHintOf(text) {
 function normalizeEpisodeRow(raw, now) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   // 完全空/无意义的一行直接丢弃，避免旧文件里的脏数据变成一条“默认情绪”。
-  if (!raw.id && !raw.type && !raw.note && !raw.cause && raw.startedAt === undefined && raw.expiresAt === undefined) return null
+  if (!raw.id && !raw.type && !raw.note && !raw.cause && !raw.complex && raw.startedAt === undefined && raw.expiresAt === undefined) return null
   const startedAt = Math.max(0, Math.round(finiteNumber(raw.startedAt, now)))
   let expiresAt = Math.max(0, Math.round(finiteNumber(raw.expiresAt, startedAt + EPISODE_TTL_MINUTES.default * 60_000)))
   if (!(expiresAt > startedAt)) expiresAt = startedAt + EPISODE_TTL_MINUTES.default * 60_000
@@ -196,6 +199,7 @@ function normalizeEpisodeRow(raw, now) {
     level: EPISODE_LEVELS.includes(raw.level) ? raw.level : episodeLevel(intensity),
     cause: codepointSlice(String(raw.cause ?? '').trim(), EPISODE_CAUSE_MAX),
     note: codepointSlice(String(raw.note ?? '').trim(), EPISODE_NOTE_MAX),
+    complex: codepointSlice(String(raw.complex ?? '').trim(), EPISODE_COMPLEX_MAX),
     tendency: EPISODE_TENDENCIES.includes(raw.tendency) ? raw.tendency : 'none',
     source: EPISODE_SOURCES.includes(raw.source) ? raw.source : 'rule',
     startedAt,
@@ -264,6 +268,24 @@ export function activeEpisodes(emotion, now = Date.now()) {
   return rows
     .filter((episode) => episode.expiresAt > now)
     .sort((left, right) => (right.intensity - left.intensity) || (right.startedAt - left.startedAt))
+}
+
+/**
+ * 历史视图：ring 里最近的 episode（含过期条目），按 startedAt 倒序；
+ * 默认最多 EPISODE_HISTORY_LIMIT (30) 条，limit 会被夹到 1..30。
+ */
+export function episodeHistory(emotion, limit = EPISODE_HISTORY_LIMIT, now = Date.now()) {
+  const rows = normalizeEmotionEpisodes(emotion, now)
+  // startedAt 相同（同一毫秒写入）时按 ring 顺序兜底：后写进来的更新，排在前面。
+  const ordered = rows
+    .map((episode, index) => ({ episode, index }))
+    .sort((left, right) => (right.episode.startedAt - left.episode.startedAt)
+      || (right.episode.updatedAt - left.episode.updatedAt)
+      || (right.index - left.index))
+    .map((entry) => entry.episode)
+  const wanted = Number(limit)
+  const size = clamp(Number.isFinite(wanted) ? Math.round(wanted) : EPISODE_HISTORY_LIMIT, 1, EPISODE_HISTORY_LIMIT)
+  return ordered.slice(0, size).map((episode) => episodeSnapshot(episode, now))
 }
 
 /** 当前仍有效的显著性提醒；过期返回 null。 */
@@ -445,8 +467,9 @@ export function describeNudge(nudge) {
 }
 
 /** 面板快照用：只暴露渲染需要的最小字段。 */
-export function episodeSnapshot(episode) {
+export function episodeSnapshot(episode, now = Date.now()) {
   const ep = episode && typeof episode === 'object' ? episode : {}
+  const expiresAt = Math.round(finiteNumber(ep.expiresAt, 0))
   return {
     id: String(ep.id ?? ''),
     type: EPISODE_TYPES.includes(ep.type) ? ep.type : null,
@@ -457,8 +480,10 @@ export function episodeSnapshot(episode) {
     tendency: EPISODE_TENDENCIES.includes(ep.tendency) ? ep.tendency : 'none',
     source: EPISODE_SOURCES.includes(ep.source) ? ep.source : 'rule',
     startedAt: Math.round(finiteNumber(ep.startedAt, 0)),
-    expiresAt: Math.round(finiteNumber(ep.expiresAt, 0)),
+    expiresAt,
     updatedAt: Math.round(finiteNumber(ep.updatedAt, 0)),
+    complex: String(ep.complex ?? ''),
+    expired: expiresAt <= now,
   }
 }
 
@@ -1511,6 +1536,7 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
       name: 'soul_feel',
       description: '把一次真的戳到你的情绪记成一段短暂的情绪印记（不是打分）。只在真的被戳到时用，不要每轮调用。'
         + '复杂情绪不需要命名，可以用 note 写一句「有点闷，说不上来」；type 只用于基本情绪分类，可以留空。'
+        + '想给它起个短名字时可以填 complex（如「怀旧」「内疚」），它只是名字，不做换算。'
         + '不要把强度等数值说给用户。',
       parameters: {
         type: {
@@ -1521,6 +1547,10 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
         intensity: { type: 'number', description: '可选：0..1，默认 0.5；只用于内部强度，不要告诉用户。' },
         cause: { type: 'string', description: '可选：≤80 字，是什么事让你这样。' },
         note: { type: 'string', description: '可选：≤120 字，第一人称的一句自述（可以说不清），会原样用于之后的自我理解。' },
+        complex: {
+          type: 'string',
+          description: '可选：≤20 字，给复杂情绪起个短名字（如「怀旧」「内疚」）；说不清就省略，用 note。',
+        },
         tendency: {
           type: 'string',
           enum: EPISODE_TENDENCIES,
@@ -1551,7 +1581,9 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
         }
         const type = rawType && EPISODE_TYPES.includes(rawType) ? rawType : null
         const note = codepointSlice(String(args?.note ?? '').trim(), EPISODE_NOTE_MAX)
-        if (!type && !note) return { ok: false, reason: '至少给 type 或 note 之一：说不清就用 note 写一句' }
+        const complex = codepointSlice(String(args?.complex ?? '').trim(), EPISODE_COMPLEX_MAX)
+        // type 可以缺失：只写 note（或只写 complex）也是合法的自述。
+        if (!type && !note && !complex) return { ok: false, reason: '至少给 type、note 或 complex 之一：说不清就用 note 写一句' }
         const rawTendency = args?.tendency
         if (rawTendency !== undefined && rawTendency !== null && !EPISODE_TENDENCIES.includes(rawTendency)) {
           return { ok: false, reason: 'tendency 只能是 approach/withdraw/repair/quiet/share/none' }
@@ -1577,6 +1609,7 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
           level: episodeLevel(intensity),
           cause: codepointSlice(String(args?.cause ?? '').trim(), EPISODE_CAUSE_MAX),
           note,
+          complex,
           tendency: rawTendency || 'none',
           source: 'tool',
           startedAt: now,
@@ -1714,8 +1747,32 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
           }
           const url = new URL(String(req.url || '/'), 'http://localhost')
           const route = url.pathname.replace(EMOTION_API_PREFIX, '') || ''
+          const action = String(url.searchParams.get('action') ?? '')
+          const now = Date.now()
           try {
             if (req.method === 'GET' && (route === '' || route === '/' || route === '/state')) {
+              if (action === 'history') {
+                const rawLimit = url.searchParams.get('limit')
+                const limit = rawLimit === null || rawLimit.trim() === '' ? EPISODE_HISTORY_LIMIT : Number(rawLimit)
+                if (!Number.isFinite(limit) || limit <= 0) {
+                  sendEmotionJson(res, 400, { ok: false, error: 'limit must be a positive number' })
+                  return
+                }
+                const current = readSoul()
+                ensureEmotionExtras(current.emotion, now)
+                const episodes = episodeHistory(current.emotion, limit, now)
+                sendEmotionJson(res, 200, {
+                  ok: true,
+                  episodes,
+                  count: episodes.length,
+                  historyCount: Array.isArray(current.emotion.episodes) ? current.emotion.episodes.length : 0,
+                })
+                return
+              }
+              if (action && action !== 'state') {
+                sendEmotionJson(res, 400, { ok: false, error: 'unknown action' })
+                return
+              }
               sendEmotionJson(res, 200, { ok: true, emotion: snapshot() })
               return
             }
@@ -1760,6 +1817,10 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
       const e = decayedEmotion(current, config, now)
       const raw = current.emotion
       const active = activeEpisodes(raw, now)
+      const recentActive = active
+        .slice()
+        .sort((left, right) => (right.startedAt - left.startedAt) || (right.updatedAt - left.updatedAt))
+        .slice(0, EMOTION_STATE_EPISODES)
       const nudge = activeNudge(raw, now)
       const recheckModel = resolveRecheckModel(config)
       return {
@@ -1797,9 +1858,11 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
         },
         history: historySnapshot(raw, EMOTION_SNAPSHOT_HISTORY),
         lastChange: lastChangeOf(raw),
-        // 此刻情绪：active episodes + 一条显著性提醒（注入时只取最强的 2 条）
-        episodes: active.map((episode) => episodeSnapshot(episode)),
+        // 此刻情绪：active episodes 里最近 5 条 + 一条显著性提醒（注入时只取最强的 2 条）
+        episodes: recentActive.map((episode) => episodeSnapshot(episode, now)),
         episodeCount: active.length,
+        // episode 历史：ring 里的全部条数（含过期），够不够拉 ?action=history 由面板判断
+        historyCount: Array.isArray(raw.episodes) ? raw.episodes.length : 0,
         nudge: nudgeSnapshot(nudge),
       }
     } catch (error) {
@@ -1844,7 +1907,17 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
     episodes: (now) => {
       const current = readSoul()
       ensureEmotionExtras(current.emotion, now ?? Date.now())
-      return activeEpisodes(current.emotion, now ?? Date.now()).map((episode) => episodeSnapshot(episode))
+      return activeEpisodes(current.emotion, now ?? Date.now()).map((episode) => episodeSnapshot(episode, now ?? Date.now()))
+    },
+    episodeHistory: (limit = EPISODE_HISTORY_LIMIT, now = Date.now()) => {
+      const current = readSoul()
+      ensureEmotionExtras(current.emotion, now)
+      return episodeHistory(current.emotion, limit, now)
+    },
+    episodeHistoryCount: (now = Date.now()) => {
+      const current = readSoul()
+      ensureEmotionExtras(current.emotion, now)
+      return Array.isArray(current.emotion.episodes) ? current.emotion.episodes.length : 0
     },
     nudge: (now) => {
       const current = readSoul()
@@ -1875,6 +1948,9 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
       EPISODE_LEVELS,
       EPISODE_TENDENCIES,
       EPISODE_RING,
+      EPISODE_COMPLEX_MAX,
+      EPISODE_HISTORY_LIMIT,
+      EMOTION_STATE_EPISODES,
       RULE_EPISODE_MIN_SALIENCE,
       NUDGE_MIN_SALIENCE,
       NUDGE_COOLDOWN_MS,
