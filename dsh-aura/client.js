@@ -2730,6 +2730,14 @@ ${TRAIL_CSS}
         if (!force && !untouched) return
         setLook(next)
         setLookBaseline(next)
+        const cfg = config && typeof config === 'object' ? config : {}
+        setPersonaForm(prev => ({
+          ...prev,
+          trailEnabled: cfg.trailEnabled !== false,
+          trailColor: cfg.trailColor,
+          trailSpeed: cfg.trailSpeed,
+          trailWidth: cfg.trailWidth,
+        }))
       }, [])
 
       /** 灵魂表单同步（同样尊重用户正在编辑的草稿）。 */
@@ -3880,7 +3888,13 @@ ${TRAIL_CSS}
         setLookError('')
         setLookNotice('')
         try {
-          const value = await api('/config', { displayName, iconPreset: look.iconPreset, iconEmoji })
+          const value = await api('/config', {
+            displayName, iconPreset: look.iconPreset, iconEmoji,
+            trailEnabled: personaForm.trailEnabled === true,
+            trailColor: personaForm.trailColor,
+            trailSpeed: personaForm.trailSpeed,
+            trailWidth: personaForm.trailWidth,
+          })
           if (!mounted.current) return
           if (value && value.config) {
             setSnap(prev => {
@@ -3892,16 +3906,6 @@ ${TRAIL_CSS}
             setAppearance(value.config)
             syncLook(value.config, true)
           }
-          const trailValue = await fetchJson(PERSONA_API + '/save', {
-            config: {
-              trailEnabled: personaForm.trailEnabled === true,
-              trailColor: personaForm.trailColor,
-              trailSpeed: personaForm.trailSpeed,
-              trailWidth: personaForm.trailWidth,
-            },
-          })
-          if (trailValue && trailValue.config) syncPersona(trailValue.config, true)
-          notifyPersonaSaved()
           setLookNotice(t('notice.lookSaved'))
           if (lookTimer.current !== null) clearTimeout(lookTimer.current)
           lookTimer.current = setTimeout(() => {
@@ -4012,6 +4016,10 @@ ${TRAIL_CSS}
           soulInterests: String(soulForm.soulInterests || '').slice(0, 200),
           soulStrengths: String(soulForm.soulStrengths || '').slice(0, 200),
           soulRelationGuidance: String(soulForm.soulRelationGuidance || '').slice(0, 500),
+          trailEnabled: personaForm.trailEnabled === true,
+          trailColor: personaForm.trailColor,
+          trailSpeed: personaForm.trailSpeed,
+          trailWidth: personaForm.trailWidth,
         }
         setBlock('soul', { busy: true, error: '', notice: '' })
         setPersonaError('')
@@ -4025,19 +4033,6 @@ ${TRAIL_CSS}
           if (nextSoul && !payloadApplied(nextSoul, soulPayload)) {
             throw new Error(t('notice.configNotApplied'))
           }
-          // 表达方式已并入自由灵魂内容；这里只保留光轨外观字段。
-          const personaValue = await fetchJson(PERSONA_API + '/save', {
-            config: {
-              trailEnabled: personaForm.trailEnabled === true,
-              trailColor: personaForm.trailColor,
-              trailSpeed: personaForm.trailSpeed,
-              trailWidth: personaForm.trailWidth,
-              enabled: soulForm.soulEnabled === true,
-            },
-          })
-          if (!mounted.current) return
-          nextPersona = (personaValue && personaValue.config) || null
-          notifyPersonaSaved()
           if (nextSoul) {
             mergeConfig(nextSoul)
             setAppearance(nextSoul)
@@ -7252,10 +7247,10 @@ ${TRAIL_CSS}
     }
 
     /** 从 persona payload 取光轨四项；灵魂总开关关闭时整体不显示。 */
-    function trailConfigOf(payload, soulPayload) {
+    function trailConfigOf(payload) {
       const data = payload && typeof payload === 'object' ? payload : null
       const cfg = data && data.config && typeof data.config === 'object' ? data.config : null
-      const soulEnabled = !(soulPayload && soulPayload.config && soulPayload.config.soulEnabled === false)
+      const soulEnabled = !(cfg && cfg.soulEnabled === false)
       if (!cfg || !soulEnabled) return { ...TRAIL_DEFAULT_CONFIG, enabled: false }
       return {
         enabled: cfg.trailEnabled !== false,
@@ -7465,11 +7460,8 @@ ${TRAIL_CSS}
         let alive = true
         const refresh = async () => {
           try {
-            const [value, soulValue] = await Promise.all([
-              fetchJson(PERSONA_API + '/state'),
-              fetchJson('/dsh-aura/api/state'),
-            ])
-            if (alive) setTrail(trailConfigOf(value, soulValue))
+            const value = await fetchJson('/dsh-aura/api/state')
+            if (alive) setTrail(trailConfigOf(value))
           } catch {
             // 取不到就保持默认配置，安静不报错
           }

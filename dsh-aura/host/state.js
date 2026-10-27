@@ -84,6 +84,10 @@ export const DEFAULT_CONFIG = {
   // ---- 灵魂身份 ----
   soulEnabled: true,
   soulWebEnabled: false,
+  trailEnabled: true,
+  trailColor: '#679EFE',
+  trailSpeed: 'slow',
+  trailWidth: 'thin',
   soulSessionIds: '',
   soulTogglePlacement: 'session-row',
   soulName: 'Aura',
@@ -264,7 +268,7 @@ const FLOAT_RANGES = {
 }
 
 const BOOL_FIELDS = new Set([
-  'autoConnect', 'splitEnabled', 'soulEnabled', 'soulWebEnabled', 'soulGrowthReflection', 'emotionEnabled',
+  'autoConnect', 'splitEnabled', 'soulEnabled', 'soulWebEnabled', 'soulGrowthReflection', 'emotionEnabled', 'trailEnabled', 'trailColor', 'trailSpeed', 'trailWidth',
   'emotionGuardOnNegative', 'memoryEnabled', 'memoryAutoCompact', 'memoryDiaryEnabled',
   'memoryImmediate', 'memorySessionDigest', 'diaryAuto', 'archiveEnabled',
   'speakEnabled', 'speakDryRun', 'quietEnabled', 'speakStickerEnabled', 'speakShareEnabled', 'proactiveEnabled', 'steerEnabled',
