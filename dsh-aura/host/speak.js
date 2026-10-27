@@ -1752,7 +1752,13 @@ export function installSpeak(ctx, deps = {}) {
     const allowlist = config.groupAllowlist
     const archived = archivedSessionIds()
     let sessionRecords = {}
-    try { sessionRecords = asObject(state?.readSessions?.()) } catch { sessionRecords = {} }
+    try {
+      const rawSessions = state?.readSessions?.()
+      const sessionList = Array.isArray(rawSessions) ? rawSessions : Object.values(asObject(rawSessions))
+      for (const record of sessionList) {
+        if (record && record.sessionId) sessionRecords[record.sessionId] = record
+      }
+    } catch { sessionRecords = {} }
     const candidates = []
     let fallbackReason = 'no-target'
     for (const binding of bindingsList()) {
