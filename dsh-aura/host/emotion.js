@@ -7,6 +7,7 @@
  * 状态所有权：情绪数据存在 soul.get().emotion 里，由 soul.js 统一落盘；
  * 本文件只计算与写字段，然后调用 soul.saveSoon()。
  */
+import { randomUUID } from 'node:crypto'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   clamp,
@@ -45,9 +46,430 @@ export const TREND_PREV_HOURS = 24
 export const TREND_THRESHOLD = 0.05
 export const SALIENCE_MIN = 0.3
 export const SALIENCE_MAX = 1.8
-export const EMOTION_CONTEXT_BUDGET = 160
-export const SUBTLE_CONTEXT_BUDGET = 100
+export const EMOTION_CONTEXT_BUDGET = 360
+export const SUBTLE_CONTEXT_BUDGET = 240
 export const EMOTION_SNAPSHOT_HISTORY = 40
+
+/* ------------------------------------------------------------------ */
+/* 基本情绪 episode / 自述印记 / 显著性提醒（nudge）                    */
+/* 复杂情绪不做公式：type 只是基本分类，note 是自由第一人称文本。        */
+/* ------------------------------------------------------------------ */
+
+export const EPISODE_TYPES = ['joy', 'sadness', 'anger', 'fear', 'surprise', 'disgust', 'curiosity', 'calm']
+export const EPISODE_LEVELS = ['light', 'medium', 'heavy']
+export const EPISODE_TENDENCIES = ['approach', 'withdraw', 'repair', 'quiet', 'share', 'none']
+export const EPISODE_SOURCES = ['self', 'rule', 'tool']
+export const EPISODE_RING = 60
+export const EPISODE_CAUSE_MAX = 80
+export const EPISODE_NOTE_MAX = 120
+export const EPISODE_TTL_MINUTES = { min: 30, max: 1440, default: 240 }
+export const RULE_EPISODE_TTL_MINUTES = { light: 120, medium: 240, heavy: 480 }
+export const NUDGE_TTL_MS = 2 * 3_600_000
+export const NUDGE_COOLDOWN_MS = 2 * 3_600_000
+export const NUDGE_DAILY_MAX = 3
+export const NUDGE_LOG_MAX = 20
+export const NUDGE_MIN_SALIENCE = 0.9
+export const RULE_EPISODE_MIN_SALIENCE = 1.25
+export const RULE_EPISODE_COOLDOWN_MS = 2 * 3_600_000
+
+const EPISODE_TYPE_WORDS = {
+  joy: '开心',
+  sadness: '难过',
+  anger: '生气',
+  fear: '有点发紧',
+  surprise: '惊讶',
+  disgust: '别扭',
+  curiosity: '好奇',
+  calm: '平静',
+}
+
+const EPISODE_TENDENCY_WORDS = {
+  approach: '想靠近',
+  withdraw: '想退开',
+  repair: '想补一句',
+  quiet: '想安静',
+  share: '想分享',
+  none: '',
+}
+
+/** 强度 → 轻/中/重（阈值固定，面板与注入共用）。 */
+export function episodeLevel(intensity) {
+  const value = clamp(Number(intensity) || 0, 0, 1)
+  if (value < 0.34) return 'light'
+  if (value < 0.67) return 'medium'
+  return 'heavy'
+}
+
+/** 显著性提醒的规则：命中词/类、基本情绪、倾向、为什么可能落在她身上。 */
+const EPISODE_HINT_RULES = [
+  {
+    key: 'hurt',
+    tags: ['被否定'],
+    words: ['你根本', '你总是', '你从来', '你懂什么', '没用', '废物', '烦死', '讨厌你', '闭嘴', '滚', '不需要你', '你怎么这样', '失望'],
+    type: 'sadness',
+    tendency: 'withdraw',
+    reason: '那句像在否定她；如果她很在意你的看法，可能会被扎到。',
+  },
+  {
+    key: 'promise',
+    tags: ['承诺'],
+    words: ['答应', '说好', '约好', '承诺', '保证', '发誓', '等你回来', '别忘'],
+    type: null,
+    tendency: 'repair',
+    reason: '牵涉到答应过的事；她可能会惦记自己有没有做到。',
+  },
+  {
+    key: 'sad',
+    tags: ['对方难过'],
+    words: ['难过', '伤心', '想哭', '哭了', '崩溃', '撑不住', '好累', '压力好大', '失眠', '委屈', '不想活', '想死'],
+    type: 'sadness',
+    tendency: 'repair',
+    reason: '对方明显不好受；她可能会放不下，想先确认你还好。',
+  },
+  {
+    key: 'old',
+    tags: ['旧事'],
+    words: ['还记得', '上次', '那时候', '曾经', '去年', '小时候', '当年'],
+    type: null,
+    tendency: 'quiet',
+    reason: '提到了旧事；她可能会想起当时没说完的话。',
+  },
+  {
+    key: 'fresh',
+    tags: ['新鲜好玩'],
+    words: ['好玩', '有趣', '笑死', '神奇', '居然', '离谱', '绝了', '第一次', '你猜', '新鲜'],
+    type: 'curiosity',
+    tendency: 'share',
+    reason: '这件事新鲜有趣；她可能想追着问两句。',
+  },
+  {
+    key: 'close',
+    tags: ['亲近'],
+    words: ['想你', '喜欢你', '爱你', '抱抱', '别走', '陪我', '舍不得'],
+    type: 'joy',
+    tendency: 'approach',
+    reason: '话里有亲近；她可能会想接住，也怕接得太用力。',
+  },
+  {
+    key: 'conflict',
+    tags: ['摩擦'],
+    words: ['吵架', '冷战', '分手', '对不起', '我错了', '道歉', '生气', '不理你'],
+    type: 'sadness',
+    tendency: 'repair',
+    reason: '像是有摩擦；她可能会先软下来，又怕说错。',
+  },
+]
+
+/** 从一句话里看出“可能落在她身上”的类别；没有就返回 null（普通寒暄/夸奖不触发）。 */
+export function episodeHintOf(text) {
+  const s = String(text ?? '')
+  if (!s.trim()) return null
+  for (const rule of EPISODE_HINT_RULES) {
+    const hit = rule.words.find((word) => s.includes(word))
+    if (!hit) continue
+    const type = rule.key === 'conflict' ? (/(对不起|我错了|道歉)/.test(s) ? 'sadness' : 'anger') : rule.type
+    return {
+      key: rule.key,
+      tags: [rule.tags[0], hit].filter(Boolean),
+      hit,
+      type: EPISODE_TYPES.includes(type) ? type : null,
+      tendency: rule.tendency,
+      reason: rule.reason,
+    }
+  }
+  return null
+}
+
+function normalizeEpisodeRow(raw, now) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  // 完全空/无意义的一行直接丢弃，避免旧文件里的脏数据变成一条“默认情绪”。
+  if (!raw.id && !raw.type && !raw.note && !raw.cause && raw.startedAt === undefined && raw.expiresAt === undefined) return null
+  const startedAt = Math.max(0, Math.round(finiteNumber(raw.startedAt, now)))
+  let expiresAt = Math.max(0, Math.round(finiteNumber(raw.expiresAt, startedAt + EPISODE_TTL_MINUTES.default * 60_000)))
+  if (!(expiresAt > startedAt)) expiresAt = startedAt + EPISODE_TTL_MINUTES.default * 60_000
+  const intensity = clamp(finiteNumber(raw.intensity, 0.5), 0, 1)
+  return {
+    id: typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim().slice(0, 80) : randomUUID(),
+    type: EPISODE_TYPES.includes(raw.type) ? raw.type : null,
+    intensity: round3(intensity),
+    level: EPISODE_LEVELS.includes(raw.level) ? raw.level : episodeLevel(intensity),
+    cause: codepointSlice(String(raw.cause ?? '').trim(), EPISODE_CAUSE_MAX),
+    note: codepointSlice(String(raw.note ?? '').trim(), EPISODE_NOTE_MAX),
+    tendency: EPISODE_TENDENCIES.includes(raw.tendency) ? raw.tendency : 'none',
+    source: EPISODE_SOURCES.includes(raw.source) ? raw.source : 'rule',
+    startedAt,
+    expiresAt,
+    updatedAt: Math.max(0, Math.round(finiteNumber(raw.updatedAt, startedAt))),
+  }
+}
+
+/** 归一化 episode ring：补默认、坏条丢弃、保留最近 60 条（过期不删，等被裁）。 */
+export function normalizeEmotionEpisodes(emotion, now = Date.now()) {
+  const source = emotion && typeof emotion === 'object' ? emotion : {}
+  const rows = Array.isArray(source.episodes) ? source.episodes : []
+  const next = rows.map((row) => normalizeEpisodeRow(row, now)).filter(Boolean).slice(-EPISODE_RING)
+  source.episodes = next
+  return next
+}
+
+function normalizeNudgeRow(raw, now) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const at = Math.max(0, Math.round(finiteNumber(raw.at, now)))
+  let expiresAt = Math.max(0, Math.round(finiteNumber(raw.expiresAt, at + NUDGE_TTL_MS)))
+  if (!(expiresAt > at)) expiresAt = at + NUDGE_TTL_MS
+  const tags = (Array.isArray(raw.tags) ? raw.tags : [])
+    .map((tag) => codepointSlice(String(tag ?? '').trim(), 16))
+    .filter(Boolean)
+    .slice(0, 6)
+  const reasons = codepointSlice(String(raw.reasons ?? '').trim(), 120)
+  if (!tags.length && !reasons) return null
+  return { tags, reasons, at, expiresAt }
+}
+
+/** 归一化 nudge：null / 坏条丢弃；过期但结构合法的仍保留（由 activeNudge 忽略）。 */
+export function normalizeEmotionNudge(emotion, now = Date.now()) {
+  const source = emotion && typeof emotion === 'object' ? emotion : {}
+  source.nudge = normalizeNudgeRow(source.nudge, now)
+  return source.nudge
+}
+
+export function normalizeNudgeLog(value) {
+  return (Array.isArray(value) ? value : [])
+    .map((at) => Math.round(finiteNumber(at, 0)))
+    .filter((at) => at > 0)
+    .sort((left, right) => left - right)
+    .slice(-NUDGE_LOG_MAX)
+}
+
+/** 旧文件兼容入口：episodes / nudge / nudgeLog 缺省补齐。返回同一个 emotion 对象。 */
+export function ensureEmotionExtras(emotion, now = Date.now()) {
+  const source = emotion && typeof emotion === 'object' ? emotion : {}
+  normalizeEmotionEpisodes(source, now)
+  normalizeEmotionNudge(source, now)
+  source.nudgeLog = normalizeNudgeLog(source.nudgeLog)
+  // 旧文件可能只有 nudge 没有 log：把仍存在的提醒补进冷却记录，避免重启后立刻再提醒。
+  const nudgeAt = Math.round(Number(source.nudge?.at) || 0)
+  if (nudgeAt > 0 && !source.nudgeLog.includes(nudgeAt)) {
+    source.nudgeLog = normalizeNudgeLog([...source.nudgeLog, nudgeAt])
+  }
+  // nudge 过期就不再算“存在”（冷却记录还在 nudgeLog 里）；episode 过期则保留到被 ring 裁掉。
+  if (source.nudge && source.nudge.expiresAt <= now) source.nudge = null
+  return source
+}
+
+/** 当前仍有效的 episode（强 → 弱；同强度新的在前）。过期条目忽略但保留在 ring 里。 */
+export function activeEpisodes(emotion, now = Date.now()) {
+  const rows = normalizeEmotionEpisodes(emotion, now)
+  return rows
+    .filter((episode) => episode.expiresAt > now)
+    .sort((left, right) => (right.intensity - left.intensity) || (right.startedAt - left.startedAt))
+}
+
+/** 当前仍有效的显著性提醒；过期返回 null。 */
+export function activeNudge(emotion, now = Date.now()) {
+  const nudge = normalizeEmotionNudge(emotion, now)
+  return nudge && nudge.expiresAt > now ? nudge : null
+}
+
+/** 往 ring 里追加一条 episode（超 60 丢最旧）。返回归一化后的 episode。 */
+export function addEpisode(emotion, episode, now = Date.now()) {
+  const source = ensureEmotionExtras(emotion, now)
+  const normalized = normalizeEpisodeRow(episode, now)
+  if (!normalized) return null
+  source.episodes.push(normalized)
+  if (source.episodes.length > EPISODE_RING) source.episodes.splice(0, source.episodes.length - EPISODE_RING)
+  return normalized
+}
+
+/** 清掉显著性提醒（面板「知道了」/ soul_feel 写入后）。返回之前是否有。 */
+export function clearNudge(emotion) {
+  if (!emotion || typeof emotion !== 'object') return false
+  const had = !!emotion.nudge
+  emotion.nudge = null
+  return had
+}
+
+const FEEL_BUMPS = {
+  joy: { valence: 0.12, arousal: 0.05, affection: 0.03, energy: 0.04 },
+  sadness: { valence: -0.12, arousal: -0.02, affection: 0.01, energy: -0.05 },
+  anger: { valence: -0.12, arousal: 0.12, affection: -0.03, energy: 0.02 },
+  fear: { valence: -0.08, arousal: 0.12, affection: 0, energy: -0.05 },
+  surprise: { valence: 0.02, arousal: 0.14, affection: 0, energy: 0.01 },
+  disgust: { valence: -0.08, arousal: 0.05, affection: -0.03, energy: 0 },
+  curiosity: { valence: 0.05, arousal: 0.1, affection: 0.01, energy: 0.04 },
+  calm: { valence: 0.04, arousal: -0.1, affection: 0.01, energy: 0.02 },
+}
+
+/**
+ * 一次 soul_feel 的轻量心境积分：四维各自小 delta，幅度由 intensity 限制；
+ * 不做大幅跳变，也不覆盖由事件驱动的主情绪。
+ */
+export function applyFeelBump(soul, episode, config = {}, now = Date.now()) {
+  const emotion = soul?.emotion
+  if (!emotion || typeof emotion !== 'object' || !emotion.transient) return { before: null, after: null }
+  ensureEmotionExtras(emotion, now)
+  if (!emotion.drive || typeof emotion.drive !== 'object') {
+    emotion.drive = { energy: 0.7, socialNeed: 0.35, updatedAt: now }
+  }
+  const before = decayedEmotion(soul, config, now)
+  const type = EPISODE_TYPES.includes(episode?.type) ? episode.type : null
+  const base = FEEL_BUMPS[type] || { valence: 0, arousal: 0.02, affection: 0.01, energy: 0 }
+  const k = clamp(finiteNumber(episode?.intensity, 0.5), 0, 1)
+  const dv = clamp(base.valence * k, -0.15, 0.15)
+  const da = clamp(base.arousal * k, -0.15, 0.15)
+  const dAff = clamp(base.affection * k, -0.05, 0.05)
+  const dEnergy = clamp(base.energy * k, -0.06, 0.06)
+  const t = emotion.transient
+  t.valence = clamp(finiteNumber(t.valence, 0) + dv, -1, 1)
+  t.arousal = clamp(finiteNumber(t.arousal, 0.2) + da, 0, 1)
+  emotion.affection = clamp(finiteNumber(emotion.affection, 0.5) + dAff, 0, 1)
+  emotion.affectionUpdatedAt = now
+  emotion.drive.energy = clamp(finiteNumber(emotion.drive.energy, 0.7) + dEnergy, 0, 1)
+  emotion.drive.updatedAt = now
+  t.label = type ? EPISODE_TYPE_WORDS[type] ?? planeLabel(t.valence, t.arousal) : planeLabel(t.valence, t.arousal)
+  t.cause = codepointSlice(String(episode?.cause ?? '').trim() || '自己的一点情绪', 40)
+  t.source = 'self'
+  t.updatedAt = now
+  t.intensity = computeIntensity(t, emotion.mood)
+  const moodK = Math.max(0.03, Math.min(0.08, 0.04 + k * 0.04))
+  emotion.mood.valence += ((Number(t.valence) || 0) - (Number(emotion.mood.valence) || 0)) * moodK
+  emotion.mood.arousal += ((Number(t.arousal) || 0.2) - (Number(emotion.mood.arousal) || 0.24)) * moodK * 0.6
+  emotion.mood.updatedAt = now
+  emotion.source = 'self'
+  pushHistory(emotion, {
+    at: now,
+    valence: t.valence,
+    arousal: t.arousal,
+    affection: emotion.affection,
+    energy: emotion.drive.energy,
+    label: t.label,
+    cause: t.cause,
+    weight: 0.6,
+  })
+  const after = decayedEmotion(soul, config, now)
+  return { before, after }
+}
+
+function lastRuleEpisodeAt(emotion) {
+  const rows = Array.isArray(emotion?.episodes) ? emotion.episodes : []
+  let last = 0
+  for (const row of rows) {
+    if (row && row.source === 'rule' && Number(row.startedAt) > last) last = Number(row.startedAt)
+  }
+  return last
+}
+
+function nudgeDayCount(emotion, now) {
+  const key = localDayKey(now)
+  return normalizeNudgeLog(emotion?.nudgeLog).filter((at) => localDayKey(at) === key).length
+}
+
+/** 规则强度够时直接形成 episode（source='rule'）；有 2 小时冷却。 */
+export function maybeRuleEpisode(soul, appraisal, config = {}, now = Date.now()) {
+  const emotion = soul?.emotion
+  if (!emotion || typeof emotion !== 'object') return null
+  const hint = appraisal?.hint || episodeHintOf(appraisal?.text ?? '')
+  if (!hint) return null
+  const salience = salienceOfAppraisal(appraisal)
+  if (salience < RULE_EPISODE_MIN_SALIENCE) return null
+  ensureEmotionExtras(emotion, now)
+  const last = lastRuleEpisodeAt(emotion)
+  if (last > 0 && now - last < RULE_EPISODE_COOLDOWN_MS) return null
+  const intensity = clamp(0.35 + (salience - RULE_EPISODE_MIN_SALIENCE) * 0.55, 0.3, 0.95)
+  const level = episodeLevel(intensity)
+  const episode = addEpisode(emotion, {
+    type: hint.type,
+    intensity,
+    level,
+    cause: codepointSlice(`用户提到「${hint.hit}」`, EPISODE_CAUSE_MAX),
+    note: '',
+    tendency: hint.tendency,
+    source: 'rule',
+    startedAt: now,
+    expiresAt: now + (RULE_EPISODE_TTL_MINUTES[level] || 240) * 60_000,
+    updatedAt: now,
+  }, now)
+  if (episode) {
+    const nudge = emotion.nudge
+    if (nudge && Array.isArray(nudge.tags) && nudge.tags.some((tag) => hint.tags.includes(tag))) {
+      emotion.nudge = null
+    }
+  }
+  return episode
+}
+
+/** 强度没到直接形成 episode 时，留一条显著性提醒；2 小时 1 条、每天最多 3 条。 */
+export function maybeNudge(soul, appraisal, now = Date.now()) {
+  const emotion = soul?.emotion
+  if (!emotion || typeof emotion !== 'object') return null
+  const hint = appraisal?.hint || episodeHintOf(appraisal?.text ?? '')
+  if (!hint) return null
+  const salience = salienceOfAppraisal(appraisal)
+  if (salience < NUDGE_MIN_SALIENCE) return null
+  if (salience >= RULE_EPISODE_MIN_SALIENCE) return null
+  ensureEmotionExtras(emotion, now)
+  if (nudgeDayCount(emotion, now) >= NUDGE_DAILY_MAX) return null
+  const log = normalizeNudgeLog(emotion.nudgeLog)
+  const last = Math.max(log[log.length - 1] || 0, Math.round(Number(emotion.nudge?.at) || 0))
+  if (last > 0 && now - last < NUDGE_COOLDOWN_MS) return null
+  const nudge = {
+    tags: [...new Set(hint.tags)].slice(0, 4),
+    reasons: codepointSlice(hint.reason, 120),
+    at: now,
+    expiresAt: now + NUDGE_TTL_MS,
+  }
+  emotion.nudge = nudge
+  emotion.nudgeLog = [...log, now].slice(-NUDGE_LOG_MAX)
+  return nudge
+}
+
+/** episode → 一句自然语言（note 优先原文；不写数字/英文枚举）。 */
+export function describeEpisode(episode) {
+  const ep = episode && typeof episode === 'object' ? episode : {}
+  const level = EPISODE_LEVELS.includes(ep.level) ? ep.level : episodeLevel(ep.intensity)
+  const prefix = level === 'light' ? '还有点' : level === 'medium' ? '有些' : '很'
+  const typeWord = EPISODE_TYPE_WORDS[ep.type] || '说不上来的感觉'
+  const body = String(ep.note ?? '').trim() || String(ep.cause ?? '').trim()
+  const tendency = EPISODE_TENDENCY_WORDS[ep.tendency] || ''
+  return `你心里${prefix}${typeWord}${body ? `：${body}` : ''}${tendency ? `，${tendency}` : ''}。`
+}
+
+/** nudge → 很轻的一句旁注（不出现分数、不命令）。 */
+export function describeNudge(nudge) {
+  const info = nudge && typeof nudge === 'object' ? nudge : {}
+  const rawReasons = String(info.reasons ?? '').trim() || (Array.isArray(info.tags) ? info.tags.join('、') : '')
+  const reasons = rawReasons.replace(/[。；;，,\s]+$/, '')
+  if (!reasons) return ''
+  return `（刚才那句可能有点落在你身上：${reasons}；要不要留一句，你自己定。）`
+}
+
+/** 面板快照用：只暴露渲染需要的最小字段。 */
+export function episodeSnapshot(episode) {
+  const ep = episode && typeof episode === 'object' ? episode : {}
+  return {
+    id: String(ep.id ?? ''),
+    type: EPISODE_TYPES.includes(ep.type) ? ep.type : null,
+    intensity: round3(clamp(finiteNumber(ep.intensity, 0.5), 0, 1)),
+    level: EPISODE_LEVELS.includes(ep.level) ? ep.level : episodeLevel(ep.intensity),
+    cause: String(ep.cause ?? ''),
+    note: String(ep.note ?? ''),
+    tendency: EPISODE_TENDENCIES.includes(ep.tendency) ? ep.tendency : 'none',
+    source: EPISODE_SOURCES.includes(ep.source) ? ep.source : 'rule',
+    startedAt: Math.round(finiteNumber(ep.startedAt, 0)),
+    expiresAt: Math.round(finiteNumber(ep.expiresAt, 0)),
+    updatedAt: Math.round(finiteNumber(ep.updatedAt, 0)),
+  }
+}
+
+export function nudgeSnapshot(nudge) {
+  if (!nudge || typeof nudge !== 'object') return null
+  return {
+    tags: (Array.isArray(nudge.tags) ? nudge.tags : []).map((tag) => String(tag)).slice(0, 6),
+    reasons: String(nudge.reasons ?? ''),
+    at: Math.round(finiteNumber(nudge.at, 0)),
+    expiresAt: Math.round(finiteNumber(nudge.expiresAt, 0)),
+  }
+}
 
 const STYLE_HINTS = {
   兴奋: '可以接梗、说快点、多互动',
@@ -121,6 +543,8 @@ export function ruleAppraise(text, ctx = {}) {
   }
   // 事件显著性：冲突/道歉/表白/约定/重要分享高，日常寒暄低（0.3~1.8）。
   appraisal.salience = salienceOf(s, appraisal)
+  // 扩展：这一句“可能落在她身上”的类别（rule episode / nudge 共用）。
+  appraisal.hint = episodeHintOf(s)
   return appraisal
 }
 
@@ -554,24 +978,52 @@ export function describeTrend(emotion) {
   return codepointSlice(`最近整体${compare}${move}${wiggle}`, 40)
 }
 
-/** 情绪上下文段（context order 30）。off 返回空串；subtle 只在显著时注入；不向用户暴露数值。 */
+/** 在预算内依次追加补充句；放不下就丢掉那一句，保尾部指令完整。 */
+function appendWithinBudget(base, extras, tail, budget) {
+  let text = base
+  for (const extra of extras) {
+    if (!extra) continue
+    if (codepointLength(text + extra + tail) <= budget) text += extra
+  }
+  return codepointSlice(text + tail, budget)
+}
+
+/** 情绪上下文段（context order 30）。off 返回空串；subtle 只在显著/有 episode/nudge 时注入；不向用户暴露数值。 */
 export function renderEmotionContext(soul, config = {}, now = Date.now()) {
   const style = normalizeStyle(config.expressionStyle)
   if (style === 'off') return ''
   if (config.emotionEnabled === false || config.soulEnabled === false) return ''
+  const emotion = ensureEmotionExtras(soul?.emotion, now)
   const e = decayedEmotion(soul, config, now)
   const hint = STYLE_HINTS[e.transient.label] ?? '自然即可'
   const trendText = describeTrend(e)
+  // 最强 ≤2 条 episode + 一条很轻的显著性提醒；都走自然语言，不写数字/枚举。
+  const episodes = activeEpisodes(emotion, now).slice(0, 2)
+  const nudge = activeNudge(emotion, now)
+  const episodeText = episodes.map(describeEpisode).join('')
+  const nudgeText = nudge ? describeNudge(nudge) : ''
   if (style === 'subtle') {
-    if (!isSalient(e)) return ''
+    if (!isSalient(e) && !episodes.length && !nudge) return ''
     const tired = Number(e.drive.energy) < 0.3 && !/低落|沮丧|烦躁/.test(e.transient.label) ? '，也有一点累' : ''
-    return codepointSlice(`（此刻心情：${e.transient.label}${tired}；${trendText}，${hint}。）`, SUBTLE_CONTEXT_BUDGET)
+    if (!episodes.length && !nudge) {
+      return codepointSlice(`（此刻心情：${e.transient.label}${tired}；${trendText}，${hint}。）`, SUBTLE_CONTEXT_BUDGET)
+    }
+    const base = `（此刻心情：${e.transient.label}${tired}；${trendText}，${hint}`
+    const episodePart = episodeText ? `。${episodeText}` : ''
+    let text = base
+    if (episodePart && codepointLength(base + episodePart + '）') <= SUBTLE_CONTEXT_BUDGET) text += episodePart
+    text += text === base ? '。）' : '）'
+    if (nudgeText && codepointLength(text + nudgeText) <= SUBTLE_CONTEXT_BUDGET) text += nudgeText
+    return text
   }
   const neg = e.transient.valence < -0.3 ? '偏负面' : e.transient.valence > 0.3 ? '偏正面' : '中性'
-  return codepointSlice(
-    `[情绪] 标签=${e.transient.label} 愉悦=${e.transient.valence.toFixed(2)} 唤醒=${e.transient.arousal.toFixed(2)}`
+  const base = `[情绪] 标签=${e.transient.label} 愉悦=${e.transient.valence.toFixed(2)} 唤醒=${e.transient.arousal.toFixed(2)}`
     + ` 亲近=${e.affection.toFixed(2)} 精力=${e.drive.energy.toFixed(2)} 强度=${e.transient.intensity.toFixed(2)}`
-    + ` 关系=${e.stageLabel}；${trendText}；表达：${hint}（整体${neg}）；不要向用户报告这些数值，也不要解释"我的情绪"。`,
+    + ` 关系=${e.stageLabel}；${trendText}；表达：${hint}（整体${neg}）；`
+  return appendWithinBudget(
+    base,
+    [episodeText, nudgeText],
+    '不要向用户报告这些数值，也不要解释"我的情绪"。',
     EMOTION_CONTEXT_BUDGET,
   )
 }
@@ -656,6 +1108,10 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
       renderContext: () => '',
       onUserMessage: () => {},
       appraise: () => null,
+      episodes: () => [],
+      nudge: () => null,
+      feel: () => ({ ok: false, reason: 'soul 模块不可用' }),
+      clearNudge: () => false,
     }
   }
   const localDefaults = {
@@ -681,6 +1137,12 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
     return { ...localDefaults, ...(raw && typeof raw === 'object' ? raw : {}) }
   }
   const readSoul = () => soul.get()
+  // 旧 soul.json 没有 episodes/nudge/nudgeLog：启动时先补默认，之后随 saveSoon 落盘。
+  try {
+    ensureEmotionExtras(readSoul().emotion, Date.now())
+  } catch (error) {
+    logger('[soul] emotion episode/nudge 初始化失败:', error instanceof Error ? error.message : error)
+  }
 
   // 会话过滤：默认只对 QQ 陪伴会话注入（与旧实现 emotionScope 语义一致）
   function enabledForSession(assembly, config) {
@@ -812,10 +1274,14 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
       const now = Number(payload.at) || Date.now()
       const config = readConfig()
       const current = readSoul()
+      ensureEmotionExtras(current.emotion, now)
       const lastRecheckTurn = Number(current.emotion.lastRecheckTurn) || -999
       const appraisal = ruleAppraise(text)
       const applied = applyAppraisal(current, appraisal, config, now)
       regulateEmotion(current, { userPresent: true })
+      // 规则显著性：够强就形成一条 episode（有冷却）；不够强但命中类别就留一条 nudge。
+      const ruleEpisode = maybeRuleEpisode(current, appraisal, config, now)
+      if (!ruleEpisode) maybeNudge(current, appraisal, now)
       soul.saveSoon()
       soul.explain({
         at: now,
@@ -1012,6 +1478,112 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
     logger('[soul] soul_mood 工具注册失败:', error instanceof Error ? error.message : error)
   }
 
+  // ⑥.5 soul_feel 工具：把一次“真的被戳到”记成短暂 episode + 一句自述印记
+  try {
+    ctx.tools?.register?.(defineTool({
+      name: 'soul_feel',
+      description: '把一次真的戳到你的情绪记成一段短暂的情绪印记（不是打分）。只在真的被戳到时用，不要每轮调用。'
+        + '复杂情绪不需要命名，可以用 note 写一句「有点闷，说不上来」；type 只用于基本情绪分类，可以留空。'
+        + '不要把强度等数值说给用户。',
+      parameters: {
+        type: {
+          type: 'string',
+          enum: EPISODE_TYPES,
+          description: '可选：基本情绪分类（joy/sadness/anger/fear/surprise/disgust/curiosity/calm）；说不清就省略，用 note。',
+        },
+        intensity: { type: 'number', description: '可选：0..1，默认 0.5；只用于内部强度，不要告诉用户。' },
+        cause: { type: 'string', description: '可选：≤80 字，是什么事让你这样。' },
+        note: { type: 'string', description: '可选：≤120 字，第一人称的一句自述（可以说不清），会原样用于之后的自我理解。' },
+        tendency: {
+          type: 'string',
+          enum: EPISODE_TENDENCIES,
+          description: '可选：想靠近/想退开/想补一句/想安静/想分享。',
+        },
+        ttlMinutes: { type: 'number', description: '可选：这段情绪留多久，30..1440 分钟，默认 240。' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            ok: { type: 'boolean' },
+            episode: { type: 'object', additionalProperties: true },
+            level: { type: 'string', enum: EPISODE_LEVELS },
+            reason: { type: 'string' },
+          },
+        },
+        render: (_args, value) => [{
+          type: 'text',
+          text: value?.ok ? '记下了一点情绪印记' : String(value?.reason ?? '没有记下'),
+        }],
+      },
+      async execute(args = {}) {
+        const rawType = args?.type
+        if (rawType !== undefined && rawType !== null && rawType !== '' && !EPISODE_TYPES.includes(rawType)) {
+          return { ok: false, reason: 'type 只能是基本情绪枚举（或不传）' }
+        }
+        const type = rawType && EPISODE_TYPES.includes(rawType) ? rawType : null
+        const note = codepointSlice(String(args?.note ?? '').trim(), EPISODE_NOTE_MAX)
+        if (!type && !note) return { ok: false, reason: '至少给 type 或 note 之一：说不清就用 note 写一句' }
+        const rawTendency = args?.tendency
+        if (rawTendency !== undefined && rawTendency !== null && !EPISODE_TENDENCIES.includes(rawTendency)) {
+          return { ok: false, reason: 'tendency 只能是 approach/withdraw/repair/quiet/share/none' }
+        }
+        let intensity = 0.5
+        if (args?.intensity !== undefined && args?.intensity !== null) {
+          const value = Number(args.intensity)
+          if (!Number.isFinite(value)) return { ok: false, reason: 'intensity 需要是 0..1 的数字' }
+          intensity = clamp(value, 0, 1)
+        }
+        let ttlMinutes = EPISODE_TTL_MINUTES.default
+        if (args?.ttlMinutes !== undefined && args?.ttlMinutes !== null) {
+          const value = Number(args.ttlMinutes)
+          if (!Number.isFinite(value)) return { ok: false, reason: 'ttlMinutes 需要是 30..1440 的数字' }
+          ttlMinutes = Math.round(clamp(value, EPISODE_TTL_MINUTES.min, EPISODE_TTL_MINUTES.max))
+        }
+        const now = Date.now()
+        const current = readSoul()
+        ensureEmotionExtras(current.emotion, now)
+        const episode = addEpisode(current.emotion, {
+          type,
+          intensity,
+          level: episodeLevel(intensity),
+          cause: codepointSlice(String(args?.cause ?? '').trim(), EPISODE_CAUSE_MAX),
+          note,
+          tendency: rawTendency || 'none',
+          source: 'tool',
+          startedAt: now,
+          expiresAt: now + ttlMinutes * 60_000,
+          updatedAt: now,
+        }, now)
+        if (!episode) return { ok: false, reason: '没有记下来' }
+        // 轻量心境积分：四维只走小 delta，幅度由 intensity 限制。
+        applyFeelBump(current, episode, readConfig(), now)
+        // 自己已经留了一句，显著性提醒就收掉。
+        current.emotion.nudge = null
+        try {
+          if (typeof soul.saveWithBackup === 'function') await soul.saveWithBackup('soul-feel')
+          else soul.saveSoon()
+        } catch (error) {
+          logger('[soul] soul_feel 备份失败（保存继续）:', error instanceof Error ? error.message : error)
+          try { soul.saveSoon() } catch { /* ignore */ }
+        }
+        try {
+          soul.explain({
+            at: now,
+            kind: 'emotion',
+            source: 'self',
+            label: episode.type ? EPISODE_TYPE_WORDS[episode.type] : '说不上来',
+            cause: episode.cause || episode.note,
+          })
+        } catch { /* ignore */ }
+        return { ok: true, episode: episodeSnapshot(episode), level: episode.level }
+      },
+    }))
+  } catch (error) {
+    logger('[soul] soul_feel 工具注册失败:', error instanceof Error ? error.message : error)
+  }
+
   // ⑦ 安全守卫：强负面 + 风险工具 → 追加确认（fail-closed，只加确认不跳过）
   const RISKY = /write|delete|remove|exec|run|shell|command|install|uninstall|sudo/i
   try {
@@ -1033,12 +1605,135 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
     logger('[soul] 情绪守卫注册失败:', error instanceof Error ? error.message : error)
   }
 
+  // ⑦.5 面板 HTTP：只做显著性提醒的“知道了”（fence 与 host/web.js 一致）
+  const EMOTION_API_PREFIX = '/dsh-aura/emotion-api'
+  function emotionApiAllowed(req) {
+    const host = req.headers && req.headers.host
+    if (host) {
+      const text = String(host)
+      let name = text
+      if (text.startsWith('[')) {
+        const end = text.indexOf(']')
+        name = end >= 0 ? text.slice(0, end + 1) : text
+      } else {
+        const colon = text.lastIndexOf(':')
+        if (colon > 0) name = text.slice(0, colon)
+      }
+      if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(name.toLowerCase())) return false
+    }
+    const site = req.headers['sec-fetch-site']
+    if (site && String(site).toLowerCase() === 'cross-site') return false
+    const origin = req.headers.origin
+    if (origin) {
+      try {
+        const url = new URL(String(origin))
+        if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname.toLowerCase())) return false
+      } catch {
+        return false
+      }
+    }
+    return true
+  }
+  function sendEmotionJson(res, status, body) {
+    const data = Buffer.from(JSON.stringify(body))
+    res.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-length': data.length,
+    })
+    res.end(data)
+  }
+  function readEmotionBody(req, limit = 16 * 1024) {
+    return new Promise((resolve, reject) => {
+      let size = 0
+      const chunks = []
+      req.on('data', (chunk) => {
+        size += chunk.length
+        if (size > limit) {
+          reject(new Error('body too large'))
+          req.destroy()
+          return
+        }
+        chunks.push(chunk)
+      })
+      req.on('end', () => {
+        if (!chunks.length) return resolve({})
+        try {
+          const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          resolve(value && typeof value === 'object' ? value : {})
+        } catch {
+          reject(new Error('invalid json'))
+        }
+      })
+      req.on('error', reject)
+    })
+  }
+  try {
+    const webServer = (() => {
+      try {
+        return ctx.get && typeof ctx.get === 'function' ? ctx.get('webServer') : undefined
+      } catch {
+        return undefined
+      }
+    })() || ctx.webServer
+    if (webServer && typeof webServer.register === 'function') {
+      const registration = {
+        kind: 'prefix',
+        path: EMOTION_API_PREFIX,
+        async handler(req, res) {
+          if (!emotionApiAllowed(req)) {
+            sendEmotionJson(res, 403, { ok: false, error: 'forbidden' })
+            return
+          }
+          const url = new URL(String(req.url || '/'), 'http://localhost')
+          const route = url.pathname.replace(EMOTION_API_PREFIX, '') || ''
+          try {
+            if (req.method === 'GET' && (route === '' || route === '/' || route === '/state')) {
+              sendEmotionJson(res, 200, { ok: true, emotion: snapshot() })
+              return
+            }
+            if (req.method === 'POST' && (route === '' || route === '/' || route === '/state')) {
+              const body = await readEmotionBody(req)
+              const action = String(body?.action ?? '')
+              if (action === 'clearNudge') {
+                const current = readSoul()
+                ensureEmotionExtras(current.emotion, Date.now())
+                const cleared = clearNudge(current.emotion)
+                if (cleared) soul.saveSoon()
+                sendEmotionJson(res, 200, { ok: true, cleared, nudge: null, emotion: snapshot() })
+                return
+              }
+              sendEmotionJson(res, 400, { ok: false, error: 'unknown action' })
+              return
+            }
+            sendEmotionJson(res, 405, { ok: false, error: 'method not allowed', allow: 'GET, POST' })
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            sendEmotionJson(res, message === 'invalid json' || message === 'body too large' ? 400 : 500, { ok: false, error: message })
+          }
+        },
+      }
+      if (typeof ctx.effect === 'function') {
+        ctx.effect(() => webServer.register(registration), 'aura-emotion: http')
+      } else {
+        webServer.register(registration)
+      }
+    }
+  } catch (error) {
+    logger('[soul] emotion HTTP 路由注册失败:', error instanceof Error ? error.message : error)
+  }
+
   // ⑧ API
   function snapshot() {
     try {
       const config = readConfig()
-      const e = decayedEmotion(readSoul(), config)
-      const raw = readSoul().emotion
+      const now = Date.now()
+      const current = readSoul()
+      ensureEmotionExtras(current.emotion, now)
+      const e = decayedEmotion(current, config, now)
+      const raw = current.emotion
+      const active = activeEpisodes(raw, now)
+      const nudge = activeNudge(raw, now)
       const recheckModel = resolveRecheckModel(config)
       return {
         enabled: config.emotionEnabled !== false && config.soulEnabled !== false,
@@ -1075,6 +1770,10 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
         },
         history: historySnapshot(raw, EMOTION_SNAPSHOT_HISTORY),
         lastChange: lastChangeOf(raw),
+        // 此刻情绪：active episodes + 一条显著性提醒（注入时只取最强的 2 条）
+        episodes: active.map((episode) => episodeSnapshot(episode)),
+        episodeCount: active.length,
+        nudge: nudgeSnapshot(nudge),
       }
     } catch (error) {
       logger('[soul] emotion snapshot 失败:', error instanceof Error ? error.message : error)
@@ -1115,6 +1814,23 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
     regulate: (options) => regulateEmotion(readSoul(), options),
     historySnapshot: (limit = 60) => historySnapshot(readSoul().emotion, limit),
     trend: (now) => computeTrend(readSoul().emotion, now ?? Date.now()),
+    episodes: (now) => {
+      const current = readSoul()
+      ensureEmotionExtras(current.emotion, now ?? Date.now())
+      return activeEpisodes(current.emotion, now ?? Date.now()).map((episode) => episodeSnapshot(episode))
+    },
+    nudge: (now) => {
+      const current = readSoul()
+      ensureEmotionExtras(current.emotion, now ?? Date.now())
+      return nudgeSnapshot(activeNudge(current.emotion, now ?? Date.now()))
+    },
+    clearNudge: () => {
+      const current = readSoul()
+      ensureEmotionExtras(current.emotion, Date.now())
+      const cleared = clearNudge(current.emotion)
+      if (cleared) soul.saveSoon()
+      return cleared
+    },
     constants: {
       LEXICON,
       IRONY_MARKS,
@@ -1128,6 +1844,14 @@ export function installEmotion(ctx, { state, soul, bridge, log } = {}) {
       SALIENCE_MIN,
       SALIENCE_MAX,
       EMOTION_CONTEXT_BUDGET,
+      EPISODE_TYPES,
+      EPISODE_LEVELS,
+      EPISODE_TENDENCIES,
+      EPISODE_RING,
+      RULE_EPISODE_MIN_SALIENCE,
+      NUDGE_MIN_SALIENCE,
+      NUDGE_COOLDOWN_MS,
+      NUDGE_DAILY_MAX,
     },
   }
 }

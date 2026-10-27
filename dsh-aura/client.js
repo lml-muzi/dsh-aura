@@ -347,6 +347,30 @@ window.__ModuleLoader__.load({
       'emotion.chart.empty': '历史还不够，聊几句就有曲线了',
       'emotion.chart.valence': '愉悦',
       'emotion.chart.affection': '亲近',
+      'emotion.now.title': '此刻情绪',
+      'emotion.now.empty': '现在没有特别挂着的情绪',
+      'emotion.now.remaining': '{minutes} 分钟后散去',
+      'emotion.level.light': '轻',
+      'emotion.level.medium': '中',
+      'emotion.level.heavy': '重',
+      'emotion.type.joy': '开心',
+      'emotion.type.sadness': '难过',
+      'emotion.type.anger': '生气',
+      'emotion.type.fear': '害怕',
+      'emotion.type.surprise': '惊讶',
+      'emotion.type.disgust': '别扭',
+      'emotion.type.curiosity': '好奇',
+      'emotion.type.calm': '平静',
+      'emotion.type.none': '说不上来',
+      'emotion.tendency.approach': '想靠近',
+      'emotion.tendency.withdraw': '想退开',
+      'emotion.tendency.repair': '想补一句',
+      'emotion.tendency.quiet': '想安静',
+      'emotion.tendency.share': '想分享',
+      'emotion.nudge.title': '刚才那句',
+      'emotion.nudge.clear': '知道了',
+      'emotion.nudge.busy': '收起来…',
+      'emotion.nudge.error': '收起失败，稍后再试',
       'button.emotionSave': '保存情绪设置',
       'notice.emotionSaved': '情绪设置已保存',
       'section.relation': '关系',
@@ -632,6 +656,30 @@ window.__ModuleLoader__.load({
       'emotion.chart.empty': 'Not enough history yet; chat a bit and the curve shows up',
       'emotion.chart.valence': 'Pleasure',
       'emotion.chart.affection': 'Closeness',
+      'emotion.now.title': 'Right now',
+      'emotion.now.empty': 'Nothing in particular is hanging on right now',
+      'emotion.now.remaining': 'fades in {minutes} min',
+      'emotion.level.light': 'light',
+      'emotion.level.medium': 'medium',
+      'emotion.level.heavy': 'heavy',
+      'emotion.type.joy': 'joy',
+      'emotion.type.sadness': 'sadness',
+      'emotion.type.anger': 'anger',
+      'emotion.type.fear': 'fear',
+      'emotion.type.surprise': 'surprise',
+      'emotion.type.disgust': 'discomfort',
+      'emotion.type.curiosity': 'curiosity',
+      'emotion.type.calm': 'calm',
+      'emotion.type.none': 'unsure',
+      'emotion.tendency.approach': 'want to come closer',
+      'emotion.tendency.withdraw': 'want to step back',
+      'emotion.tendency.repair': 'want to make it right',
+      'emotion.tendency.quiet': 'want quiet',
+      'emotion.tendency.share': 'want to share',
+      'emotion.nudge.title': 'That last line',
+      'emotion.nudge.clear': 'Got it',
+      'emotion.nudge.busy': 'Dismissing…',
+      'emotion.nudge.error': 'Could not dismiss it; try again',
       'button.emotionSave': 'Save emotion settings',
       'notice.emotionSaved': 'Emotion settings saved',
       'section.relation': 'Relationship',
@@ -878,6 +926,27 @@ window.__ModuleLoader__.load({
 .aura-emotion-swatch{display:inline-block;width:10px;height:2px;margin-right:5px;vertical-align:middle}
 .aura-emotion-swatch-valence{background:var(--dsw-alias-state-business-primary)}
 .aura-emotion-swatch-affection{background:var(--dsw-alias-state-success-primary)}
+.aura-emotion-now{display:flex;flex-direction:column;gap:9px;padding:2px 0 14px;border-bottom:.5px solid var(--dsw-alias-border-l3);margin-bottom:4px}
+.aura-emotion-now-title{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600;line-height:18px}
+.aura-emotion-episode-list{display:flex;flex-direction:column;gap:8px}
+.aura-emotion-episode{padding:9px 11px;border-radius:10px;background:var(--dsw-specific-sidebar-fill);display:flex;flex-direction:column;gap:3px}
+.aura-emotion-episode-head{display:flex;flex-wrap:wrap;align-items:center;gap:7px}
+.aura-emotion-episode-type{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600;line-height:17px}
+.aura-emotion-level{display:inline-flex;align-items:center;height:18px;padding:0 7px;border-radius:9px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px}
+.aura-emotion-level-heavy{color:var(--dsw-alias-state-error-primary)}
+.aura-emotion-level-medium{color:var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-secondary))}
+.aura-emotion-episode-time{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px;font-variant-numeric:tabular-nums}
+.aura-emotion-episode-cause{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.aura-emotion-episode-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.aura-emotion-episode-tendency{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.aura-emotion-nudge{padding:9px 11px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l3);display:flex;flex-direction:column;gap:6px}
+.aura-emotion-nudge-head{display:flex;align-items:center;gap:8px}
+.aura-emotion-nudge-title{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600;line-height:17px}
+.aura-emotion-nudge-error{margin-left:auto;color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:16px}
+.aura-emotion-nudge-reason{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.aura-emotion-nudge-tags{display:flex;flex-wrap:wrap;gap:5px}
+.aura-emotion-nudge-tag{display:inline-flex;align-items:center;height:18px;padding:0 7px;border-radius:9px;background:var(--dsw-specific-sidebar-fill);color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px}
+.aura-emotion-nudge-actions{display:flex;justify-content:flex-end}
 .qqn-session{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:56px;padding:10px 0;border-bottom:.5px solid var(--dsw-alias-border-l3)}
 .qqn-rows>.qqn-session:last-child{border-bottom:0}
 .qqn-session-left{display:flex;flex-direction:column;gap:2px;min-width:0}
@@ -1470,6 +1539,9 @@ ${TRAIL_CSS}
     /* ---------------- 灵魂层：数据读取与表单（全部防御式） ---------------- */
     const SOUL_STAGES = ['stranger', 'familiar', 'close', 'intimate']
     const EXPRESSION_STYLES = ['subtle', 'explicit', 'off']
+    const EMOTION_TYPES = ['joy', 'sadness', 'anger', 'fear', 'surprise', 'disgust', 'curiosity', 'calm']
+    const EMOTION_LEVELS = ['light', 'medium', 'heavy']
+    const EPISODE_TENDENCIES = ['approach', 'withdraw', 'repair', 'quiet', 'share', 'none']
 
     /** growth.kind 的中文徽标映射（Host 只读快照；本轮不提供编辑）。 */
     const GROWTH_KIND_LABELS = {
@@ -1625,6 +1697,45 @@ ${TRAIL_CSS}
           }
         })
         .filter(row => row.at > 0 && Number.isFinite(row.valence) && Number.isFinite(row.affection))
+    }
+
+    /** 此刻情绪：Host 只给 active episodes；旧 Host 缺字段时返回空数组。 */
+    function emotionEpisodeRows(value, now = Date.now()) {
+      return asArray(value)
+        .map((row, index) => {
+          const source = asObject(row)
+          const intensity = Number(source.intensity)
+          const expiresAt = timeOf(source.expiresAt)
+          if (expiresAt > 0 && expiresAt <= now) return null
+          const level = EMOTION_LEVELS.includes(source.level)
+            ? source.level
+            : (!Number.isFinite(intensity) ? 'light' : intensity < 0.34 ? 'light' : intensity < 0.67 ? 'medium' : 'heavy')
+          return {
+            key: String(source.id || '') || ('episode-' + index + '-' + String(source.startedAt || '')),
+            id: String(source.id || ''),
+            type: EMOTION_TYPES.includes(source.type) ? source.type : '',
+            intensity: Number.isFinite(intensity) ? Math.max(0, Math.min(1, intensity)) : 0.5,
+            level,
+            cause: typeof source.cause === 'string' ? source.cause : '',
+            note: typeof source.note === 'string' ? source.note : '',
+            tendency: EPISODE_TENDENCIES.includes(source.tendency) ? source.tendency : 'none',
+            startedAt: timeOf(source.startedAt),
+            expiresAt,
+          }
+        })
+        .filter(Boolean)
+    }
+
+    /** 显著性提醒：过期或空对象都当作没有。 */
+    function emotionNudgeInfo(value, now = Date.now()) {
+      if (!value || typeof value !== 'object') return null
+      const source = asObject(value)
+      const expiresAt = timeOf(source.expiresAt)
+      if (expiresAt > 0 && expiresAt <= now) return null
+      const tags = asArray(source.tags).map(tag => String(tag || '').trim()).filter(Boolean).slice(0, 6)
+      const reasons = typeof source.reasons === 'string' ? source.reasons : ''
+      if (!tags.length && !reasons) return null
+      return { tags, reasons, at: timeOf(source.at), expiresAt }
     }
 
     /** 趋势徽标数据：宿主没给 trend（旧 Host）时返回 null。 */
@@ -2101,6 +2212,8 @@ ${TRAIL_CSS}
       const [soulBaseline, setSoulBaseline] = React.useState(() => buildSoulForm({}))
       const [emotionForm, setEmotionForm] = React.useState(() => buildEmotionForm({}))
       const [emotionBaseline, setEmotionBaseline] = React.useState(() => buildEmotionForm({}))
+      const [nudgeBusy, setNudgeBusy] = React.useState(false)
+      const [nudgeError, setNudgeError] = React.useState('')
       const [speakForm, setSpeakForm] = React.useState(() => buildSpeakForm({}))
       const [speakBaseline, setSpeakBaseline] = React.useState(() => buildSpeakForm({}))
       const [memoryForm, setMemoryForm] = React.useState(() => buildMemoryForm({}))
@@ -2425,6 +2538,33 @@ ${TRAIL_CSS}
           if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
         }
       }, [load])
+
+      /** 收掉显著性提醒（POST /dsh-aura/emotion-api）。 */
+      const clearEmotionNudge = React.useCallback(async () => {
+        if (nudgeBusy) return
+        setNudgeBusy(true)
+        setNudgeError('')
+        try {
+          const response = await fetch('/dsh-aura/emotion-api', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'clearNudge' }),
+          })
+          const value = await response.json().catch(() => ({}))
+          if (!response.ok || value.ok === false) throw new Error(value.error || ('HTTP ' + response.status))
+          setSnap(previous => {
+            if (!previous) return previous
+            const soul = asObject(previous.soul)
+            const emotion = asObject(soul.emotion)
+            return { ...previous, soul: { ...soul, emotion: { ...emotion, nudge: null } } }
+          })
+          void load(false)
+        } catch (error) {
+          setNudgeError(error instanceof Error ? error.message : String(error))
+        } finally {
+          setNudgeBusy(false)
+        }
+      }, [nudgeBusy, load])
 
       /* ---------------- 表情包 / 人设：加载与操作 ---------------- */
       const flashMeme = React.useCallback(text => {
@@ -3760,6 +3900,15 @@ ${TRAIL_CSS}
             at: timeOf(soulEmotion.updatedAt),
             text: typeof soulEmotion.cause === 'string' ? soulEmotion.cause : '',
           }
+      /* ---- 此刻情绪：active episodes + 显著性提醒（旧 Host 缺字段时降级为空态） ---- */
+      const emotionNow = Date.now()
+      const emotionEpisodes = emotionEpisodeRows(soulEmotion.episodes, emotionNow).slice(0, 6)
+      const emotionNudge = emotionNudgeInfo(soulEmotion.nudge, emotionNow)
+      const emotionTypeLabel = type => (EMOTION_TYPES.includes(type) ? t('emotion.type.' + type) : t('emotion.type.none'))
+      const emotionRemaining = expiresAt => {
+        const minutes = Math.max(0, Math.ceil((Number(expiresAt) - emotionNow) / 60000))
+        return t('emotion.now.remaining', { minutes })
+      }
       const memory = asObject(soulData.memory)
       const memoryEvents = rowsNewest(memory.events, 'at').slice(0, 10).map(row => ({
         at: timeOf(asObject(row).at || asObject(row).createdAt),
@@ -4184,7 +4333,51 @@ ${TRAIL_CSS}
         ),
       )
 
+      const emotionNowCard = h('div', { className: 'aura-emotion-now' },
+        h('div', { className: 'aura-emotion-now-title' }, t('emotion.now.title')),
+        emotionEpisodes.length
+          ? h('div', { className: 'aura-emotion-episode-list' },
+              emotionEpisodes.map(episode => h('div', { key: episode.key, className: 'aura-emotion-episode' },
+                h('div', { className: 'aura-emotion-episode-head' },
+                  h('span', { className: 'aura-emotion-episode-type' }, emotionTypeLabel(episode.type)),
+                  h('span', { className: 'aura-emotion-level aura-emotion-level-' + episode.level }, t('emotion.level.' + episode.level)),
+                  episode.expiresAt
+                    ? h('span', { className: 'aura-emotion-episode-time' }, emotionRemaining(episode.expiresAt))
+                    : null,
+                ),
+                episode.cause ? h('div', { className: 'aura-emotion-episode-cause' }, episode.cause) : null,
+                episode.note ? h('div', { className: 'aura-emotion-episode-note' }, episode.note) : null,
+                episode.tendency !== 'none'
+                  ? h('div', { className: 'aura-emotion-episode-tendency' }, t('emotion.tendency.' + episode.tendency))
+                  : null,
+              )),
+            )
+          : h('div', { className: 'qqn-mood-empty' }, t('emotion.now.empty')),
+        emotionNudge
+          ? h('div', { className: 'aura-emotion-nudge' },
+              h('div', { className: 'aura-emotion-nudge-head' },
+                h('span', { className: 'aura-emotion-nudge-title' }, t('emotion.nudge.title')),
+                nudgeError ? h('span', { className: 'aura-emotion-nudge-error' }, nudgeError || t('emotion.nudge.error')) : null,
+              ),
+              emotionNudge.reasons ? h('div', { className: 'aura-emotion-nudge-reason' }, emotionNudge.reasons) : null,
+              emotionNudge.tags.length
+                ? h('div', { className: 'aura-emotion-nudge-tags' },
+                    emotionNudge.tags.map(tag => h('span', { key: tag, className: 'aura-emotion-nudge-tag' }, tag)),
+                  )
+                : null,
+              h('div', { className: 'aura-emotion-nudge-actions' },
+                h(Button, {
+                  variant: 'quiet',
+                  disabled: nudgeBusy,
+                  onClick: () => { void clearEmotionNudge() },
+                }, nudgeBusy ? t('emotion.nudge.busy') : t('emotion.nudge.clear')),
+              ),
+            )
+          : null,
+      )
+
       const emotionSection = h(Section, { title: t('section.emotion') },
+        emotionNowCard,
         h('div', { className: 'qqn-rows' },
           h('div', { className: 'qqn-mood' },
             moodKeys.map(key => h('div', { key },

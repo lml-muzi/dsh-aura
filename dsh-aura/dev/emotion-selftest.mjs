@@ -11,6 +11,7 @@
  *   context 文案长度与预算（explicit / subtle / off），趋势句 ≤40 字且不含数值。
  */
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -34,15 +35,36 @@ const {
   SALIENCE_MIN,
   SUBTLE_CONTEXT_BUDGET,
   TREND_THRESHOLD,
+  EPISODE_LEVELS,
+  EPISODE_RING,
+  EPISODE_TYPES,
+  NUDGE_COOLDOWN_MS,
+  NUDGE_DAILY_MAX,
+  NUDGE_MIN_SALIENCE,
+  RULE_EPISODE_COOLDOWN_MS,
+  RULE_EPISODE_MIN_SALIENCE,
+  activeEpisodes,
+  activeNudge,
+  addEpisode,
   applyAppraisal,
   baselineOf,
+  clearNudge,
   computeTrend,
   decayedEmotion,
   defaultBaseline,
+  describeEpisode,
+  describeNudge,
   describeTrend,
+  ensureEmotionExtras,
+  episodeHintOf,
+  episodeLevel,
   historySnapshot,
   installEmotion,
   lastChangeOf,
+  maybeNudge,
+  maybeRuleEpisode,
+  normalizeEmotionEpisodes,
+  normalizeEmotionNudge,
   pushHistory,
   renderEmotionContext,
   ruleAppraise,
@@ -135,11 +157,18 @@ function makeFakeCtx() {
 }
 
 /** 假 soul 容器：只实现 emotion.js 用到的那几个方法。 */
-function makeSoulContainer(initial) {
+function makeSoulContainer(initial, options = {}) {
   const state = { soul: initial ?? defaultsSoul() }
+  const records = { backups: [], saveSoon: 0 }
   return {
+    records,
     get: () => state.soul,
-    saveSoon: () => {},
+    saveSoon: () => { records.saveSoon += 1 },
+    async saveWithBackup(reason) {
+      records.backups.push(String(reason || ''))
+      if (options.backupThrows) throw new Error('backup failed')
+      return { ok: true }
+    },
     on: () => () => {},
     explain: () => {},
     snapshot: () => ({}),
@@ -543,6 +572,390 @@ await test('off / soulEnabled=false 时注入为空串', () => {
   assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'off' }), '')
   assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'explicit', soulEnabled: false }), '')
   assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'explicit', emotionEnabled: false }), '')
+})
+
+// ---------- 8. episode 数据 / normalize / ring ----------
+section('8. episode：normalize 旧文件、字段夹取、过期忽略、ring 60')
+
+await test('旧 soul.json 没有 episodes/nudge：ensureEmotionExtras 补默认空数组/null', () => {
+  const old = normalizeSoul({ v: 2, emotion: { transient: { valence: 0.2 } } })
+  assert.equal(old.emotion.episodes, undefined, 'soul.js 不管新字段，emotion 层负责补')
+  const emotion = ensureEmotionExtras(old.emotion, Date.now())
+  assert.deepEqual(emotion.episodes, [])
+  assert.equal(emotion.nudge, null)
+  assert.deepEqual(emotion.nudgeLog, [])
+})
+
+await test('normalizeEmotionEpisodes：坏条丢弃、type 非法变 null、长度/枚举夹取', () => {
+  const now = Date.now()
+  const emotion = {
+    episodes: [
+      null,
+      { broken: true },
+      {
+        id: 'keep-me',
+        type: 'joy',
+        intensity: 9,
+        level: 'nope',
+        cause: 'c'.repeat(200),
+        note: 'n'.repeat(200),
+        tendency: 'weird',
+        source: 'weird',
+        startedAt: now - 1000,
+        expiresAt: now + 1000,
+      },
+      { type: 'not-a-type', intensity: -3, cause: '旧事', startedAt: now },
+    ],
+  }
+  const list = normalizeEmotionEpisodes(emotion, now)
+  assert.equal(list.length, 2)
+  assert.equal(list[0].id, 'keep-me')
+  assert.equal(list[0].type, 'joy')
+  assert.equal(list[0].intensity, 1)
+  assert.equal(list[0].level, 'heavy')
+  assert.equal(lengthOf(list[0].cause), 80)
+  assert.equal(lengthOf(list[0].note), 120)
+  assert.equal(list[0].tendency, 'none')
+  assert.equal(list[0].source, 'rule')
+  assert.equal(list[1].type, null)
+  assert.equal(list[1].intensity, 0)
+  assert.equal(list[1].level, 'light')
+  assert.ok(list.every((item) => EPISODE_TYPES.includes(item.type) || item.type === null))
+  assert.ok(list.every((item) => EPISODE_LEVELS.includes(item.level)))
+})
+
+await test('episode ring：65 条只留最近 60，丢的是最旧', () => {
+  const now = Date.now()
+  const emotion = { episodes: [] }
+  for (let i = 0; i < 65; i += 1) {
+    addEpisode(emotion, {
+      type: 'calm', intensity: 0.2, cause: 'c' + i, source: 'tool',
+      startedAt: now + i, expiresAt: now + i + HOUR, updatedAt: now + i,
+    }, now + i)
+  }
+  assert.equal(emotion.episodes.length, EPISODE_RING)
+  assert.equal(emotion.episodes[0].cause, 'c5')
+  assert.equal(emotion.episodes[emotion.episodes.length - 1].cause, 'c64')
+})
+
+await test('过期 episode：activeEpisodes 忽略，但条目留在 ring 里直到被裁', () => {
+  const now = Date.now()
+  const emotion = { episodes: [] }
+  addEpisode(emotion, { type: 'sadness', intensity: 0.4, cause: '过期', startedAt: now - HOUR, expiresAt: now - 1 }, now)
+  addEpisode(emotion, { type: 'joy', intensity: 0.6, cause: '还在', startedAt: now - 1000, expiresAt: now + HOUR }, now)
+  assert.equal(emotion.episodes.length, 2)
+  const active = activeEpisodes(emotion, now)
+  assert.equal(active.length, 1)
+  assert.equal(active[0].cause, '还在')
+})
+
+await test('level 阈值：<0.34 轻、<0.67 中、其余重', () => {
+  assert.equal(episodeLevel(0), 'light')
+  assert.equal(episodeLevel(0.339), 'light')
+  assert.equal(episodeLevel(0.34), 'medium')
+  assert.equal(episodeLevel(0.669), 'medium')
+  assert.equal(episodeLevel(0.67), 'heavy')
+  assert.equal(episodeLevel(1), 'heavy')
+})
+
+await test('activeEpisodes 排序：强度高的在前，同强度新的在前', () => {
+  const now = Date.now()
+  const emotion = { episodes: [] }
+  addEpisode(emotion, { type: 'joy', intensity: 0.2, cause: '低', startedAt: now - 5000, expiresAt: now + HOUR }, now)
+  addEpisode(emotion, { type: 'anger', intensity: 0.8, cause: '高1', startedAt: now - 4000, expiresAt: now + HOUR }, now)
+  addEpisode(emotion, { type: 'fear', intensity: 0.8, cause: '高2', startedAt: now - 1000, expiresAt: now + HOUR }, now)
+  assert.deepEqual(activeEpisodes(emotion, now).map((item) => item.cause), ['高2', '高1', '低'])
+})
+
+// ---------- 9. soul_feel ----------
+section('9. soul_feel：参数校验、写入、备份、心境幅度上限、清 nudge')
+
+const feelCtxBundle = makeFakeCtx()
+const feelSoul = makeSoulContainer(defaultsSoul())
+const feelApi = installEmotion(feelCtxBundle.ctx, {
+  state: { readConfig: () => CONFIG },
+  soul: feelSoul,
+  log: () => {},
+})
+const feelTool = feelCtxBundle.tools.find((tool) => tool.name === 'soul_feel')
+
+await test('soul_feel 已注册，output 带 schema/render', () => {
+  assert.ok(feelTool, 'soul_feel 没注册')
+  assert.ok(feelTool.output && feelTool.output.schema && typeof feelTool.output.render === 'function')
+  const text = feelTool.output.render({}, { ok: false, reason: 'x' })[0]
+  assert.ok(text && text.type === 'text')
+})
+
+await test('soul_feel：至少 type 或 note 之一；非法枚举/数值由 schema 拒绝', async () => {
+  const empty = await feelTool.execute({})
+  assert.equal(empty.ok, false, '空参数在 execute 里被拒绝')
+  await assert.rejects(async () => { await feelTool.execute({ type: 'not-a-type', note: '说不上来' }) }, /invalid arguments|must be one of/)
+  await assert.rejects(async () => { await feelTool.execute({ note: '说不上来', tendency: 'weird' }) }, /invalid arguments|must be one of/)
+  await assert.rejects(async () => { await feelTool.execute({ note: '说不上来', intensity: 'hot' }) }, /invalid arguments|must be/)
+  await assert.rejects(async () => { await feelTool.execute({ note: '说不上来', ttlMinutes: 'long' }) }, /invalid arguments|must be/)
+})
+
+await test('soul_feel 写 episode（note-only 合法）+ ttl 下限 + saveWithBackup(soul-feel)', async () => {
+  const current = feelSoul.get()
+  current.emotion.nudge = { tags: ['旧'], reasons: '旧提醒', at: Date.now(), expiresAt: Date.now() + HOUR }
+  const result = await feelTool.execute({ note: '有点闷，说不上来', ttlMinutes: 5 })
+  assert.equal(result.ok, true)
+  assert.equal(result.episode.type, null)
+  assert.equal(result.episode.note, '有点闷，说不上来')
+  assert.equal(result.episode.level, 'medium')
+  assert.equal(result.episode.source, 'tool')
+  assert.equal(result.episode.expiresAt - result.episode.startedAt, 30 * 60_000)
+  assert.deepEqual(feelSoul.records.backups, ['soul-feel'])
+  assert.equal(current.emotion.nudge, null, 'soul_feel 写入后清 nudge')
+  assert.ok(feelApi.snapshot().episodes.some((item) => item.note === '有点闷，说不上来'))
+})
+
+await test('soul_feel 心境幅度上限：intensity=1 时四维小 delta（受 intensity 限制）', async () => {
+  const current = feelSoul.get()
+  const before = {
+    valence: Number(current.emotion.transient.valence) || 0,
+    arousal: Number(current.emotion.transient.arousal) || 0.2,
+    affection: Number(current.emotion.affection) || 0.5,
+    energy: Number(current.emotion.drive.energy) || 0.7,
+  }
+  const result = await feelTool.execute({ type: 'anger', intensity: 1, cause: '被否定' })
+  assert.equal(result.ok, true)
+  assert.equal(result.level, 'heavy')
+  assert.ok(Math.abs(current.emotion.transient.valence - before.valence) <= 0.15 + 1e-9)
+  assert.ok(Math.abs(current.emotion.transient.arousal - before.arousal) <= 0.15 + 1e-9)
+  assert.ok(Math.abs(current.emotion.affection - before.affection) <= 0.05 + 1e-9)
+  assert.ok(Math.abs(current.emotion.drive.energy - before.energy) <= 0.06 + 1e-9)
+})
+
+await test('soul_feel ttl 上限 1440 分钟；备份失败仍 ok 且继续 saveSoon', async () => {
+  const maxTtl = await feelTool.execute({ type: 'calm', ttlMinutes: 99999 })
+  assert.equal(maxTtl.ok, true)
+  assert.equal(maxTtl.episode.expiresAt - maxTtl.episode.startedAt, 1440 * 60_000)
+
+  const failCtxBundle = makeFakeCtx()
+  const failSoul = makeSoulContainer(defaultsSoul(), { backupThrows: true })
+  installEmotion(failCtxBundle.ctx, { state: { readConfig: () => CONFIG }, soul: failSoul, log: () => {} })
+  const failTool = failCtxBundle.tools.find((tool) => tool.name === 'soul_feel')
+  const result = await failTool.execute({ note: '说不上来' })
+  assert.equal(result.ok, true, '备份失败只 warn，不阻止写入')
+  assert.deepEqual(failSoul.records.backups, ['soul-feel'])
+  assert.ok(failSoul.records.saveSoon >= 1, '备份失败后仍然 saveSoon')
+})
+
+// ---------- 10. 规则 episode / nudge ----------
+section('10. 显著性：规则 episode 冷却、nudge 触发/冷却/每日上限/清除')
+
+await test('规则强度够 → source=rule episode；2 小时内不重复形成', () => {
+  const now = Date.now()
+  const soul = defaultsSoul()
+  ensureEmotionExtras(soul.emotion, now)
+  const appraisal = ruleAppraise('对不起，是我不好，我错了')
+  const first = maybeRuleEpisode(soul, appraisal, CONFIG, now)
+  assert.ok(first)
+  assert.equal(first.source, 'rule')
+  assert.equal(first.type, 'sadness')
+  assert.equal(maybeRuleEpisode(soul, appraisal, CONFIG, now + 60_000), null)
+  assert.ok(maybeRuleEpisode(soul, appraisal, CONFIG, now + RULE_EPISODE_COOLDOWN_MS + 1))
+})
+
+await test('形成同类 episode 后清掉 nudge；普通寒暄/夸奖不触发 nudge', () => {
+  const now = Date.now()
+  const soul = defaultsSoul()
+  ensureEmotionExtras(soul.emotion, now)
+  soul.emotion.nudge = { tags: ['摩擦', '对不起'], reasons: '像是有摩擦', at: now, expiresAt: now + HOUR }
+  const episode = maybeRuleEpisode(soul, ruleAppraise('对不起，我错了'), CONFIG, now)
+  assert.ok(episode)
+  assert.equal(soul.emotion.nudge, null)
+
+  const quiet = defaultsSoul()
+  ensureEmotionExtras(quiet.emotion, now)
+  assert.equal(maybeNudge(quiet, ruleAppraise('你好厉害'), now), null)
+  assert.equal(maybeNudge(quiet, ruleAppraise('嗯'), now), null)
+  assert.equal(maybeNudge(quiet, ruleAppraise('今天下午开了个会'), now), null)
+})
+
+await test('nudge：低强度命中类别时触发，2 小时冷却、每天最多 3 条', () => {
+  const noon = new Date()
+  noon.setHours(12, 0, 0, 0)
+  const now = noon.getTime()
+  const soul = defaultsSoul()
+  ensureEmotionExtras(soul.emotion, now)
+  const appraisal = ruleAppraise('上次那件事我还记得，有点难过')
+  assert.ok(appraisal.salience >= NUDGE_MIN_SALIENCE)
+  assert.ok(appraisal.salience < RULE_EPISODE_MIN_SALIENCE)
+  const first = maybeNudge(soul, appraisal, now)
+  assert.ok(first)
+  assert.ok(first.tags.includes('对方难过'))
+  assert.equal(first.expiresAt - first.at, NUDGE_COOLDOWN_MS)
+  assert.equal(maybeNudge(soul, appraisal, now + HOUR), null, '2 小时内不再提醒')
+  const second = maybeNudge(soul, appraisal, now + NUDGE_COOLDOWN_MS + 1)
+  assert.ok(second)
+  const third = maybeNudge(soul, appraisal, now + NUDGE_COOLDOWN_MS * 2 + 2)
+  assert.ok(third)
+  assert.equal(maybeNudge(soul, appraisal, now + NUDGE_COOLDOWN_MS * 3 + 3), null, '当天第 4 条被日上限挡住')
+  assert.ok(NUDGE_DAILY_MAX === 3)
+})
+
+await test('onUserMessage 接入规则：低强度命中写入 nudge，clearNudge 清掉', () => {
+  const now = Date.now()
+  const bundle = makeFakeCtx()
+  const soul = makeSoulContainer(defaultsSoul())
+  const api = installEmotion(bundle.ctx, { state: { readConfig: () => CONFIG }, soul, log: () => {} })
+  api.onUserMessage({ text: '上次那件事我还记得，有点难过', at: now })
+  const nudge = activeNudge(soul.get().emotion, now)
+  assert.ok(nudge, 'onUserMessage 应留下 nudge')
+  assert.ok(nudge.tags.includes('对方难过'))
+  assert.equal(api.clearNudge(), true)
+  assert.equal(activeNudge(soul.get().emotion, now), null)
+  api.onUserMessage({ text: '我们分手吧', at: now + 1 })
+  assert.ok(soul.get().emotion.episodes.some((episode) => episode.source === 'rule'), '高强度 + 类别命中应形成 rule episode')
+})
+
+await test('nudge 过期忽略、可清除；activeNudge/clearNudge 行为正确', () => {
+  const now = Date.now()
+  const soul = defaultsSoul()
+  ensureEmotionExtras(soul.emotion, now)
+  maybeNudge(soul, ruleAppraise('上次那件事'), now)
+  const nudge = activeNudge(soul.emotion, now)
+  assert.ok(nudge)
+  assert.equal(activeNudge(soul.emotion, nudge.expiresAt + 1), null, '过期后忽略')
+  assert.equal(clearNudge(soul.emotion), true)
+  assert.equal(soul.emotion.nudge, null)
+  assert.equal(clearNudge(soul.emotion), false)
+  assert.deepEqual(normalizeEmotionNudge({ nudge: { tags: 'bad', reasons: '' } }, now), null)
+})
+
+await test('emotion-api：POST clearNudge 可用，cross-site 被 fence 拒绝', async () => {
+  let registration = null
+  const ctx = {
+    on() {},
+    systemPrompt: { context() {} },
+    effect(fn) { fn(); return () => {} },
+    get(name) {
+      if (name === 'webServer') return { register(route) { registration = route; return () => {} } }
+      return undefined
+    },
+    tools: { register() {} },
+  }
+  const state = defaultsSoul()
+  const now = Date.now()
+  state.emotion.nudge = { tags: ['旧事'], reasons: '想起旧事', at: now, expiresAt: now + HOUR }
+  const soul = makeSoulContainer(state)
+  installEmotion(ctx, { state: { readConfig: () => CONFIG }, soul, log: () => {} })
+  assert.ok(registration && registration.path === '/dsh-aura/emotion-api')
+
+  const call = (headers, body) => new Promise((resolve) => {
+    const req = new EventEmitter()
+    req.method = 'POST'
+    req.url = '/dsh-aura/emotion-api'
+    req.headers = headers
+    const res = {
+      status: 0,
+      body: '',
+      writeHead(status) { this.status = status },
+      end(payload) { this.body = String(payload); resolve(res) },
+    }
+    registration.handler(req, res)
+    req.emit('data', Buffer.from(JSON.stringify(body)))
+    req.emit('end')
+  })
+
+  const ok = await call({ host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' }, { action: 'clearNudge' })
+  assert.equal(ok.status, 200)
+  const parsed = JSON.parse(ok.body)
+  assert.equal(parsed.ok, true)
+  assert.equal(parsed.cleared, true)
+  assert.equal(state.emotion.nudge, null)
+
+  state.emotion.nudge = { tags: ['旧事'], reasons: '再次提醒', at: now, expiresAt: now + HOUR }
+  const blocked = await call({ host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' }, { action: 'clearNudge' })
+  assert.equal(blocked.status, 403)
+  assert.ok(state.emotion.nudge, 'fence 拒绝时不要改动状态')
+})
+
+// ---------- 11. 注入文案 ----------
+section('11. 注入：episode 自然语言、note/倾向优先、无数字、预算内')
+
+await test('describeEpisode：note 原文优先、倾向映射、不出现数字/英文枚举', () => {
+  const now = Date.now()
+  const soul = defaultsSoul()
+  addEpisode(soul.emotion, {
+    type: null, intensity: 0.5, level: 'medium', cause: '忘了答应她的事',
+    note: '有点闷，说不上来', tendency: 'repair', source: 'tool',
+    startedAt: now, expiresAt: now + HOUR, updatedAt: now,
+  }, now)
+  const episode = activeEpisodes(soul.emotion, now)[0]
+  const text = describeEpisode(episode)
+  assert.ok(text.includes('有点闷，说不上来'), '有 note 时优先用 note 原文')
+  assert.ok(text.includes('想补一句'), 'repair → 想补一句')
+  assert.ok(!/[0-9]/.test(text), '不写数字：' + text)
+  assert.ok(!/sadness|anger|repair|approach|withdraw|quiet|share|none/.test(text), '不写英文枚举：' + text)
+})
+
+await test('renderEmotionContext explicit：追加 episode，保留四维/尾部指令/预算', () => {
+  const now = Date.now()
+  const soul = defaultsSoul()
+  soul.emotion.transient = { valence: 0, arousal: 0.2, label: '平静', intensity: 0.1, cause: '', updatedAt: now }
+  addEpisode(soul.emotion, {
+    type: 'sadness', intensity: 0.5, level: 'medium', cause: '忘了答应她的事',
+    note: '有点闷，说不上来', tendency: 'repair', source: 'tool',
+    startedAt: now, expiresAt: now + HOUR, updatedAt: now,
+  }, now)
+  const text = renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'explicit' }, now)
+  assert.ok(text.startsWith('[情绪]'))
+  assert.ok(text.includes('愉悦=') && text.includes('亲近='), '四维还在')
+  assert.ok(text.includes('有点闷，说不上来') && text.includes('想补一句'))
+  assert.ok(text.endsWith('"我的情绪"。'), '尾部指令不被 episode 挤掉')
+  assert.ok(lengthOf(text) <= EMOTION_CONTEXT_BUDGET, '长度 ' + lengthOf(text))
+})
+
+await test('renderEmotionContext subtle：平静但有 episode 也注入；nudge 很轻且不命令', () => {
+  const now = Date.now()
+  const soul = defaultsSoul()
+  soul.emotion.transient = { valence: 0, arousal: 0.2, label: '平静', intensity: 0.1, cause: '', updatedAt: now }
+  assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'subtle' }, now), '', '没 episode/nudge 仍为空')
+  addEpisode(soul.emotion, {
+    type: 'sadness', intensity: 0.5, level: 'medium', cause: '忘了答应她的事',
+    note: '有点闷，说不上来', tendency: 'quiet', source: 'tool',
+    startedAt: now, expiresAt: now + HOUR, updatedAt: now,
+  }, now)
+  const subtle = renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'subtle' }, now)
+  assert.ok(subtle.includes('此刻心情') && subtle.includes('有点闷，说不上来'))
+  assert.ok(subtle.includes('想安静'))
+  assert.ok(lengthOf(subtle) <= SUBTLE_CONTEXT_BUDGET)
+
+  soul.emotion.nudge = {
+    tags: ['被否定'], reasons: '那句像在否定她；如果她很在意你的看法，可能会被扎到。',
+    at: now, expiresAt: now + NUDGE_COOLDOWN_MS,
+  }
+  const withNudge = renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'subtle' }, now)
+  assert.ok(withNudge.includes('刚才那句可能有点落在你身上'))
+  assert.ok(withNudge.includes('要不要留一句，你自己定'))
+  assert.ok(!/[0-9]/.test(describeNudge(soul.emotion.nudge)), 'nudge 文案不出现数字')
+  assert.ok(!/必须|应该|你要/.test(describeNudge(soul.emotion.nudge)), 'nudge 不命令')
+})
+
+await test('episode/nudge 过期后注入自动消失', () => {
+  const now = Date.now()
+  const soul = defaultsSoul()
+  soul.emotion.transient = { valence: 0, arousal: 0.2, label: '平静', intensity: 0.1, cause: '', updatedAt: now }
+  addEpisode(soul.emotion, {
+    type: 'joy', intensity: 0.5, cause: '过期', startedAt: now - HOUR, expiresAt: now - 1,
+  }, now)
+  soul.emotion.nudge = { tags: ['旧事'], reasons: '过期提醒', at: now - HOUR, expiresAt: now - 1 }
+  assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'subtle' }, now), '')
+  assert.equal(renderEmotionContext(soul, { ...CONFIG, expressionStyle: 'explicit' }, now).includes('过期'), false)
+})
+
+await test('episodeHintOf：扎到/承诺/难过/旧事/新鲜/亲近/摩擦都能识别', () => {
+  assert.equal(episodeHintOf('你根本不懂').key, 'hurt')
+  assert.equal(episodeHintOf('你答应我的').key, 'promise')
+  assert.equal(episodeHintOf('我今天好难过').key, 'sad')
+  assert.equal(episodeHintOf('还记得上次吗').key, 'old')
+  assert.equal(episodeHintOf('这个好好玩').key, 'fresh')
+  assert.equal(episodeHintOf('好想你').key, 'close')
+  assert.equal(episodeHintOf('对不起').key, 'conflict')
+  assert.equal(episodeHintOf('今天天气不错'), null)
 })
 
 console.log(`\n${passed}/${passed + failed} passed${failed ? `, ${failed} failed` : ''}`)
