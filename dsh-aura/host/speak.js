@@ -297,6 +297,7 @@ export function formatClock(date = new Date()) {
 
 /** 静默时段：起>止 可跨午夜；起===止 视为不启用（F.1 [C] 现成实现）。 */
 export function inQuietHours(config = {}, date = new Date()) {
+  if (config && config.quietEnabled === false) return false
   const start = minutesOf(config.quietStart)
   const end = minutesOf(config.quietEnd)
   if (start === null || end === null || start === end) return false

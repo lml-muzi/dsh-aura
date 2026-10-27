@@ -1984,6 +1984,7 @@ ${TRAIL_CSS}
         speakIntervalMinutes: clampInt(cfg.speakIntervalMinutes, 5, 1440, 30),
         speakCooldownMinutes: clampInt(cfg.speakCooldownMinutes, 0, 1440, 45),
         speakDailyCap: clampInt(cfg.speakDailyCap, 0, 10, 3),
+        quietEnabled: cfg.quietEnabled !== false,
         quietStart: typeof cfg.quietStart === 'string' ? cfg.quietStart : '23:30',
         quietEnd: typeof cfg.quietEnd === 'string' ? cfg.quietEnd : '07:30',
         speakStickerEnabled: cfg.speakStickerEnabled !== false,
@@ -3922,6 +3923,7 @@ ${TRAIL_CSS}
           speakIntervalMinutes: clampInt(speakForm.speakIntervalMinutes, 5, 1440, 30),
           speakCooldownMinutes: clampInt(speakForm.speakCooldownMinutes, 0, 1440, 45),
           speakDailyCap: clampInt(speakForm.speakDailyCap, 0, 10, 3),
+          quietEnabled: speakForm.quietEnabled !== false,
           quietStart: speakForm.quietStart.trim(),
           quietEnd: speakForm.quietEnd.trim(),
           speakStickerEnabled: speakForm.speakStickerEnabled === true,
@@ -5991,6 +5993,16 @@ ${TRAIL_CSS}
               }),
               h('span', { className: 'qqn-unit' }, '小时'),
             ),
+          }),
+          h(Row, {
+            label: '启用静默时段',
+            hint: '关闭后任何时候都可能主动搭话',
+            control: h('input', {
+              className: 'qqn-checkbox',
+              type: 'checkbox',
+              checked: speakForm.quietEnabled !== false,
+              onChange: event => setSpeakForm(prev => ({ ...prev, quietEnabled: event.target.checked })),
+            }),
           }),
           h(Row, {
             label: t('row.quiet'),

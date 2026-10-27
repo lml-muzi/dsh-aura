@@ -175,6 +175,7 @@ export const DEFAULT_CONFIG = {
   // ---- 兼容旧字段 ----
   proactiveEnabled: false,
   proactiveEveryMinutes: 90,
+  quietEnabled: true,
   quietStart: '23:30',
   quietEnd: '07:30',
 }
@@ -260,7 +261,7 @@ const BOOL_FIELDS = new Set([
   'autoConnect', 'splitEnabled', 'soulEnabled', 'soulGrowthReflection', 'emotionEnabled',
   'emotionGuardOnNegative', 'memoryEnabled', 'memoryAutoCompact', 'memoryDiaryEnabled',
   'memoryImmediate', 'memorySessionDigest', 'diaryAuto', 'archiveEnabled',
-  'speakEnabled', 'speakDryRun', 'speakStickerEnabled', 'speakShareEnabled', 'proactiveEnabled', 'steerEnabled',
+  'speakEnabled', 'speakDryRun', 'quietEnabled', 'speakStickerEnabled', 'speakShareEnabled', 'proactiveEnabled', 'steerEnabled',
   'lifeRandom', 'lifeQuietSleep', 'lifeWakeGreeting',
 ])
 
