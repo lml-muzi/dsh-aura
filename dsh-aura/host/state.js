@@ -111,7 +111,14 @@ export const DEFAULT_CONFIG = {
   memoryReflectionEvery: 3,
   memoryDiaryEnabled: false,
   memoryRecallLimit: 3,
-  memoryOldAfterDays: 14,
+  memoryContextBudget: 240,
+  memoryAnchorEveryTurns: 8,
+  memoryInjectIdleMinutes: 360,
+  memoryOldAfterDays: 30,
+  memoryOldMode: 'days', // days | exceptRecent
+  memoryOldRecentDays: 3,
+  memoryOldEveryTurns: 20,
+  memoryOldChance: 0.3,
   memoryOldLimit: 1,
   memoryAttentionCount: 2,
   memoryAttentionThreshold: 0.35,
@@ -176,6 +183,7 @@ const ENUMS = {
   iconPreset: ['aura', 'qq', 'heart', 'cat', 'star', 'moon', 'emoji'],
   speakWakeMode: ['auto', 'followup', 'schedule'],
   emotionScope: ['qq', 'all'],
+  memoryOldMode: ['days', 'exceptRecent'],
 }
 
 /** 自由文本字段的字符上限（超出截断，不报错）。 */
@@ -204,7 +212,12 @@ const INT_RANGES = {
   memoryMaxNotes: [5, 200],
   memoryReflectionEvery: [1, 50],
   memoryRecallLimit: [1, 3],
+  memoryContextBudget: [60, 600],
+  memoryAnchorEveryTurns: [2, 30],
+  memoryInjectIdleMinutes: [60, 1440],
   memoryOldAfterDays: [7, 365],
+  memoryOldRecentDays: [1, 30],
+  memoryOldEveryTurns: [5, 100],
   memoryAttentionThreshold: [0, 1],
   memoryOldLimit: [0, 3],
   memoryAttentionCount: [0, 3],
@@ -235,6 +248,7 @@ const INT_RANGES = {
 
 const FLOAT_RANGES = {
   memoryAttentionThreshold: [0, 1],
+  memoryOldChance: [0, 1],
   speakNearFactor: [0, 3],
   speakFarFactor: [0, 3],
   speakStageFactorFallback: [0, 3],

@@ -47,7 +47,9 @@ const {
   monthKeyOf,
   parseArchiveTime,
   pruneArchive,
+  randomOld,
   readArchiveMonth,
+  seededRandom,
   renderArchiveToolText,
   searchArchive,
   timeline,
@@ -561,6 +563,103 @@ await test('POST search / state / 未知 action / 405', async () => {
 
 await test('installArchive 是 initArchive 的安装别名', () => {
   assert.equal(typeof installArchive, 'function')
+})
+
+// ---------- 9. randomOld：随机旧事 -------------------------------------
+section('9. randomOld：只抽 user 短句 / 排除会话 / seed 可复现 / 空存档')
+
+function writeRows(dir, rows) {
+  mkdirSync(dir, { recursive: true })
+  for (const row of rows) {
+    const file = join(dir, monthKeyOf(row.at) + '.jsonl')
+    appendFileSync(file, JSON.stringify({
+      t: new Date(row.at).toISOString(),
+      at: row.at,
+      sessionId: row.sessionId,
+      role: row.role,
+      text: row.text,
+    }) + '\n', 'utf8')
+  }
+}
+
+await test('randomOld：过滤 role/短句/超长，只返回 {text,at,sessionId}', () => {
+  const dir = join(root, 'random-old-basic')
+  const nowAt = Date.now()
+  writeRows(dir, [
+    { at: nowAt - 40 * 86_400_000, sessionId: 'qq:a', role: 'user', text: '你还记得那次一起看海吗' },
+    { at: nowAt - 41 * 86_400_000, sessionId: 'qq:a', role: 'user', text: '太短' },
+    { at: nowAt - 42 * 86_400_000, sessionId: 'qq:a', role: 'user', text: '字'.repeat(300) },
+    { at: nowAt - 43 * 86_400_000, sessionId: 'qq:a', role: 'assistant', text: '她说的旧话不算数' },
+  ])
+  const picked = randomOld({ before: nowAt, seed: 'basic' }, dir)
+  assert.ok(picked, '应抽到一条')
+  assert.deepEqual(Object.keys(picked).sort(), ['at', 'sessionId', 'text'])
+  assert.equal(picked.text, '你还记得那次一起看海吗')
+})
+
+await test('randomOld：seed 可复现（同 seed 同一条）', () => {
+  const dir = join(root, 'random-old-seed')
+  const nowAt = Date.now()
+  writeRows(dir, [
+    { at: nowAt - 40 * 86_400_000, sessionId: 'qq:a', role: 'user', text: '第一条值得翻出来的旧事' },
+    { at: nowAt - 41 * 86_400_000, sessionId: 'qq:a', role: 'user', text: '第二条值得翻出来的旧事' },
+    { at: nowAt - 42 * 86_400_000, sessionId: 'qq:a', role: 'user', text: '第三条值得翻出来的旧事' },
+  ])
+  const first = randomOld({ before: nowAt, seed: 'same-seed' }, dir)
+  const second = randomOld({ before: nowAt, seed: 'same-seed' }, dir)
+  assert.deepEqual(first, second)
+  const randomA = seededRandom('seed-a')
+  const randomB = seededRandom('seed-a')
+  assert.equal(randomA(), randomB())
+})
+
+await test('randomOld：排除当前会话与 excludeText', () => {
+  const dir = join(root, 'random-old-exclude')
+  const nowAt = Date.now()
+  writeRows(dir, [
+    { at: nowAt - 40 * 86_400_000, sessionId: 'qq:now', role: 'user', text: '这是当前会话的旧话' },
+    { at: nowAt - 41 * 86_400_000, sessionId: 'qq:old', role: 'user', text: '这是别的会话的旧话' },
+  ])
+  const picked = randomOld({ before: nowAt, excludeSessionId: 'qq:now', seed: 'x' }, dir)
+  assert.equal(picked.text, '这是别的会话的旧话')
+  const excludedText = randomOld({
+    before: nowAt,
+    excludeSessionId: 'qq:now',
+    excludeText: '这是别的会话的旧话',
+    seed: 'x',
+  }, dir)
+  assert.equal(excludedText, null, '唯一候选被 excludeText 排除后应安静返回 null')
+})
+
+await test('randomOld：before 边界只扫更早的月份；空目录返回 null', () => {
+  const dir = join(root, 'random-old-before')
+  writeRows(dir, [
+    { at: new Date(2025, 0, 15, 12).getTime(), sessionId: 'qq:a', role: 'user', text: '一月里说过的旧事' },
+    { at: new Date(2025, 1, 15, 12).getTime(), sessionId: 'qq:a', role: 'user', text: '二月里说过的旧事' },
+  ])
+  const boundary = new Date(2025, 1, 1).getTime()
+  const picked = randomOld({ before: boundary, seed: 'before' }, dir)
+  assert.ok(picked)
+  assert.equal(picked.text, '一月里说过的旧事')
+  const empty = join(root, 'random-old-empty')
+  mkdirSync(empty, { recursive: true })
+  assert.equal(randomOld({ before: Date.now() }, empty), null)
+})
+
+await test('randomOld：minChars/maxChars 可覆盖，archive api 也暴露 randomOld', () => {
+  const dir = join(root, 'random-old-length')
+  const nowAt = Date.now()
+  writeRows(dir, [
+    { at: nowAt - 40 * 86_400_000, sessionId: 'qq:a', role: 'user', text: '短一点' },
+    { at: nowAt - 41 * 86_400_000, sessionId: 'qq:a', role: 'user', text: '这是一个稍微长一点的旧句子' },
+  ])
+  const longOnly = randomOld({ before: nowAt, seed: 'len', minChars: 8, maxChars: 30 }, dir)
+  assert.equal(longOnly.text, '这是一个稍微长一点的旧句子')
+  const none = randomOld({ before: nowAt, seed: 'len', minChars: 30 }, dir)
+  assert.equal(none, null)
+  assert.equal(typeof archive.randomOld, 'function')
+  const viaApi = archive.randomOld({ before: Date.now(), seed: 'api' })
+  assert.ok(viaApi === null || (viaApi && typeof viaApi.text === 'string'))
 })
 
 // 收尾

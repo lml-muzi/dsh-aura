@@ -18,6 +18,7 @@
  */
 import assert from 'node:assert/strict'
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -42,6 +43,7 @@ const pluginRoot = fileURLToPath(new URL('..', import.meta.url))
 const state = await import('../host/state.js')
 const soulMod = await import('../host/soul.js')
 const memoryMod = await import('../host/memory.js')
+const archiveMod = await import('../host/archive.js')
 const storeMod = await import('../host/memory-store.js')
 const diaryMod = await import('../host/diary.js')
 const {
@@ -58,6 +60,7 @@ const {
 const {
   EVENT_MAX,
   MEMORY_CONTEXT_BUDGET,
+  MEMORY_CONTEXT_BUDGET_MIN,
   MEMORY_CONTEXT_BUDGET_MAX,
   NOTE_MAX,
   NOTE_MAX_CHARS,
@@ -77,6 +80,7 @@ const {
   upsertEntity,
   upsertRelation,
 } = memoryMod
+const { monthKeyOf, randomOld } = archiveMod
 
 const lengthOf = (text) => Array.from(String(text ?? '')).length
 let passed = 0
@@ -952,13 +956,16 @@ await test('context：query 命中事实 + top2 实体，superseded 不注入', 
   assert.equal(context.includes('（最近：'), false, '最近事件不再按旧格式注入')
 })
 
-await test('旧事：≥14 天且非当前会话的 events 才注入', () => {
-  const oldAt = Date.now() - 20 * 86_400_000
+await test('旧事（无 sessionId / force）：≥30 天且非当前会话的 events 才注入', () => {
+  const oldAt = Date.now() - 40 * 86_400_000
   memory.addEvent({ kind: 'chat', summary: '旧的约定', at: oldAt, sessionId: 'qq:dm:old' })
-  const context = memory.renderContext(Date.now(), { sessionId: 'qq:dm:new' })
+  // 旧签名兼容路径：无 sessionId 或 force=true 时仍是 events 旧事。
+  const context = memory.renderContext(Date.now(), {})
   assert.ok(context.includes('旧事'), context)
   assert.ok(context.includes('旧的约定'))
-  const same = memory.renderContext(Date.now(), { sessionId: 'qq:dm:old' })
+  const forced = memory.renderContext(Date.now(), { sessionId: 'qq:dm:new', force: true })
+  assert.ok(forced.includes('旧的约定'))
+  const same = memory.renderContext(Date.now(), { sessionId: 'qq:dm:old', force: true })
   assert.equal(same.includes('旧的约定'), false)
 })
 
@@ -2033,6 +2040,261 @@ await test('源码里不再出现 soul_note / soul_fact（提示词、注释一�
     const text = readFileSync(join(hostDir, name), 'utf8')
     assert.equal(/soul_note|soul_fact/.test(text), false, name + ' 不该再提 soul_note / soul_fact')
   }
+})
+
+// ---------- 23. 稀疏注入：锚点 / 久别 / 每 N 轮 / 旧事门控 ----------
+section('23. 稀疏注入：会话状态 / anchor / 久别 / 旧事 / 预算 / 淘汰')
+
+const injectGateDefaults = {
+  memorySessionDigest: false,
+  memoryAutoCompact: false,
+  memoryImmediate: false,
+  memoryReflectionEvery: 50,
+}
+function setGateConfig(patch = {}) {
+  return state.writeConfig({ ...state.DEFAULT_CONFIG, ...injectGateDefaults, ...patch })
+}
+const gateArchiveDir = join(dataDir, 'archive')
+function resetGateArchive() {
+  rmSync(gateArchiveDir, { recursive: true, force: true })
+  mkdirSync(gateArchiveDir, { recursive: true })
+}
+function writeGateRow(at, text, sessionId = 'qq:archived', role = 'user') {
+  mkdirSync(gateArchiveDir, { recursive: true })
+  const file = join(gateArchiveDir, monthKeyOf(at) + '.jsonl')
+  appendFileSync(file, JSON.stringify({
+    t: new Date(at).toISOString(),
+    at,
+    sessionId,
+    role,
+    text,
+  }) + '\n', 'utf8')
+}
+const gateArchive = { randomOld: options => randomOld(options, gateArchiveDir) }
+function renderGate(sessionId, now, extra = {}) {
+  return memory.renderContext(now, { sessionId, getArchive: () => gateArchive, ...extra })
+}
+function gateDisk() {
+  return JSON.parse(readFileSync(memory.store.file, 'utf8'))
+}
+
+await test('inject 状态：首轮 anchor；turns%8 anchor；非 anchor 轮返回空', () => {
+  setGateConfig()
+  memory.clear()
+  resetGateArchive()
+  memory.note('user', '用户叫木子', 0.9)
+  const sessionId = 'qq:gate-anchor'
+  const base = Date.now()
+  memory.onUserMessage({ text: '我回来了', at: base, sessionId })
+  const firstTurn = renderGate(sessionId, base + 500)
+  assert.ok(firstTurn.includes('木子'), firstTurn)
+  for (let turn = 2; turn <= 7; turn += 1) {
+    memory.onUserMessage({ text: '今天天气不错', at: base + turn * 1000, sessionId })
+  }
+  const middleTurn = renderGate(sessionId, base + 8000)
+  assert.equal(middleTurn, '', middleTurn)
+  memory.onUserMessage({ text: '今天天气不错', at: base + 8000, sessionId })
+  const anchorTurn = renderGate(sessionId, base + 9000)
+  assert.ok(anchorTurn.includes('木子'), anchorTurn)
+  const disk = gateDisk()
+  assert.equal(disk.inject[sessionId].turns, 8)
+  assert.equal(disk.inject[sessionId].anchorNext, false)
+})
+
+await test('久别：间隔 ≥ memoryInjectIdleMinutes 的下一轮 anchorNext，普通轮写回 false', () => {
+  setGateConfig({ memoryInjectIdleMinutes: 360 })
+  memory.clear()
+  memory.note('user', '用户叫木子', 0.9)
+  const sessionId = 'qq:gate-idle'
+  const base = Date.now()
+  memory.onUserMessage({ text: '晚安', at: base, sessionId })
+  // 2 分钟后再说话：不算久别，turns=2 不是锚点轮。
+  memory.onUserMessage({ text: '我睡不着', at: base + 2 * 60_000, sessionId })
+  assert.equal(renderGate(sessionId, base + 2 * 60_000 + 100), '', '普通轮不 anchor')
+  assert.equal(gateDisk().inject[sessionId].anchorNext, false)
+  // 8 小时后（> 360 分钟）：久别，turns=3 仍强制 anchor。
+  const back = base + 8 * 60 * 60_000
+  memory.onUserMessage({ text: '我回来了', at: back, sessionId })
+  const reunion = renderGate(sessionId, back + 100)
+  assert.ok(reunion.includes('木子'), reunion)
+  assert.equal(gateDisk().inject[sessionId].anchorNext, true)
+  // 紧接着再说一句：anchorNext 回到 false。
+  memory.onUserMessage({ text: '刚才说到哪了', at: back + 60_000, sessionId })
+  assert.equal(renderGate(sessionId, back + 60_000 + 100), '')
+  assert.equal(gateDisk().inject[sessionId].anchorNext, false)
+})
+
+await test('旧事：只从 archive 取（不靠 events），同 turn 多次渲染一致', () => {
+  setGateConfig({
+    memoryOldEveryTurns: 5,
+    memoryOldChance: 1,
+    memoryOldAfterDays: 30,
+    memoryOldMode: 'days',
+    memoryOldLimit: 1,
+  })
+  memory.clear()
+  resetGateArchive()
+  const now = Date.now()
+  writeGateRow(now - 40 * 86_400_000, '你还记得那次一起看海吗')
+  // 同样 40 天前的事件：新门控下不应被当成旧事注入。
+  memory.addEvent({ kind: 'chat', summary: '事件里的旧事', at: now - 40 * 86_400_000, sessionId: 'qq:archived' })
+  const sessionId = 'qq:gate-old'
+  for (let turn = 1; turn <= 5; turn += 1) {
+    memory.onUserMessage({ text: '随便聊聊', at: now + turn * 1000, sessionId })
+  }
+  const firstRender = renderGate(sessionId, now + 6000)
+  assert.ok(firstRender.includes('旧事'), firstRender)
+  assert.ok(firstRender.includes('你还记得那次一起看海吗'), firstRender)
+  assert.equal(firstRender.includes('事件里的旧事'), false, '旧事不走 events')
+  const secondRender = renderGate(sessionId, now + 6000)
+  assert.equal(secondRender, firstRender, '同一 turn 多次渲染结果一致')
+  // 首轮 anchor 但不算久别：不翻旧账。
+  const firstTurnOnly = renderGate('qq:gate-first', now + 6000)
+  assert.equal(firstTurnOnly.includes('看海'), false)
+})
+
+await test('旧事：没有 archive 时安静，不注入 events 旧事', () => {
+  setGateConfig({
+    memoryOldEveryTurns: 5,
+    memoryOldChance: 1,
+    memoryOldAfterDays: 30,
+    memoryOldLimit: 1,
+  })
+  memory.clear()
+  resetGateArchive()
+  const now = Date.now()
+  memory.addEvent({ kind: 'chat', summary: '事件里的旧事', at: now - 40 * 86_400_000, sessionId: 'qq:archived' })
+  const sessionId = 'qq:gate-noarchive'
+  for (let turn = 1; turn <= 5; turn += 1) {
+    memory.onUserMessage({ text: '随便聊聊', at: now + turn * 1000, sessionId })
+  }
+  assert.equal(renderGate(sessionId, now + 6000, { getArchive: () => undefined }), '')
+})
+
+await test('旧事：同一文本 30 天内不重复；过了 5 秒仍不重复', () => {
+  setGateConfig({
+    memoryOldEveryTurns: 5,
+    memoryOldChance: 1,
+    memoryOldAfterDays: 30,
+    memoryOldLimit: 1,
+  })
+  memory.clear()
+  resetGateArchive()
+  const now = Date.now()
+  writeGateRow(now - 40 * 86_400_000, '这句话只想被翻出来一次')
+  const sessionId = 'qq:gate-repeat'
+  for (let turn = 1; turn <= 5; turn += 1) {
+    memory.onUserMessage({ text: '随便聊聊', at: now + turn * 1000, sessionId })
+  }
+  const first = renderGate(sessionId, now + 6000)
+  assert.ok(first.includes('这句话只想被翻出来一次'), first)
+  for (let turn = 6; turn <= 10; turn += 1) {
+    memory.onUserMessage({ text: '随便聊聊', at: now + turn * 1000, sessionId })
+  }
+  const second = renderGate(sessionId, now + 20_000)
+  assert.equal(second.includes('这句话只想被翻出来一次'), false, '30 天内同一条旧事不重复')
+  const disk = gateDisk()
+  assert.equal(disk.inject[sessionId].lastOldText, '这句话只想被翻出来一次')
+})
+
+await test('旧事概率边界：chance=0 不抽；chance=1 必抽；options.random 可注入', () => {
+  const now = Date.now()
+  resetGateArchive()
+  writeGateRow(now - 40 * 86_400_000, '概率边界要测的旧句子')
+  const toTurnFive = (sessionId) => {
+    for (let turn = 1; turn <= 5; turn += 1) {
+      memory.onUserMessage({ text: '随便聊聊', at: now + turn * 1000, sessionId })
+    }
+  }
+  setGateConfig({ memoryOldEveryTurns: 5, memoryOldChance: 0, memoryOldAfterDays: 30, memoryOldLimit: 1 })
+  memory.clear()
+  toTurnFive('qq:gate-chance0')
+  assert.equal(renderGate('qq:gate-chance0', now + 6000).includes('旧事'), false)
+
+  setGateConfig({ memoryOldEveryTurns: 5, memoryOldChance: 0.3, memoryOldAfterDays: 30, memoryOldLimit: 1 })
+  memory.clear()
+  toTurnFive('qq:gate-chance-low')
+  assert.equal(renderGate('qq:gate-chance-low', now + 6000, { random: () => 0.99 }).includes('旧事'), false)
+  assert.ok(renderGate('qq:gate-chance-low', now + 6000, { random: () => 0.1 }).includes('旧事'))
+
+  setGateConfig({ memoryOldEveryTurns: 5, memoryOldChance: 1, memoryOldAfterDays: 30, memoryOldLimit: 1 })
+  memory.clear()
+  toTurnFive('qq:gate-chance1')
+  assert.ok(renderGate('qq:gate-chance1', now + 6000).includes('旧事'))
+})
+
+await test('旧事门槛模式：days 只看更早；exceptRecent 排除最近 N 天', () => {
+  const now = Date.now()
+  resetGateArchive()
+  writeGateRow(now - 5 * 86_400_000, '五天前说过的旧句子')
+  const toTurnFive = (sessionId) => {
+    for (let turn = 1; turn <= 5; turn += 1) {
+      memory.onUserMessage({ text: '随便聊聊', at: now + turn * 1000, sessionId })
+    }
+  }
+  setGateConfig({
+    memoryOldEveryTurns: 5,
+    memoryOldChance: 1,
+    memoryOldAfterDays: 30,
+    memoryOldMode: 'days',
+    memoryOldLimit: 1,
+  })
+  memory.clear()
+  toTurnFive('qq:gate-days')
+  assert.equal(renderGate('qq:gate-days', now + 6000).includes('旧事'), false, 'days 模式 30 天内不算旧事')
+
+  setGateConfig({
+    memoryOldEveryTurns: 5,
+    memoryOldChance: 1,
+    memoryOldAfterDays: 30,
+    memoryOldMode: 'exceptRecent',
+    memoryOldRecentDays: 3,
+    memoryOldLimit: 1,
+  })
+  memory.clear()
+  toTurnFive('qq:gate-recent')
+  assert.ok(renderGate('qq:gate-recent', now + 6000).includes('五天前说过的旧句子'))
+})
+
+await test('预算：config.memoryContextBudget 夹到 60–600，超预算丢尾部', () => {
+  setGateConfig()
+  memory.clear()
+  for (let index = 0; index < 8; index += 1) {
+    memory.note('user', `第${index}条很长的笔记，用来把上下文预算撑爆`, 0.8)
+  }
+  const cfg = state.readConfig()
+  const now = Date.now()
+  const tight = renderMemoryContext(memory.store, { ...cfg, memoryContextBudget: 10 }, { now })
+  assert.ok(tight.length > 0)
+  assert.ok(lengthOf(tight) <= MEMORY_CONTEXT_BUDGET_MIN, `低预算夹到 60，实际 ${lengthOf(tight)}`)
+  const wide = renderMemoryContext(memory.store, { ...cfg, memoryContextBudget: 9999 }, { now })
+  assert.ok(lengthOf(wide) <= MEMORY_CONTEXT_BUDGET_MAX, `高预算夹到 600，实际 ${lengthOf(wide)}`)
+  assert.equal(state.writeConfig({ memoryContextBudget: 10 }).memoryContextBudget, 60)
+  assert.equal(state.writeConfig({ memoryContextBudget: 9999 }).memoryContextBudget, 600)
+  assert.equal(state.writeConfig({ memoryAnchorEveryTurns: 1 }).memoryAnchorEveryTurns, 2)
+  assert.equal(state.writeConfig({ memoryAnchorEveryTurns: 99 }).memoryAnchorEveryTurns, 30)
+  assert.equal(state.writeConfig({ memoryInjectIdleMinutes: 1 }).memoryInjectIdleMinutes, 60)
+  assert.equal(state.writeConfig({ memoryOldRecentDays: 0 }).memoryOldRecentDays, 1)
+  assert.equal(state.writeConfig({ memoryOldEveryTurns: 1 }).memoryOldEveryTurns, 5)
+  assert.equal(state.writeConfig({ memoryOldChance: 2 }).memoryOldChance, 1)
+  assert.equal(state.writeConfig({ memoryOldChance: -1 }).memoryOldChance, 0)
+  assert.equal(state.writeConfig({ memoryOldMode: 'nope' }).memoryOldMode, 'days')
+})
+
+await test('会话状态淘汰：inject 最多 50 个会话，按 lastUserAt 丢最旧', () => {
+  setGateConfig()
+  memory.clear()
+  const base = Date.now()
+  for (let index = 0; index < 55; index += 1) {
+    memory.onUserMessage({ text: `我在第${index}个会话`, at: base + index * 1000, sessionId: `qq:gate-s${index}` })
+  }
+  const disk = gateDisk()
+  const keys = Object.keys(disk.inject)
+  assert.equal(keys.length, 50)
+  assert.equal(keys.includes('qq:gate-s0'), false)
+  assert.equal(keys.includes('qq:gate-s54'), true)
+  assert.equal(disk.inject['qq:gate-s54'].turns, 1)
+  assert.equal(disk.inject['qq:gate-s54'].lastUserAt, base + 54 * 1000)
 })
 
 // 收尾

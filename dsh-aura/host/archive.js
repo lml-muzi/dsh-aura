@@ -35,6 +35,9 @@ export const ARCHIVE_LIMIT_MAX = 30
 export const ARCHIVE_TIMELINE_DAYS = 30
 /** 最多保留的月份文件数（配置默认值也是上限）。 */
 export const ARCHIVE_MAX_FILES = 120
+/** 随机旧事：候选文本长度范围（码点）。 */
+export const OLD_MIN_CHARS = 6
+export const OLD_MAX_CHARS = 200
 
 export const ARCHIVE_DEFAULT_CONFIG = Object.freeze({
   archiveEnabled: true,
@@ -62,6 +65,32 @@ function clampInt(value, min, max, fallback) {
 
 function loggerOf(log) {
   return typeof log === 'function' ? log : (...args) => console.log('[dsh-aura]', ...args)
+}
+
+/** 字符串/数字种子 → 32 位哈希（FNV-1a）。 */
+function hashSeed(seed) {
+  const text = typeof seed === 'string' ? seed : String(seed ?? '')
+  let hash = 2166136261 >>> 0
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+/**
+ * 确定性伪随机：同一 seed 永远给出同一序列（mulberry32）。
+ * 记忆注入的「掷骰」和旧事抽样都靠它，保证同一 turn 多次渲染结果一致。
+ */
+export function seededRandom(seed) {
+  let state = hashSeed(seed)
+  return function next() {
+    state |= 0
+    state = (state + 0x6D2B79F5) | 0
+    let value = Math.imul(state ^ (state >>> 15), 1 | state)
+    value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296
+  }
 }
 
 /** 本地时区的 YYYY-MM（存档按月切文件）。 */
@@ -201,6 +230,50 @@ export function readArchiveEntries(dir, options = {}) {
   }
   entries.sort((a, b) => a.at - b.at)
   return entries
+}
+
+/**
+ * 从存档里随机抽一条「旧事」：before 之前、role=user 的短句。
+ *
+ * - 只扫 before 之前的月份文件（readArchiveEntries to 边界）；
+ * - 文本长度按码点过滤（minChars/maxChars），同一文本去重；
+ * - seededRandom(seed) 决定选哪条，同 seed 可复现；
+ * - excludeSessionId 排除当前会话，excludeText 排除刚提过的旧事；
+ * - 存档不可用/为空时安静返回 null，不抛错。
+ *
+ * @returns {{text:string, at:number, sessionId:string}|null}
+ */
+export function randomOld(options = {}, dir = resolveArchiveDir()) {
+  try {
+    const before = asNumber(options.before, Date.now())
+    if (!Number.isFinite(before) || before <= 0) return null
+    const excludeSessionId = String(options.excludeSessionId ?? '').trim()
+    const excludeText = String(options.excludeText ?? '').trim()
+    const minChars = clampInt(options.minChars, 1, ARCHIVE_TEXT_MAX, OLD_MIN_CHARS)
+    const maxChars = clampInt(options.maxChars, minChars, ARCHIVE_TEXT_MAX, OLD_MAX_CHARS)
+    const rows = readArchiveEntries(dir, { to: before - 1 })
+    const seen = new Set()
+    const candidates = []
+    for (const entry of rows) {
+      if (entry.role !== 'user') continue
+      if (entry.at >= before) continue
+      if (excludeSessionId && entry.sessionId === excludeSessionId) continue
+      const text = entry.text
+      const length = Array.from(text).length
+      if (length < minChars || length > maxChars) continue
+      if (excludeText && text === excludeText) continue
+      if (seen.has(text)) continue
+      seen.add(text)
+      candidates.push({ text, at: entry.at, sessionId: entry.sessionId })
+    }
+    if (candidates.length === 0) return null
+    candidates.sort((left, right) => left.at - right.at || (left.text < right.text ? -1 : left.text > right.text ? 1 : 0))
+    const random = seededRandom(options.seed ?? `old:${before}`)
+    const index = Math.min(candidates.length - 1, Math.floor(random() * candidates.length))
+    return { ...candidates[index] }
+  } catch {
+    return null
+  }
 }
 
 function findCodepointIndex(chars, term) {
@@ -698,6 +771,7 @@ export function initArchive(options = {}) {
     dir,
     search,
     searchArchive: search,
+    randomOld: options => randomOld(options, dir),
     timeline: timelineOf,
     stats,
     prune: (extra = {}) => {

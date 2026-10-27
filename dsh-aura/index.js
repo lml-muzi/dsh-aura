@@ -129,7 +129,8 @@ export function apply(ctx, config = {}) {
 
   // ---- 情绪 / 记忆 / 主动搭话 ----
   const emotion = installEmotion(ctx, { state, soul, bridge, log })
-  const memory = installMemory(ctx, { state, soul, log })
+  // archive 在记忆之后创建：用 getter 延迟取，记忆注入旧事时才能拿到 randomOld。
+  const memory = installMemory(ctx, { state, soul, log, getArchive: () => archive })
   // 记忆罗盘：原始会话存档（只存 Aura 会话、只本地、不注入）+ soul_archive 工具 + /dsh-aura/archive-api
   const archive = installArchive({ ctx, state, soul, log })
   const speak = installSpeak(ctx, { state, soul, emotion, memory, bridge, life, log })

@@ -456,5 +456,42 @@ check('原「立即整理 / 整理这段会话」仍在', !!findByText('立即�
 check('原「事实卡 / 实体卡 / 关系」仍在', textNow().includes('事实卡') && textNow().includes('实体卡') && textNow().includes('关系'))
 check('原「清空记忆」仍在', !!findByText('清空记忆'))
 
+// 稀疏注入设置：新字段渲染 / 保存走 /config
+const gateInputs = {
+  budget: findInputByAria('上下文预算'),
+  anchor: findInputByAria('锚点间隔轮数'),
+  idle: findInputByAria('久别分钟'),
+  oldDays: findInputByAria('旧事天数'),
+  recentDays: findInputByAria('最近天数'),
+  oldEvery: findInputByAria('旧事间隔轮数'),
+  chance: findInputByAria('旧事概率'),
+}
+check('稀疏注入设置：上下文预算/锚点间隔/久别分钟输入框', !!gateInputs.budget && !!gateInputs.anchor && !!gateInputs.idle)
+check('稀疏注入设置：旧事天数/最近天数/间隔轮数/概率输入框', !!gateInputs.oldDays && !!gateInputs.recentDays && !!gateInputs.oldEvery && !!gateInputs.chance)
+const oldModeSelect = findBy(el => el.tag === 'select' && el.props['aria-label'] === '旧事门槛模式')
+const oldModeValues = oldModeSelect ? (oldModeSelect.children || []).filter(child => child.tag === 'option').map(child => child.props.value) : []
+check('旧事门槛模式是下拉（days / exceptRecent）', !!oldModeSelect && oldModeValues.includes('days') && oldModeValues.includes('exceptRecent'), oldModeValues)
+
+await changeInput(gateInputs.budget, '上下文预算', '320')
+await changeInput(gateInputs.anchor, '锚点间隔轮数', '6')
+await changeInput(gateInputs.idle, '久别分钟', '480')
+await changeInput(gateInputs.oldDays, '旧事天数', '45')
+await changeInput(gateInputs.recentDays, '最近天数', '5')
+await changeInput(gateInputs.oldEvery, '旧事间隔轮数', '12')
+await changeInput(gateInputs.chance, '旧事概率', '0.5')
+oldModeSelect.props.onChange && oldModeSelect.props.onChange({ target: { value: 'exceptRecent' } })
+await settle()
+check('改值后保存按钮可用（草稿 dirty）', !!findByText('保存记忆设置'))
+
+const savesBefore = requests.filter(item => item.url === '/dsh-aura/api/config' && String(item.init.method || '').toUpperCase() === 'POST').length
+await clickButton('保存记忆设置')
+const saveRequests = requests.filter(item => item.url === '/dsh-aura/api/config' && String(item.init.method || '').toUpperCase() === 'POST')
+check('点保存向 /config 发 POST', saveRequests.length === savesBefore + 1, saveRequests.length)
+const saveBody = saveRequests.length > 0 ? JSON.parse(saveRequests[saveRequests.length - 1].init.body || '{}') : {}
+check('保存 payload 带上下文预算/锚点间隔/久别分钟', saveBody.memoryContextBudget === 320 && saveBody.memoryAnchorEveryTurns === 6 && saveBody.memoryInjectIdleMinutes === 480, saveBody)
+check('保存 payload 带旧事模式/天数/概率', saveBody.memoryOldMode === 'exceptRecent' && saveBody.memoryOldAfterDays === 45 && saveBody.memoryOldRecentDays === 5 && saveBody.memoryOldEveryTurns === 12 && saveBody.memoryOldChance === 0.5, saveBody)
+check('原记忆设置仍在 payload 里', saveBody.memoryEnabled === true && saveBody.memoryRecallLimit !== undefined && saveBody.memorySessionDigest !== undefined, saveBody)
+check('保存后显示已保存提示', textNow().includes('记忆设置已保存'))
+
 console.log('\n' + (failures === 0 ? '✅ 记忆罗盘面板冒烟全部通过' : '❌ 记忆罗盘面板冒烟失败 ' + failures + ' 项'))
 process.exitCode = failures === 0 ? 0 : 1

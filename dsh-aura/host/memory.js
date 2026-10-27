@@ -12,7 +12,9 @@
  * 成本策略：默认**规则反思**（零 token）；只有用户显式打开 memoryReflectionLlm 且宿主有可用模型时才走 LLM 反思，
  * 且失败自动回退规则。绝不为每轮对话起一次模型调用。
  */
+import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { seededRandom, OLD_MIN_CHARS, OLD_MAX_CHARS } from './archive.js'
 import {
   clamp,
   codepointSlice,
@@ -54,9 +56,15 @@ import {
 } from './memory-store.js'
 
 export const SUMMARY_MAX = 80
-/** 记忆上下文总预算：v2 从 180 提到 240（事实卡/实体卡/1 跳关系也进来）。 */
+/** 记忆上下文总预算：默认 240，配置范围 60–600。 */
 export const MEMORY_CONTEXT_BUDGET = 240
-export const MEMORY_CONTEXT_BUDGET_MAX = 260
+export const MEMORY_CONTEXT_BUDGET_MIN = 60
+export const MEMORY_CONTEXT_BUDGET_MAX = 600
+/** 每个会话的注入状态（turns/lastUserAt/anchorNext/lastOldText/lastOldAt）最多保留多少个会话。 */
+export const INJECT_SESSION_LIMIT = 50
+/** 同一条旧事 30 天内不重复提。 */
+export const OLD_REPEAT_MS = 30 * 86_400_000
+const DAY_MS = 86_400_000
 /** 面板事实/实体卡/关系只读接口（web.js 的 /state 不透传新字段，这里另开一个小路由）。 */
 export const MEMORY_API_PREFIX = '/dsh-aura/memory-api'
 
@@ -667,6 +675,77 @@ export function attentionEvents(source, options = {}) {
   return scored.slice(0, limit).map(item => item.event)
 }
 
+/* ------------------------------------------------------------------ */
+/* 记忆注入门控：每个会话的回合状态（memory.json 的 inject 字段）        */
+/* ------------------------------------------------------------------ */
+
+/** 单个会话的注入状态；坏值回落默认，不整份丢。 */
+export function normalizeInjectEntry(raw) {
+  const source = asObject(raw)
+  return {
+    turns: Math.max(0, Math.round(asNumber(source.turns, 0))),
+    lastUserAt: Math.max(0, asNumber(source.lastUserAt, 0)),
+    anchorNext: source.anchorNext === true,
+    lastOldText: codepointSlice(String(source.lastOldText ?? '').trim(), OLD_MAX_CHARS),
+    lastOldAt: Math.max(0, asNumber(source.lastOldAt, 0)),
+  }
+}
+
+/** memory.json.inject：sessionId → 注入状态。空/坏值补默认。 */
+export function normalizeInjectState(raw) {
+  const source = asObject(raw)
+  const out = {}
+  for (const [sessionId, value] of Object.entries(source)) {
+    const key = String(sessionId ?? '').trim()
+    if (!key) continue
+    out[key] = normalizeInjectEntry(value)
+  }
+  return out
+}
+
+/** 只保留最近活跃的 50 个会话（按 lastUserAt，其次 turns）。原地修改并返回。 */
+export function pruneInjectSessions(inject, limit = INJECT_SESSION_LIMIT) {
+  if (!inject || typeof inject !== 'object') return inject
+  const max = Math.max(1, Math.round(asNumber(limit, INJECT_SESSION_LIMIT)))
+  const entries = Object.entries(inject)
+  if (entries.length <= max) return inject
+  entries.sort((left, right) => {
+    const byUser = asNumber(right[1]?.lastUserAt, 0) - asNumber(left[1]?.lastUserAt, 0)
+    if (byUser !== 0) return byUser
+    return asNumber(right[1]?.turns, 0) - asNumber(left[1]?.turns, 0)
+  })
+  for (const [sessionId] of entries.slice(max)) delete inject[sessionId]
+  return inject
+}
+
+/** render 里取 archive（兼容 options.archive / options.getArchive / 无存档）。 */
+function archiveOf(options = {}) {
+  try {
+    if (options.archive && typeof options.archive.randomOld === 'function') return options.archive
+    if (typeof options.getArchive === 'function') {
+      const value = options.getArchive()
+      if (value && typeof value.randomOld === 'function') return value
+    }
+  } catch {
+    /* 存档不可用就安静 */
+  }
+  return null
+}
+
+/**
+ * 记忆上下文段（context order 40）。
+ * source 优先是 memoryStore（read()），也兼容旧 soul 对象/句柄。
+ *
+ * 注入门控：
+ * - 没有 sessionId（测试/面板）或 options.force=true：保持旧行为，整段渲染；
+ * - 有 sessionId 时按稀疏规则：
+ *   * 稳定层（笔记/事实/实体/1跳/念头/注意力/最近聊过）只在 anchor 轮注入：
+ *     turns<=1、turns%anchorEvery===0、或久别/首轮（anchorNext）；
+ *   * 旧事独立：turns%oldEvery===0 且 seededRandom < oldChance，或久别 anchor 轮；
+ *     每轮最多 1 条，30 天内不重复，只从 archive 取（不靠 events）。
+ * 顺序：笔记 → 事实/实体 → 1跳 → 上次念头 → 注意力 → 最近聊过 → 旧事。
+ * 预算取 config.memoryContextBudget（夹在 60–600），超预算按现有规则丢尾部。
+ */
 export function renderMemoryContext(source, config = {}, options = {}) {
   if (config?.soulEnabled === false) return ''
   const now = asNumber(options.now, Date.now())
@@ -674,7 +753,11 @@ export function renderMemoryContext(source, config = {}, options = {}) {
   const query = String(options.lastUserText ?? soul?.relation?.lastUserText ?? '')
   const limit = clamp(asNumber(config?.memoryRecallLimit, 3), 1, 3)
   const memory = memoryOf(source)
-  const budget = Math.min(MEMORY_CONTEXT_BUDGET_MAX, Math.max(0, MEMORY_CONTEXT_BUDGET))
+  const budget = clamp(
+    asNumber(config?.memoryContextBudget, MEMORY_CONTEXT_BUDGET),
+    MEMORY_CONTEXT_BUDGET_MIN,
+    MEMORY_CONTEXT_BUDGET_MAX,
+  )
   const parts = []
   let used = 0
   const pushPart = (text) => {
@@ -689,73 +772,142 @@ export function renderMemoryContext(source, config = {}, options = {}) {
     return true
   }
 
-  // ① 笔记（最高优先级）
-  const notes = recallNotes(memory, query, { limit, now })
-  if (notes.length > 0) {
-    pushPart(`（关于对方/你们，你记得：${notes.map((note) => note.text).join('；')}）`)
-  }
+  const sessionId = String(options.sessionId ?? '').trim()
+  const gated = sessionId !== '' && options.force !== true
+  const injectStates = options.inject && typeof options.inject === 'object'
+    ? normalizeInjectState(options.inject)
+    : normalizeInjectState(memory?.inject)
+  const injectEntry = gated ? (injectStates[sessionId] || normalizeInjectEntry(null)) : null
+  const anchorEvery = clamp(asNumber(config?.memoryAnchorEveryTurns, 8), 2, 30)
+  const anchor = !gated
+    || injectEntry.turns <= 1
+    || (injectEntry.turns > 0 && injectEntry.turns % anchorEvery === 0)
+    || injectEntry.anchorNext === true
 
-  // ② 直接事实 + 命中实体
-  const facts = queryFactsInMemory(memory, query, 3, now)
-  const entities = queryEntitiesInMemory(memory, query, 2, now)
-  if (facts.length > 0 || entities.length > 0) {
-    const bits = facts.map((fact) => fact.text)
-    for (const entity of entities) {
-      bits.push(`${entity.name}（${ENTITY_TYPE_LABELS[entity.type] || '其他'}）`)
+  // ①–④.5 稳定层：只有 anchor 轮才注入。
+  if (anchor) {
+    // ① 笔记（最高优先级）
+    const notes = recallNotes(memory, query, { limit, now })
+    if (notes.length > 0) {
+      pushPart(`（关于对方/你们，你记得：${notes.map((note) => note.text).join('；')}）`)
     }
-    pushPart(`（你记得：${bits.join('；')}）`)
+
+    // ② 直接事实 + 命中实体
+    const facts = queryFactsInMemory(memory, query, 3, now)
+    const entities = queryEntitiesInMemory(memory, query, 2, now)
+    if (facts.length > 0 || entities.length > 0) {
+      const bits = facts.map((fact) => fact.text)
+      for (const entity of entities) {
+        bits.push(`${entity.name}（${ENTITY_TYPE_LABELS[entity.type] || '其他'}）`)
+      }
+      pushPart(`（你记得：${bits.join('；')}）`)
+    }
+
+    // ③ 1 跳：关系边 + 邻居实体相关事实
+    const hop = recallOneHop(memory, query, { now, excludeFacts: facts })
+    if (hop.relations.length > 0) {
+      pushPart(`（关联：${hop.relations.map(relationText).join('；')}）`)
+    }
+    if (hop.facts.length > 0) {
+      pushPart(`（顺着关系想起：${hop.facts.map((fact) => fact.text).join('；')}）`)
+    }
+
+    // ④ 上次没说的念头（比最近聊过更具体，优先级更高）
+    const pendingThought = soul?.speak?.pendingThought
+    if (pendingThought && typeof pendingThought === 'object' && asNumber(pendingThought.expiresAt, 0) > now) {
+      const thought = String(pendingThought.text ?? pendingThought.summary ?? '').trim()
+      if (thought) pushPart(`（你上次想说但没说出口的念头：${thought.slice(0, 80)}）`)
+    }
+
+    // ④.5 注意力窗口：只挑最近 7 天里仍挂着的 1–2 件，和已有笔记/事实去重。
+    const attentionLimit = clamp(asNumber(config?.memoryAttentionCount, 2), 0, 3)
+    const attentionThreshold = clamp(asNumber(config?.memoryAttentionThreshold, 0.35), 0, 1)
+    const attention = attentionEvents(memory, {
+      now,
+      sessionId: options.sessionId,
+      limit: attentionLimit,
+      threshold: attentionThreshold,
+    }).filter((event) => {
+      const snippet = String(event.summary || '').slice(0, 10)
+      return snippet && !parts.some(part => String(part).includes(snippet))
+    })
+    if (attention.length > 0) {
+      pushPart(`（你脑子里还挂着：${attention.map((event) => event.summary).join('；')}）`)
+    }
+
+    const topics = recentTopics(memory, 3, now)
+    if (topics.length > 0 && used < 120) {
+      pushPart(`（最近聊过：${topics.map((item) => item.key).join('、')}）`)
+    }
   }
 
-  // ③ 1 跳：关系边 + 邻居实体相关事实
-  const hop = recallOneHop(memory, query, { now, excludeFacts: facts })
-  if (hop.relations.length > 0) {
-    pushPart(`（关联：${hop.relations.map(relationText).join('；')}）`)
-  }
-  if (hop.facts.length > 0) {
-    pushPart(`（顺着关系想起：${hop.facts.map((fact) => fact.text).join('；')}）`)
-  }
-
-  // ④ 上次没说的念头（比最近聊过更具体，优先级更高）
-  const pendingThought = soul?.speak?.pendingThought
-  if (pendingThought && typeof pendingThought === 'object' && asNumber(pendingThought.expiresAt, 0) > now) {
-    const thought = String(pendingThought.text ?? pendingThought.summary ?? '').trim()
-    if (thought) pushPart(`（你上次想说但没说出口的念头：${thought.slice(0, 80)}）`)
-  }
-
-  // ④.5 注意力窗口：只挑最近 7 天里仍挂着的 1–2 件，和已有笔记/事实去重。
-  const attentionLimit = clamp(asNumber(config?.memoryAttentionCount, 2), 0, 3)
-  const attentionThreshold = clamp(asNumber(config?.memoryAttentionThreshold, 0.35), 0, 1)
-  const attention = attentionEvents(memory, {
-    now,
-    sessionId: options.sessionId,
-    limit: attentionLimit,
-    threshold: attentionThreshold,
-  }).filter((event) => {
-    const snippet = String(event.summary || '').slice(0, 10)
-    return snippet && !parts.some(part => String(part).includes(snippet))
-  })
-  if (attention.length > 0) {
-    pushPart(`（你脑子里还挂着：${attention.map((event) => event.summary).join('；')}）`)
+  // ⑤ 旧事。旧行为（无 sessionId / force）：≥N 天的 events；新行为：archive.randomOld。
+  if (!gated) {
+    const oldDays = clamp(asNumber(config?.memoryOldAfterDays, 30), 7, 365)
+    const oldLimit = clamp(asNumber(config?.memoryOldLimit, 1), 0, 3)
+    const currentSessionId = String(options.sessionId ?? '')
+    if (oldLimit > 0) {
+      const cutoff = now - oldDays * DAY_MS
+      const old = asArray(memory.events)
+        .filter(event => event && asNumber(event.at, 0) > 0 && asNumber(event.at, 0) <= cutoff)
+        .filter(event => !currentSessionId || String(event.sessionId || '') !== currentSessionId)
+        .sort((a, b) => asNumber(b.at, 0) - asNumber(a.at, 0))
+        .slice(0, oldLimit)
+      if (old.length > 0) {
+        pushPart(`（旧事，${oldDays} 天以前：${old.map((event) => event.summary).join('；')}）`)
+      }
+    }
+    return codepointSlice(parts.join(''), budget)
   }
 
-  const topics = recentTopics(memory, 3, now)
-  if (topics.length > 0 && used < 120) {
-    pushPart(`（最近聊过：${topics.map((item) => item.key).join('、')}）`)
-  }
-
-  // ⑤ 旧事（≥N 天前）：最低优先级，只留 1 条；当前会话里的不重复提。
-  const oldDays = clamp(asNumber(config?.memoryOldAfterDays, 14), 7, 365)
   const oldLimit = clamp(asNumber(config?.memoryOldLimit, 1), 0, 3)
-  const currentSessionId = String(options.sessionId ?? '')
   if (oldLimit > 0) {
-    const cutoff = now - oldDays * 86_400_000
-    const old = asArray(memory.events)
-      .filter(event => event && asNumber(event.at, 0) > 0 && asNumber(event.at, 0) <= cutoff)
-      .filter(event => !currentSessionId || String(event.sessionId || '') !== currentSessionId)
-      .sort((a, b) => asNumber(b.at, 0) - asNumber(a.at, 0))
-      .slice(0, oldLimit)
-    if (old.length > 0) {
-      pushPart(`（旧事，${oldDays} 天以前：${old.map((event) => event.summary).join('；')}）`)
+    const oldEvery = clamp(asNumber(config?.memoryOldEveryTurns, 20), 5, 100)
+    const oldChance = clamp(asNumber(config?.memoryOldChance, 0.3), 0, 1)
+    const mode = config?.memoryOldMode === 'exceptRecent' ? 'exceptRecent' : 'days'
+    const spanDays = mode === 'exceptRecent'
+      ? clamp(asNumber(config?.memoryOldRecentDays, 3), 1, 30)
+      : clamp(asNumber(config?.memoryOldAfterDays, 30), 7, 365)
+    const random = typeof options.random === 'function'
+      ? options.random
+      : seededRandom(`${sessionId}|${injectEntry.turns}|old`)
+    const byEvery = injectEntry.turns >= 1
+      && injectEntry.turns % oldEvery === 0
+      && random() < oldChance
+    // 久别（anchorNext）：首轮不算久别，避免刚开场就翻旧账。
+    const byAnchor = injectEntry.anchorNext === true && injectEntry.turns > 1
+    const archive = archiveOf(options)
+    if (archive && (byEvery || byAnchor)) {
+      const sameRender = injectEntry.lastOldAt > 0 && Math.abs(now - injectEntry.lastOldAt) < 5000
+      const repeatBlocked = !!injectEntry.lastOldText
+        && injectEntry.lastOldAt > 0
+        && !sameRender
+        && (now - injectEntry.lastOldAt) < OLD_REPEAT_MS
+      // 同一 turn 多次渲染时沿用同一次抽样（lastOldAt≈now），保证结果一致。
+      const picked = sameRender && injectEntry.lastOldText
+        ? { text: injectEntry.lastOldText, at: injectEntry.lastOldAt, sessionId }
+        : archive.randomOld({
+          before: now - spanDays * DAY_MS,
+          excludeSessionId: sessionId,
+          seed: `${sessionId}|${injectEntry.turns}|pick`,
+          minChars: OLD_MIN_CHARS,
+          maxChars: OLD_MAX_CHARS,
+          excludeText: repeatBlocked ? injectEntry.lastOldText : '',
+        })
+      if (picked && picked.text) {
+        pushPart(`（旧事，${spanDays} 天以前：${picked.text}）`)
+        const nextEntry = {
+          ...injectEntry,
+          lastOldText: codepointSlice(String(picked.text).trim(), OLD_MAX_CHARS),
+          lastOldAt: now,
+        }
+        if (options.inject && typeof options.inject === 'object') options.inject[sessionId] = nextEntry
+        if (memory && typeof memory === 'object') {
+          if (!memory.inject || typeof memory.inject !== 'object') memory.inject = {}
+          memory.inject[sessionId] = nextEntry
+        }
+        if (typeof options.saveInject === 'function') options.saveInject(sessionId, nextEntry)
+      }
     }
   }
 
@@ -1050,7 +1202,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     ctx = ctxOrOptions
     options = maybeOptions || {}
   }
-  const { state, soul, log, timers } = options
+  const { state, soul, log, timers, getArchive } = options
   const logger = typeof log === 'function' ? log : (...args) => console.log('[dsh-aura]', ...args)
   const disabledApi = {
     snapshot: () => ({}),
@@ -1104,6 +1256,54 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     return disabledApi
   }
 
+  // ---------- 会话注入状态（memory.json.inject）----------
+  // memory-store 的 normalize 只认它自己的字段；inject 是本模块的元数据，
+  // 在 store.read/write 外面包一层，避免被 normalize 丢掉。
+  const injectSessions = (() => {
+    try {
+      const raw = JSON.parse(readFileSync(store.file, 'utf8'))
+      return pruneInjectSessions(normalizeInjectState(raw?.inject))
+    } catch {
+      return {}
+    }
+  })()
+
+  function persistInject() {
+    try {
+      let raw = {}
+      try {
+        raw = JSON.parse(readFileSync(store.file, 'utf8'))
+      } catch {
+        raw = {}
+      }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) raw = { version: MEMORY_VERSION }
+      raw.inject = injectSessions
+      const target = store.file
+      const tmp = `${target}.${process.pid}.inject.tmp`
+      writeFileSync(tmp, `${JSON.stringify(raw, null, 2)}\n`)
+      renameSync(tmp, target)
+    } catch (error) {
+      logger('[soul] memory inject 状态写入失败:', error instanceof Error ? error.message : error)
+    }
+  }
+
+  function saveInjectEntry(sessionId, entry) {
+    const key = String(sessionId ?? '').trim()
+    if (!key) return
+    injectSessions[key] = normalizeInjectEntry(entry)
+    pruneInjectSessions(injectSessions)
+    persistInject()
+  }
+
+  const storeRead = store.read.bind(store)
+  const storeWrite = store.write.bind(store)
+  store.read = () => ({ ...storeRead(), inject: injectSessions })
+  store.write = (next) => {
+    const memory = storeWrite(next)
+    persistInject()
+    return { ...memory, inject: injectSessions }
+  }
+
   const readMemory = () => store.read()
 
   const localDefaults = {
@@ -1116,6 +1316,17 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
     memoryReflectionEvery: 3,
     memoryDiaryEnabled: false,
     memoryRecallLimit: 3,
+    memoryContextBudget: MEMORY_CONTEXT_BUDGET,
+    memoryAnchorEveryTurns: 8,
+    memoryInjectIdleMinutes: 360,
+    memoryOldAfterDays: 30,
+    memoryOldMode: 'days',
+    memoryOldRecentDays: 3,
+    memoryOldEveryTurns: 20,
+    memoryOldChance: 0.3,
+    memoryOldLimit: 1,
+    memoryAttentionCount: 2,
+    memoryAttentionThreshold: 0.35,
     memoryImmediate: true,
     memorySessionDigest: true,
     memoryDigestIdleMinutes: 360,
@@ -1330,7 +1541,12 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
           const sessionId = String(assembly?.agent?.session?.id ?? assembly?.agent?.session?.header?.id ?? '')
           if (assembly && !assembly.agent && config.emotionScope !== 'all') return ''
           if (!isSoulSession(config, sessionId)) return ''
-          return renderMemoryContext(store, config, { soul: readSoul(), sessionId })
+          return renderMemoryContext(store, config, {
+            soul: readSoul(),
+            sessionId,
+            getArchive: () => (typeof getArchive === 'function' ? getArchive() : undefined),
+            saveInject: saveInjectEntry,
+          })
         } catch (error) {
           logger('[soul] memory context 渲染失败:', error instanceof Error ? error.message : error)
           return ''
@@ -1685,7 +1901,23 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       if (!text) return
       const at = asNumber(payload.at, Date.now())
       const config = readConfig()
-      const sessionId = String(payload.sessionId ?? '')
+      const sessionId = String(payload.sessionId ?? '').trim()
+      // 每个会话的注入门控状态：turns / lastUserAt / anchorNext。
+      // anchorNext 只在「首轮」或「距上次说话 ≥ 久别阈值」时为 true；
+      // 普通轮一律写回 false，避免久别之后每轮都 anchor。
+      if (sessionId) {
+        const previous = injectSessions[sessionId] || normalizeInjectEntry(null)
+        const idleMs = clamp(asNumber(config.memoryInjectIdleMinutes, 360), 60, 1440) * 60_000
+        const firstTurn = previous.turns <= 0 || previous.lastUserAt <= 0
+        const longGap = previous.lastUserAt > 0 && at - previous.lastUserAt >= idleMs
+        injectSessions[sessionId] = {
+          ...previous,
+          turns: previous.turns + 1,
+          lastUserAt: at,
+          anchorNext: firstTurn || longGap,
+        }
+        pruneInjectSessions(injectSessions)
+      }
       // 有新消息：先取消这个会话待触发的空闲整理，由下一次 turnEnd 重排。
       clearDigestTimer(sessionId)
       // 距上次活动已经超过空闲阈值：趁现在先补一次整理（窗口在本条消息入事件前，正好干净）。
@@ -1706,6 +1938,8 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       applyUserFacts(text, at, 'user')
       // 重要信息立即入记忆（零 token）；开关关闭时只跳过新增笔记，规则事实照旧。
       if (config.memoryImmediate !== false) applyImmediateNotes(text, at, config)
+      // 回合状态最后落盘（前面的 store.update 会重写 memory.json，这里补回 inject）。
+      if (sessionId) persistInject()
     } catch (error) {
       logger('[soul] memory onUserMessage 失败:', error instanceof Error ? error.message : error)
     }
@@ -2357,6 +2591,7 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
 
   function clear() {
     try {
+      for (const key of Object.keys(injectSessions)) delete injectSessions[key]
       store.write(emptyMemory())
       reflectBuffer = []
       logger('[soul] 记忆已清空（memory.json 的事件/笔记/话题/待办）')
@@ -2798,6 +3033,8 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
         return renderMemoryContext(store, readConfig(), {
           now: asNumber(now, Date.now()),
           soul: readSoul(),
+          getArchive: () => (typeof getArchive === 'function' ? getArchive() : undefined),
+          saveInject: saveInjectEntry,
           ...(options && typeof options === 'object' ? options : {}),
         })
       } catch {
@@ -2903,7 +3140,9 @@ export function installMemory(ctxOrOptions, maybeOptions = {}) {
       TOPIC_VOCAB,
       SUMMARY_MAX,
       MEMORY_CONTEXT_BUDGET,
+      MEMORY_CONTEXT_BUDGET_MIN,
       MEMORY_CONTEXT_BUDGET_MAX,
+      INJECT_SESSION_LIMIT,
       NOTE_MAX,
       NOTE_MAX_CHARS,
       EVENT_MAX,
