@@ -609,7 +609,35 @@ export class ChannelBridge {
     this.touchRecord(chat)
     this.log(`[qq] soul_say seq=${seq} ${Array.from(outgoing).length} 字 → ${chat.kind}/${chat.chatId}`)
     this.notifyOutbound({ chat, kind: 'text', text: outgoing, proactive: false, sessionId })
+    const cap = Math.max(0, Number(config.soulSayMaxRounds) || 0)
+    if (cap > 0) {
+      context.sayRounds = (Number(context.sayRounds) || 0) + 1
+      if (context.sayRounds <= cap) {
+        const timer = setTimeout(() => { this.rethinkAfterSay(chat, sessionId).catch(() => {}) }, 1200)
+        if (timer && typeof timer.unref === 'function') timer.unref()
+      }
+    }
     return { ok: true, seq, text: outgoing }
+  }
+
+  /** soul_say 的追加推理：给同一个 agent 排下一轮，让它决定要不要再补一句。 */
+  async rethinkAfterSay(chat, sessionId) {
+    const context = this.contexts.get(chat.key)
+    if (!context || context.expiresAt <= Date.now()) return
+    const agent = this.findLiveAgent(sessionId) || this.handles.get(sessionId)?.agent
+    if (!agent || typeof agent.followup !== 'function') return
+    const requestId = `qq-rethink-${randomUUID()}`
+    const message = {
+      id: requestId,
+      role: 'user',
+      content: [{ type: 'text', text: '（内部续话：刚才你已经补过一句。如果想再说一句就自然说；不想就回复 <skip>，不要重复。）' }],
+      source: { kind: 'system', rpcId: requestId },
+    }
+    try {
+      await agent.followup(message)
+    } catch (error) {
+      this.log('[qq] 追加推理 followup 失败:', error instanceof Error ? error.message : error)
+    }
   }
 
   /** dsh_im_return_file 工具的实现：把表情图/文件作为 QQ 原生消息发出（当回合、文字之前）。 */

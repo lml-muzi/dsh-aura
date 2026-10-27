@@ -77,6 +77,7 @@ export const DEFAULT_CONFIG = {
   splitEnabled: true,
   splitRegex: '\\n{2,}',
   maxMessages: 4,
+  soulSayMaxRounds: 0,
   steerEnabled: true,
   channelImpl: 'sdk', // sdk | legacy
 
@@ -249,6 +250,7 @@ const INT_RANGES = {
   speakPauseHours: [0, 720],
   speakMaxChars: [15, 300],
   maxMessages: [1, 5],
+  soulSayMaxRounds: [0, 3],
 }
 
 const FLOAT_RANGES = {
