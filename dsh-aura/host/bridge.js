@@ -620,8 +620,26 @@ export class ChannelBridge {
     return { ok: true, seq, text: outgoing }
   }
 
-  /** soul_say 的追加推理：给同一个 agent 排下一轮，让它决定要不要再补一句。 */
-  async rethinkAfterSay(chat, sessionId) {
+  /** soul_say：不发送，只给同一个 agent 排一轮 followup。 */
+  async requestRethink(exec, hint = '') {
+    const session = exec?.agent?.session
+    const sessionId = String(session?.id ?? session?.header?.id ?? '')
+    const chat = this.chatOfSession(sessionId)
+    if (!chat) return { ok: false, error: '当前会话没有绑定 QQ 聊天' }
+    const context = this.contexts.get(chat.key)
+    if (!context || context.expiresAt <= Date.now()) return { ok: false, error: '被动回复窗口已关闭，先等对方说话' }
+    const config = this.state.readConfig()
+    const cap = Math.max(0, Number(config.soulSayMaxRounds) || 0)
+    if (cap <= 0) return { ok: false, error: '追加推理轮数为 0，先到连接页打开' }
+    context.sayRounds = (Number(context.sayRounds) || 0) + 1
+    if (context.sayRounds > cap) return { ok: false, error: '本回合追加轮数已到上限' }
+    const timer = setTimeout(() => { this.rethinkAfterSay(chat, sessionId, hint).catch(() => {}) }, 800)
+    if (timer && typeof timer.unref === 'function') timer.unref()
+    return { ok: true, queued: true, round: context.sayRounds, cap }
+  }
+
+  /** soul_say 的追加推理：给同一个 agent 排下一轮，让它决定要不要再说。 */
+  async rethinkAfterSay(chat, sessionId, hint = '') {
     const context = this.contexts.get(chat.key)
     if (!context || context.expiresAt <= Date.now()) return
     const agent = this.findLiveAgent(sessionId) || this.handles.get(sessionId)?.agent
@@ -630,7 +648,7 @@ export class ChannelBridge {
     const message = {
       id: requestId,
       role: 'user',
-      content: [{ type: 'text', text: '（内部续话：刚才你已经补过一句。如果想再说一句就自然说；不想就回复 <skip>，不要重复。）' }],
+      content: [{ type: 'text', text: `（内部续话：你想再想一轮。${hint ? '原因：' + String(hint).slice(0, 120) : ''} 想说什么就自然说；不想就回复 <skip>，不要重复刚才的话。）` }],
       source: { kind: 'system', rpcId: requestId },
     }
     try {

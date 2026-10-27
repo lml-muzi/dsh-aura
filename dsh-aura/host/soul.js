@@ -831,7 +831,8 @@ export function sanitizeSoulConfigPatch(raw) {
 export function validateEvolveArgs(args = {}) {
   const src = asObject(args)
   const text = asString(src.text, '').replace(/\s+/g, ' ').trim()
-  if (!text) return { ok: false, reason: '缺少 text：写一句你自己长出来的东西' }
+  const hasConfig = src.config && typeof src.config === 'object' && !Array.isArray(src.config) && Object.keys(src.config).length > 0
+  if (!text && !hasConfig) return { ok: false, reason: '缺少 text：写一句你自己长出来的东西（或给 config 只改设置）' }
   const textLength = codepointLength(text)
   if (textLength > GROWTH_TEXT_MAX) {
     return { ok: false, reason: `text 太长（${textLength} 字），最多 ${GROWTH_TEXT_MAX} 字` }
@@ -849,7 +850,8 @@ export function validateEvolveArgs(args = {}) {
   if (!config.ok) return config
   return {
     ok: true,
-    text: codepointSlice(text, GROWTH_TEXT_MAX),
+    text: text ? codepointSlice(text, GROWTH_TEXT_MAX) : '',
+    configOnly: !text,
     kind,
     note: codepointSlice(note, GROWTH_NOTE_MAX),
     pin: src.pin === true,
@@ -1060,6 +1062,15 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
     if (!mutation.ok) return { ok: false, reason: mutation.reason }
     soul.growth = mutation.entries
     saveNow({ reason: 'soul-reflection', skipBackup: true, force: true })
+    if (!mutation) {
+      return {
+        ok: true,
+        configOnly: true,
+        configChanged: checked.config.changed.slice(),
+        ...(backupId ? { backupId } : {}),
+        total: soul.growth.length,
+      }
+    }
     return {
       ok: true,
       growth: { ...mutation.growth },
@@ -1315,13 +1326,14 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
       return { ok: false, reason: 'replace 指向的成长记录不存在（先看现有 growth 列表）' }
     }
     const configKeys = Object.keys(checked.config.configPatch)
+    if (!checked.text && configKeys.length === 0) return { ok: false, reason: '没有可改的内容' }
     if (configKeys.length > 0 && typeof state?.writeConfig !== 'function') {
       return { ok: false, reason: '当前宿主没有 config 写入能力' }
     }
 
     // 写入前快照；失败只 warn，继续写（备份不是写盘的前置条件）。
     let backupId = ''
-    const reason = 'soul-evolve: ' + codepointSlice(checked.text, 60)
+    const reason = 'soul-evolve: ' + (checked.text ? codepointSlice(checked.text, 60) : 'config-only')
     try {
       const mod = await import('./backup.js')
       const result = await mod.snapshot('soul-evolve', { reason })
@@ -1336,7 +1348,7 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
 
     const now = Date.now()
     const previousGrowth = soul.growth
-    const mutation = checked.replace
+    const mutation = checked.text ? (checked.replace
       ? updateGrowth(soul.growth, checked.replace, {
         text: checked.text,
         kind: checked.kind,
@@ -1349,9 +1361,9 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
         note: checked.note,
         pinned: checked.pin,
         source: 'self',
-      }, now)
-    if (!mutation.ok) return { ok: false, reason: mutation.reason }
-    soul.growth = mutation.entries
+      }, now)) : null
+    if (mutation && !mutation.ok) return { ok: false, reason: mutation.reason }
+    if (mutation) soul.growth = mutation.entries
 
     if (configKeys.length > 0) {
       try {
@@ -1388,7 +1400,7 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
         + 'config 可直接改灵魂身份字段（soulName / soulUserNickname / soulEnabled / soulPromptBudget 200~4000 / '
         + 'soulBio / soulContent / expressionStyle 自由文本≤200 / interests / strengths）。',
       parameters: {
-        text: { type: 'string', description: '必填：一句成长（≤120 字），用第一人称写“我…”', required: true },
+        text: { type: 'string', description: '一句成长（≤120 字）；只改 config 时可省略' },
         kind: {
           type: 'string',
           enum: [...GROWTH_KINDS],

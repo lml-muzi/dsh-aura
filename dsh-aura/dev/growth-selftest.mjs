@@ -343,7 +343,7 @@ const identitySection = fake.contexts.find((spec) => spec.name === 'aura:growth'
 
 await test('工具已注册：parameters 是每属性 spec，config 收窄白名单', () => {
   assert.ok(evolve, '应注册 soul_evolve')
-  assert.deepEqual(evolve.parameters.required, ['text'])
+  assert.ok(!Array.isArray(evolve.parameters.required) || !evolve.parameters.required.includes('text'), 'text 现在可选')
   assert.equal(evolve.parameters.properties.config.type, 'object')
   assert.equal(evolve.parameters.properties.config.additionalProperties, false)
   assert.deepEqual(evolve.parameters.properties.kind.enum, [...GROWTH_KINDS])

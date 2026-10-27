@@ -35,17 +35,17 @@ export function installMedia(ctx, { bridge, log }) {
 
   ctx.tools.register(defineTool({
     name: 'soul_say',
-    description: '在当前的 QQ 被动回复窗口里追加一条短消息。想分两句说、又不想把正文拆得太碎时用；一次最多 200 字，同回合受 QQ 条数上限约束。不要用它重复你马上要发的正文。',
+    description: '表示“我还想再想一轮”，不会直接发消息。调用后桥会给同一个 agent 排一轮 followup，下一轮再决定说什么，或 <skip> 收住。想发额外的话请用正常回复里的空行拆分，不要用这个工具发正文。',
     parameters: {
-      text: { type: 'string', description: '要追加的那一句，≤200 字', required: true },
+      hint: { type: 'string', description: '可选：为什么还想再说一轮，≤120 字' },
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: value?.ok ? '已追加第 ' + String(value.seq) + ' 条消息' : '没发出去：' + String(value?.error || '') }],
+      render: (_args, value) => [{ type: 'text', text: value?.ok ? '已排队再想一轮' : '没排上：' + String(value?.error || '') }],
     },
     async execute(args, exec) {
       try {
-        return await bridge.say(args?.text, exec)
+        return await bridge.requestRethink(exec, args?.hint)
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) }
       }
