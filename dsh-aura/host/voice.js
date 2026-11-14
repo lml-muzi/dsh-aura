@@ -152,6 +152,8 @@ export class VoiceChannel {
     this.pollIntervalMs = 0
     this.eventFloor = 0 // resume 时回放的历史 assistant/message（event.time 更早）不念
     this.lastSay = { text: '', at: 0 }
+    this.lastExplicitAt = 0
+    this.bodyConfigCache = null
     this.stats = {
       startedAt: Date.now(),
       polls: 0,
@@ -485,6 +487,14 @@ export class VoiceChannel {
   /* ---------------------------------------------------------------- 回复捕获 */
 
   onSessionEvent(session, event) {
+    // 记录语音会话里「显式调用身体说话」的工具调用（body_say 等），供 prefer-call 模式抑制自动 say
+    if (event && event.type === 'tool/call') {
+      const name = event?.data?.name
+      if (name === 'body_say' || name === 'soul_say' || name === 'soul_voice') {
+        this.lastExplicitAt = Date.now()
+      }
+      return
+    }
     if (this.disposed || !event || event.type !== 'assistant/message') return
     if (!this.sessionId) return
     if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return
@@ -495,6 +505,11 @@ export class VoiceChannel {
     if (this.eventFloor && Number.isFinite(eventTime) && eventTime < this.eventFloor) return
     const message = event?.data?.message ?? {}
     const content = message.content
+    // 助手消息里如果带 body_say 等显式说话工具，也记一次
+    const toolParts = Array.isArray(content) ? content.filter((p) => p && p.type === 'tool-call') : []
+    if (toolParts.some((p) => p.name === 'body_say' || p.name === 'soul_say' || p.name === 'soul_voice')) {
+      this.lastExplicitAt = Date.now()
+    }
     if (hasToolCall(content)) return // 工具调用前的中间叙述：不念
     const text = cleanSpokenText(partsText(content))
     if (!text) return
@@ -529,6 +544,20 @@ export class VoiceChannel {
     if (typeof this.flushTimer.unref === 'function') this.flushTimer.unref()
   }
 
+  /** 读取 body 的语音输出模式（tts.replyMode），缓存 5s；body 不可达时回退 auto */
+  async replyMode() {
+    const now = Date.now()
+    if (this.bodyConfigCache && now - this.bodyConfigCache.at < 5000) return this.bodyConfigCache.value
+    let value = 'auto'
+    try {
+      const cfg = await requestJson(this.bodyBaseUrl() + '/api/config', { timeoutMs: 2000 })
+      const mode = String(cfg?.tts?.replyMode || 'auto')
+      if (['auto', 'prefer-call', 'call-only', 'off'].includes(mode)) value = mode
+    } catch { /* body 不在：保持 auto，say 本身也会失败 */ }
+    this.bodyConfigCache = { at: now, value }
+    return value
+  }
+
   async flushReplies() {
     if (this.disposed) return
     const raw = this.pendingReplies.join('\n')
@@ -536,6 +565,18 @@ export class VoiceChannel {
     const text = cleanSpokenText(raw)
     if (!text) return
     const now = Date.now()
+    const mode = await this.replyMode()
+    this.stats.lastReplyMode = mode
+    if (mode === 'off' || mode === 'call-only') {
+      this.stats.skippedByMode = (this.stats.skippedByMode || 0) + 1
+      this.log(`[voice] 回复模式 ${mode}，跳过自动说话`)
+      return
+    }
+    if (mode === 'prefer-call' && this.lastExplicitAt && now - this.lastExplicitAt < 12000) {
+      this.stats.skippedByMode = (this.stats.skippedByMode || 0) + 1
+      this.log('[voice] 调用优先：最近 12s 已显式说话，跳过自动 say')
+      return
+    }
     // 同一条回复重复 say（事件重放 / 多监听）只念一次
     if (this.lastSay.text === text && now - this.lastSay.at < DUP_TEXT_WINDOW_MS) return
     this.lastSay = { text, at: now }
