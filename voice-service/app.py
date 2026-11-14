@@ -7,6 +7,7 @@ import io, json, math, os, time, uuid, wave
 from pathlib import Path
 from typing import List, Optional
 
+import asyncio
 import httpx
 import numpy as np
 import scipy.io.wavfile
@@ -44,6 +45,7 @@ DEFAULT_CONFIG = {
     'asrProvider': 'local',
     'cloudAsrEndpoint': 'https://api.deepseek.com/v1/tools/asr',
     'cloudAsrApiKey': '',
+    'cloudAsrKeySource': 'custom',
     'cloudTtsEndpoint': 'https://api.deepseek.com/v1/tools/tts',
     'cloudTtsApiKey': '',
     'cloudVoiceId': 'stella',
@@ -196,6 +198,8 @@ def wav_bytes(x: np.ndarray) -> bytes:
 
 def transcribe_cloud(x: np.ndarray):
     key = str(cfg.get('cloudAsrApiKey') or '').strip()
+    if not key and cfg.get('cloudAsrKeySource') == 'dsh':
+        key = str(os.environ.get('DEEPSEEK_API_KEY') or '').strip()
     if not key:
         raise HTTPException(400, 'cloud ASR key missing')
     endpoint = str(cfg.get('cloudAsrEndpoint') or 'https://api.deepseek.com/v1/tools/asr')
@@ -243,8 +247,123 @@ def metadata_find(audio_id):
             return e
     return None
 
-
 app = FastAPI(title='voice-service')
+
+# ---------------------------------------------------------------- 流式语音
+def pcm16(x: np.ndarray):
+    return (np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes()
+
+
+def energy_vad_frames(x: np.ndarray, frame=320):
+    """返回 (是否有人声, 当前片段结束) 的简单能量 VAD 结果。"""
+    n = len(x) // frame
+    levels = []
+    for i in range(n):
+        levels.append(float(np.sqrt(np.mean(x[i * frame:(i + 1) * frame] ** 2) + 1e-12)))
+    return levels
+
+
+@app.websocket('/ws/voice')
+async def voice_ws(ws):
+    await ws.accept()
+    buf = np.zeros(0, dtype=np.float32)
+    wake_buf = np.zeros(0, dtype=np.float32)
+    seg = np.zeros(0, dtype=np.float32)
+    speaking = False
+    silence_frames = 0
+    speech_frames = 0
+    in_convo_until = 0.0
+    send_level_at = 0.0
+    current_model = cfg['asrModel'] if cfg['asrModel'] in ('sensevoice', 'zipformer', 'cloud') else 'sensevoice'
+    await ws.send_json({'type': 'ready', 'wakeEnrolled': WAKE_PATH.exists(), 'wakeEnabled': cfg['wakeEnabled'], 'model': current_model})
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get('type') == 'websocket.disconnect':
+                break
+            if msg.get('bytes') is not None:
+                raw = msg['bytes']
+                x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                if len(x) == 0:
+                    continue
+                now = time.time()
+                # 唤醒阶段：滚动 2.5s，1s 打一次分
+                if cfg['wakeEnabled'] and now > in_convo_until:
+                    wake_buf = np.concatenate([wake_buf, x])[-16000 * 3:]
+                    if len(wake_buf) >= 16000 * 1.2:
+                        result = await asyncio.to_thread(score_wake, wake_buf)
+                        if result.get('trigger'):
+                            in_convo_until = now + float(cfg['continuousWindowMs']) / 1000
+                            wake_buf = np.zeros(0, dtype=np.float32)
+                            await ws.send_json({'type': 'wake', 'probability': result.get('probability'), 'distance': result.get('distance')})
+                    continue
+                # 对话/实时识别阶段：能量 VAD 切句
+                frame = 320
+                for i in range(0, len(x) - frame + 1, frame):
+                    f = x[i:i + frame]
+                    rms = float(np.sqrt(np.mean(f * f) + 1e-12))
+                    if rms > 0.008:
+                        speaking = True
+                        silence_frames = 0
+                        speech_frames += 1
+                        seg = np.concatenate([seg, f])
+                    elif speaking:
+                        silence_frames += 1
+                        seg = np.concatenate([seg, f])
+                        if silence_frames >= 25:
+                            if speech_frames >= 10:
+                                try:
+                                    text, elapsed = await asyncio.to_thread(transcribe, seg, current_model)
+                                except Exception as e:
+                                    await ws.send_json({'type': 'error', 'message': str(e)})
+                                    text = ''
+                                    elapsed = 0
+                                if text:
+                                    audio_id = uuid.uuid4().hex[:12]
+                                    path = AUDIO_DIR / f'{audio_id}.wav'
+                                    with wave.open(str(path), 'wb') as f:
+                                        f.setnchannels(1); f.setsampwidth(2); f.setframerate(16000)
+                                        f.writeframes(pcm16(seg))
+                                    entry = {'id': audio_id, 'text': text, 'model': current_model, 'durationMs': round(len(seg) / 16),
+                                             'createdAt': time.time(), 'peak': float(np.max(np.abs(seg))), 'rms': float(np.sqrt(np.mean(seg * seg)))}
+                                    metadata_append(entry)
+                                    await ws.send_json({'type': 'asr', 'text': text, 'id': audio_id, 'model': current_model, 'asrMs': round(elapsed * 1000)})
+                            seg = np.zeros(0, dtype=np.float32)
+                            speaking = False
+                            speech_frames = 0
+                            if cfg['wakeEnabled'] and time.time() > in_convo_until:
+                                break
+                    # 电平
+                    if now - send_level_at > 0.15:
+                        send_level_at = now
+                        try:
+                            await ws.send_json({'type': 'level', 'rms': round(rms, 5)})
+                        except Exception:
+                            pass
+            elif msg.get('text') is not None:
+                try:
+                    cmd = json.loads(msg['text'])
+                except Exception:
+                    continue
+                if cmd.get('type') == 'config':
+                    if 'wakeEnabled' in cmd: cfg['wakeEnabled'] = bool(cmd['wakeEnabled'])
+                    if cmd.get('model') in ('sensevoice', 'zipformer', 'cloud'): current_model = cmd['model']
+                    if cmd.get('wakeword'): cfg['wakeword'] = str(cmd['wakeword'])
+                    save_config()
+                    await ws.send_json({'type': 'config', 'config': cfg})
+                elif cmd.get('type') == 'reset':
+                    wake_buf = np.zeros(0, dtype=np.float32); seg = np.zeros(0, dtype=np.float32)
+                    speaking = False; in_convo_until = 0
+    except Exception:
+        pass
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+
 
 
 @app.get('/health')
@@ -352,4 +471,4 @@ def history(limit: int = 30):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host='127.0.0.1', port=3097, log_level='warning')
+    uvicorn.run(app, host='127.0.0.1', port=3097, log_level='warning', ws='wsproto')
