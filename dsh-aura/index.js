@@ -17,7 +17,7 @@ import { installConfigTool } from './host/config-tool.js'
 import { installMemory } from './host/memory.js'
 import { installArchive } from './host/archive.js'
 import { installSpeak } from './host/speak.js'
-import { registerPanelApi } from './host/web.js'
+import { registerPanelApi, installAuraSessionsSync, syncAuraSessionsToBody } from './host/web.js'
 import { installVoice } from './host/voice.js'
 
 export const name = 'dsh-aura'
@@ -199,6 +199,12 @@ export function apply(ctx, config = {}) {
   }
 
   registerPanelApi(ctx, { state, service, soul, emotion, memory, speak, bridge, voice, log })
+
+  // 把 Aura 会话集合同步给 body（气泡/语音输出范围用）：
+  // 挂载先推一次，面板 /config 与 session-api 写入口会主动同步，另有 5s 兜底轮询覆盖 config-tool 等入口。
+  void safe(() => syncAuraSessionsToBody(state, log, { force: true }), 'sync aura sessions to body')
+  const auraSessionsSync = safe(() => installAuraSessionsSync({ state, log }), 'install aura sessions sync')
+  if (typeof auraSessionsSync === 'function') disposers.push(auraSessionsSync)
 
   // 安装空档可能污染 clientModules 缓存：稍后自愈两次，第一次成功就不再试
   if (!healClientModules('immediate')) {

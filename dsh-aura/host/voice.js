@@ -7,7 +7,9 @@
  *   → 专用 voice 会话（sessionId `voice:body:<ts>`，不复用 QQ 会话；soul.js 的 isSoulSession 认得
  *     `voice:body:` 前缀，所以情绪/记忆/存档/关系与 QQ 会话一样生效）
  *   → sessionController.prompt(mode: 'queue') 走 Aura 的人格 / system prompt / 工具链
- *   → 监听该会话的 assistant/message（忽略 tool-call 中间消息，按 message id + 文本去重）
+ *   → 监听所有会话的 assistant/message（忽略 tool-call 中间消息，按 message id + 文本去重）
+ *   → 按 body 的 tts.replyScope 判断该会话要不要念（all/aura/web/channel，默认 aura）
+ *   → 再按 tts.replyMode（auto/prefer-call/call-only/off）决定自动说还是跳过
  *   → POST /api/say，让身体气泡 + TTS 说出来
  *
  * 失败哲学：body 没起 / 接口还没上时静默跳过（错误日志 5 分钟节流一次），不抛错、不影响 QQ 链路。
@@ -37,6 +39,10 @@ const SEEN_MESSAGE_WINDOW_MS = 120_000
 const SEEN_MESSAGE_LIMIT = 80
 const POLL_ERROR_LOG_INTERVAL_MS = 5 * 60_000 // 轮询失败日志节流，避免刷屏
 const MAX_REPLY_CHARS = 2000
+const BODY_CONFIG_TTL_MS = 5000 // body tts.replyMode/replyScope 缓存
+const SKIP_LOG_INTERVAL_MS = 60_000 // off/call-only 跳过日志节流
+/** 视为「Aura 已显式让身体说话」的工具（prefer-call 模式据此抑制自动 say）。 */
+const EXPLICIT_SAY_TOOLS = new Set(['body_say', 'soul_say', 'soul_voice'])
 
 function messageOf(error) {
   return error instanceof Error ? error.message : String(error)
@@ -144,15 +150,17 @@ export class VoiceChannel {
     this.chain = Promise.resolve()
     this.pollTimer = null
     this.polling = false
-    this.flushTimer = null
-    this.pendingReplies = []
     this.seenMessages = new Map()
     this.lastPollLogAt = 0
     this.bodyUrl = ''
     this.pollIntervalMs = 0
     this.eventFloor = 0 // resume 时回放的历史 assistant/message（event.time 更早）不念
     this.lastSay = { text: '', at: 0 }
-    this.lastExplicitAt = 0
+    this.lastExplicitBySession = new Map() // sessionId -> 最近一次显式 body_say/soul_say/soul_voice 时间
+    this.lastEventTimeBySession = new Map() // sessionId -> 已见过的最新事件时间（过滤 resume 回放）
+    this.replyBuckets = new Map() // sessionId -> { texts, timer }：同回合合并，不同会话分开
+    this.lastSayBySession = new Map() // sessionId -> { text, at }：同文本重复 say 去重
+    this.lastSkipLogAt = 0
     this.bodyConfigCache = null
     this.stats = {
       startedAt: Date.now(),
@@ -161,6 +169,11 @@ export class VoiceChannel {
       utterances: 0,
       replies: 0,
       says: 0,
+      skippedByScope: 0,
+      skippedByMode: 0,
+      skippedByAge: 0,
+      lastReplyScope: 'aura',
+      lastReplyMode: 'auto',
       lastPollAt: 0,
       lastPollOkAt: 0,
       lastPollError: '',
@@ -247,11 +260,11 @@ export class VoiceChannel {
       clearInterval(this.pollTimer)
       this.pollTimer = null
     }
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer)
-      this.flushTimer = null
+    for (const bucket of this.replyBuckets.values()) {
+      if (bucket.timer) clearTimeout(bucket.timer)
+      bucket.timer = null
     }
-    this.pendingReplies = []
+    this.replyBuckets.clear()
     try {
       this.offSessionEvent?.()
     } catch { /* ignore */ }
@@ -484,31 +497,95 @@ export class VoiceChannel {
     return { sessionId, agent: handle.agent }
   }
 
-  /* ---------------------------------------------------------------- 回复捕获 */
+  /* ---------------------------------------------------------------- 回复捕获（全会话 + 输出范围） */
+
+  isChannelSession(sessionId) {
+    return typeof sessionId === 'string' && (sessionId.startsWith('qq:') || sessionId.startsWith('voice:'))
+  }
+
+  /**
+   * tts.replyScope 判定（Aura 自己算，不问 body）：
+   *   channel = qq: / voice: 会话
+   *   webAura = soulSessionIds 包含该会话，或全局 soulWebEnabled 且不是渠道会话
+   *   aura（默认）= channel || webAura；all = 全部
+   */
+  sessionMatchesScope(sessionId, scope) {
+    const id = String(sessionId || '')
+    if (!id) return false
+    if (scope === 'all') return true
+    const channel = this.isChannelSession(id)
+    if (scope === 'channel') return channel
+    const config = this.getConfig() || {}
+    const ids = String(config.soulSessionIds || '').split(',').map(part => part.trim()).filter(Boolean)
+    const webAura = ids.includes(id) || (config.soulWebEnabled === true && !channel)
+    if (scope === 'web') return webAura && !channel
+    return channel || webAura
+  }
+
+  /** 记一次「Aura 显式让身体说话」（prefer-call 模式 12s 内不再自动 say）。 */
+  markExplicit(sessionId) {
+    const key = String(sessionId || '')
+    if (!key) return
+    const now = Date.now()
+    this.lastExplicitBySession.set(key, now)
+    if (this.lastExplicitBySession.size > 512) {
+      for (const [id, at] of this.lastExplicitBySession) {
+        if (now - at > 120_000) this.lastExplicitBySession.delete(id)
+      }
+    }
+  }
+
+  /** body 的语音输出配置（tts.replyMode / tts.replyScope），缓存 5s；body 不可达时 fail-open。 */
+  async bodyVoiceConfig() {
+    const now = Date.now()
+    if (this.bodyConfigCache && now - this.bodyConfigCache.at < BODY_CONFIG_TTL_MS) return this.bodyConfigCache.value
+    const value = { mode: 'auto', scope: 'aura' }
+    try {
+      const cfg = await requestJson(this.bodyBaseUrl() + '/api/config', { timeoutMs: 2000 })
+      const mode = String(cfg?.tts?.replyMode || 'auto')
+      const scope = String(cfg?.tts?.replyScope || 'aura')
+      if (['auto', 'prefer-call', 'call-only', 'off'].includes(mode)) value.mode = mode
+      if (['all', 'aura', 'web', 'channel'].includes(scope)) value.scope = scope
+    } catch { /* body 不在：保持默认 */ }
+    this.bodyConfigCache = { at: now, value }
+    return value
+  }
+
+  /** 兼容旧调用：只取回复模式。 */
+  async replyMode() {
+    return (await this.bodyVoiceConfig()).mode
+  }
 
   onSessionEvent(session, event) {
-    // 记录语音会话里「显式调用身体说话」的工具调用（body_say 等），供 prefer-call 模式抑制自动 say
-    if (event && event.type === 'tool/call') {
-      const name = event?.data?.name
-      if (name === 'body_say' || name === 'soul_say' || name === 'soul_voice') {
-        this.lastExplicitAt = Date.now()
-      }
+    if (this.disposed || !event || typeof event.type !== 'string') return
+    const sessionId = String(session?.id ?? session?.header?.id ?? '')
+    if (!sessionId) return
+    if (event.type === 'tool/call') {
+      if (EXPLICIT_SAY_TOOLS.has(event?.data?.name)) this.markExplicit(sessionId)
       return
     }
-    if (this.disposed || !event || event.type !== 'assistant/message') return
-    if (!this.sessionId) return
+    if (event.type !== 'assistant/message') return
     if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return
-    const sessionId = String(session?.id ?? session?.header?.id ?? '')
-    if (sessionId !== this.sessionId) return
-    // resume 回放：旧事件的 time 早于本次 resume 起点，不重复念
+    // 过滤历史/回放：早于本次挂载、早于 resume 起点、或早于该会话已见过的最新事件都不念
     const eventTime = typeof event.time === 'string' ? Date.parse(event.time) : Number(event.time)
-    if (this.eventFloor && Number.isFinite(eventTime) && eventTime < this.eventFloor) return
+    if (Number.isFinite(eventTime)) {
+      const floor = Math.max(this.stats.startedAt - 60_000, sessionId === this.sessionId ? this.eventFloor : 0)
+      const previous = this.lastEventTimeBySession.get(sessionId) || 0
+      if (eventTime < floor || eventTime < previous) {
+        this.stats.skippedByAge = (this.stats.skippedByAge || 0) + 1
+        return
+      }
+      this.lastEventTimeBySession.set(sessionId, Math.max(previous, eventTime))
+    }
     const message = event?.data?.message ?? {}
     const content = message.content
-    // 助手消息里如果带 body_say 等显式说话工具，也记一次
-    const toolParts = Array.isArray(content) ? content.filter((p) => p && p.type === 'tool-call') : []
-    if (toolParts.some((p) => p.name === 'body_say' || p.name === 'soul_say' || p.name === 'soul_voice')) {
-      this.lastExplicitAt = Date.now()
+    // 助手消息里带 body_say 等显式说话工具：记一次（prefer-call 用）
+    if (Array.isArray(content)) {
+      for (const part of content) {
+        if (!part) continue
+        const isCall = part.type === 'tool-call' || part.type === 'tool_call'
+        if (isCall && EXPLICIT_SAY_TOOLS.has(part.name)) this.markExplicit(sessionId)
+      }
     }
     if (hasToolCall(content)) return // 工具调用前的中间叙述：不念
     const text = cleanSpokenText(partsText(content))
@@ -531,54 +608,77 @@ export class VoiceChannel {
     this.stats.replies += 1
     this.stats.lastReplyAt = now
     this.stats.lastReplyText = text
-    this.queueReply(text)
+    void this.handleReply(sessionId, text)
   }
 
-  queueReply(text) {
-    this.pendingReplies.push(text)
-    if (this.flushTimer) return
-    this.flushTimer = setTimeout(() => {
-      this.flushTimer = null
-      void this.flushReplies()
-    }, REPLY_COALESCE_MS)
-    if (typeof this.flushTimer.unref === 'function') this.flushTimer.unref()
-  }
-
-  /** 读取 body 的语音输出模式（tts.replyMode），缓存 5s；body 不可达时回退 auto */
-  async replyMode() {
-    const now = Date.now()
-    if (this.bodyConfigCache && now - this.bodyConfigCache.at < 5000) return this.bodyConfigCache.value
-    let value = 'auto'
-    try {
-      const cfg = await requestJson(this.bodyBaseUrl() + '/api/config', { timeoutMs: 2000 })
-      const mode = String(cfg?.tts?.replyMode || 'auto')
-      if (['auto', 'prefer-call', 'call-only', 'off'].includes(mode)) value = mode
-    } catch { /* body 不在：保持 auto，say 本身也会失败 */ }
-    this.bodyConfigCache = { at: now, value }
-    return value
-  }
-
-  async flushReplies() {
+  /** 判定某会话的这条最终文本要不要念（scope + mode），再进合并队列。 */
+  async handleReply(sessionId, text) {
     if (this.disposed) return
-    const raw = this.pendingReplies.join('\n')
-    this.pendingReplies = []
-    const text = cleanSpokenText(raw)
+    try {
+      const cfg = await this.bodyVoiceConfig()
+      this.stats.lastReplyScope = cfg.scope
+      this.stats.lastReplyMode = cfg.mode
+      if (!this.sessionMatchesScope(sessionId, cfg.scope)) {
+        this.stats.skippedByScope = (this.stats.skippedByScope || 0) + 1
+        return
+      }
+      if (cfg.mode === 'off' || cfg.mode === 'call-only') {
+        this.stats.skippedByMode = (this.stats.skippedByMode || 0) + 1
+        const now = Date.now()
+        if (!this.lastSkipLogAt || now - this.lastSkipLogAt > SKIP_LOG_INTERVAL_MS) {
+          this.lastSkipLogAt = now
+          this.log(`[voice] 回复模式 ${cfg.mode}，跳过自动说话`)
+        }
+        return
+      }
+      if (cfg.mode === 'prefer-call') {
+        const explicitAt = this.lastExplicitBySession.get(String(sessionId || '')) || 0
+        if (explicitAt && Date.now() - explicitAt < 12000) {
+          this.stats.skippedByMode = (this.stats.skippedByMode || 0) + 1
+          return
+        }
+      }
+      this.queueReply(sessionId, text)
+    } catch (error) {
+      this.log('[voice] 回复判定失败（忽略）:', messageOf(error))
+    }
+  }
+
+  /** 同一会话同一回合里 500ms 内连续提交的文本合并成一次 say；不同会话分开。 */
+  queueReply(sessionId, text) {
+    const key = String(sessionId || '')
+    let bucket = this.replyBuckets.get(key)
+    if (!bucket) {
+      bucket = { texts: [], timer: null }
+      this.replyBuckets.set(key, bucket)
+    }
+    bucket.texts.push(text)
+    if (bucket.timer) return
+    bucket.timer = setTimeout(() => {
+      bucket.timer = null
+      const raw = bucket.texts.join('\n')
+      bucket.texts = []
+      if (this.replyBuckets.get(key) === bucket) this.replyBuckets.delete(key)
+      void this.flushReplies(raw, key)
+    }, REPLY_COALESCE_MS)
+    if (typeof bucket.timer.unref === 'function') bucket.timer.unref()
+  }
+
+  async flushReplies(rawText, sessionId = '') {
+    if (this.disposed) return
+    const text = cleanSpokenText(rawText)
     if (!text) return
+    const key = String(sessionId || '')
     const now = Date.now()
-    const mode = await this.replyMode()
-    this.stats.lastReplyMode = mode
-    if (mode === 'off' || mode === 'call-only') {
-      this.stats.skippedByMode = (this.stats.skippedByMode || 0) + 1
-      this.log(`[voice] 回复模式 ${mode}，跳过自动说话`)
-      return
+    // 同一条回复重复 say（事件重放 / 多监听）只念一次；按会话分别去重
+    const last = this.lastSayBySession.get(key)
+    if (last && last.text === text && now - last.at < DUP_TEXT_WINDOW_MS) return
+    this.lastSayBySession.set(key, { text, at: now })
+    if (this.lastSayBySession.size > 256) {
+      for (const [id, item] of this.lastSayBySession) {
+        if (now - item.at > 600_000) this.lastSayBySession.delete(id)
+      }
     }
-    if (mode === 'prefer-call' && this.lastExplicitAt && now - this.lastExplicitAt < 12000) {
-      this.stats.skippedByMode = (this.stats.skippedByMode || 0) + 1
-      this.log('[voice] 调用优先：最近 12s 已显式说话，跳过自动 say')
-      return
-    }
-    // 同一条回复重复 say（事件重放 / 多监听）只念一次
-    if (this.lastSay.text === text && now - this.lastSay.at < DUP_TEXT_WINDOW_MS) return
     this.lastSay = { text, at: now }
     await this.say(text)
   }
@@ -624,7 +724,14 @@ export class VoiceChannel {
       pollMs: this.pollMs(),
       sessionId: sessionId || null,
       hasAgent: !!agent,
-      pendingReplies: this.pendingReplies.length,
+      pendingReplies: [...this.replyBuckets.values()].reduce((sum, bucket) => sum + bucket.texts.length, 0),
+      lastReplyScope: this.stats.lastReplyScope,
+      lastReplyMode: this.stats.lastReplyMode,
+      skipped: {
+        scope: this.stats.skippedByScope,
+        mode: this.stats.skippedByMode,
+        age: this.stats.skippedByAge,
+      },
       lastSay: this.lastSay.text ? { text: this.lastSay.text, at: this.lastSay.at } : null,
       stats: { ...this.stats },
     }

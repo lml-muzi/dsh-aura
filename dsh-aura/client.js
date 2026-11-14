@@ -1289,6 +1289,8 @@ ${TRAIL_CSS}
           })
       const value = await response.json().catch(() => ({}))
       if (!response.ok || value.ok === false) throw new Error(value.error || `HTTP ${response.status}`)
+      // 面板保存配置（全局 Aura 开关 / 白名单 / 按钮显隐）后，通知两个会话级按钮刷新
+      if (body !== undefined && path === '/config') notifyAuraConfigUpdated()
       return value
     }
 
@@ -2343,128 +2345,221 @@ ${TRAIL_CSS}
 
 
 
-    /** 顶部/输入框里的 Aura 文字开关（全局）。 */
-    function AuraQuickToggle(props) {
-      const placement = props && props.placement ? String(props.placement) : ''
-      const [enabled, setEnabled] = React.useState(false)
-      const [busy, setBusy] = React.useState(false)
-      const [visible, setVisible] = React.useState(true)
-      React.useEffect(() => {
-        let alive = true
-        fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
-          if (alive) {
-            const cfg = (value && value.config) || {}
-            const where = cfg.soulTogglePlacement || 'both'
-            setEnabled(cfg.soulWebEnabled === true)
-            setVisible(where === 'both' || where === placement)
-          }
-        }).catch(() => {})
-        return () => { alive = false }
-      }, [])
-      if (!visible) return null
-      const toggle = () => {
-        if (busy) return
-        setBusy(true)
-        fetch('/dsh-aura/api/config', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ soulWebEnabled: !enabled }),
-        }).then(r => r.json()).then(value => {
-          if (value && value.ok) setEnabled(!enabled)
-        }).catch(() => {}).finally(() => setBusy(false))
-      }
-      return h('button', {
-        type: 'button',
-        className: 'aura-header-chip' + (enabled ? ' aura-header-chip-on' : ''),
-        style: {
-          appearance: 'none', border: 0, background: 'transparent', boxShadow: 'none',
-          color: enabled ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)',
-          font: 'inherit', fontSize: 12, lineHeight: '22px', height: 22, padding: '0 4px',
-          borderRadius: 4, cursor: 'pointer',
-        },
-        style: {
-          appearance: 'none', border: 0, background: 'transparent', boxShadow: 'none',
-          color: enabled ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)',
-          font: 'inherit', fontSize: 12, lineHeight: '22px', height: 22, padding: '0 4px',
-          borderRadius: 4, cursor: 'pointer',
-        },
-        title: enabled ? 'Aura 模式已开启（所有网页会话）' : '开启 Aura 模式（所有网页会话）',
-        'aria-pressed': enabled ? 'true' : 'false',
-        disabled: busy,
-        onClick: toggle,
-      }, 'Aura')
+    /* AURA_SESSION_TOGGLE_STORE_START */
+    // 会话级 Aura 开关：顶部 chip 与输入框按钮共读共写同一份状态，任意一方切换后另一份立即更新。
+    // 两个按钮都只切当前会话（/dsh-aura/session-api）；全局 soulWebEnabled 只留在面板设置里。
+    const AURA_CONFIG_EVENT = 'dsh-aura:config-updated'
+    const auraToggleStore = {
+      sessions: new Map(), // sessionId -> { soul, global, loaded, busy, error }
+      subs: new Map(), // sessionId -> Set(listener)
+      pending: new Map(), // sessionId -> Promise（并发 GET 去重）
+      placement: 'both',
+      placementLoaded: false,
+      placementLoading: false,
+      placementSubs: new Set(),
     }
 
-    /**
-     * 顶部标题栏的 Aura 开关：只显示文字，开启后变成 DSH 蓝。
-     * 会话级：只切换当前会话的白名单（/dsh-aura/session-api），不动全局 soulWebEnabled。
-     * 全局开关仍在 Aura 面板里；输入框左侧的 AuraQuickToggle 也仍是全局的。
-     */
-    function AuraHeaderChip(props) {
-      const sessionId = props && props.sessionId ? String(props.sessionId) : ''
-      // 会话级 slot 会注入 useSessions；预设名以列表投影 projectionValues.agentPreset 为准，
-      // 再兼容行上的 agentPreset / preset 写法。只读，不尝试改预设。
-      const useSessions = props && typeof props.useSessions === 'function' ? props.useSessions : null
-      const presetValue = useSessions
-        ? useSessions(state => {
-          const row = state && state.byId ? state.byId[sessionId] : undefined
-          if (!row) return undefined
-          const projection = row.projectionValues && row.projectionValues.agentPreset
-          return projection || row.agentPreset || row.preset
+    function auraToggleEntry(sessionId) {
+      const key = String(sessionId || '')
+      if (!key) return { soul: false, global: false, loaded: false, busy: false, error: '' }
+      let entry = auraToggleStore.sessions.get(key)
+      if (!entry) {
+        entry = { soul: false, global: false, loaded: false, busy: false, error: '' }
+        auraToggleStore.sessions.set(key, entry)
+      }
+      return entry
+    }
+
+    function emitAuraToggle(sessionId) {
+      const subs = auraToggleStore.subs.get(String(sessionId || ''))
+      if (!subs || subs.size === 0) return
+      const entry = { ...auraToggleEntry(sessionId) }
+      for (const fn of [...subs]) {
+        try { fn(entry) } catch { /* 单个订阅失败不影响其他 */ }
+      }
+    }
+
+    function patchAuraToggle(sessionId, patch) {
+      const entry = auraToggleEntry(sessionId)
+      let changed = false
+      for (const key of Object.keys(patch)) {
+        if (entry[key] !== patch[key]) {
+          entry[key] = patch[key]
+          changed = true
+        }
+      }
+      if (changed) emitAuraToggle(sessionId)
+      return entry
+    }
+
+    function subscribeAuraToggle(sessionId, fn) {
+      const key = String(sessionId || '')
+      if (!key || typeof fn !== 'function') return () => {}
+      let subs = auraToggleStore.subs.get(key)
+      if (!subs) {
+        subs = new Set()
+        auraToggleStore.subs.set(key, subs)
+      }
+      subs.add(fn)
+      return () => {
+        subs.delete(fn)
+        if (subs.size === 0) auraToggleStore.subs.delete(key)
+      }
+    }
+
+    /** 读当前会话的 Aura 状态（GET session-api）；并发调用共用一个请求。 */
+    function refreshAuraToggle(sessionId, { force = false } = {}) {
+      const key = String(sessionId || '')
+      if (!key) return Promise.resolve()
+      if (!force && auraToggleStore.pending.has(key)) return auraToggleStore.pending.get(key)
+      const promise = fetch('/dsh-aura/session-api?sessionId=' + encodeURIComponent(key))
+        .then(response => response.json())
+        .then(value => {
+          if (!value) return
+          patchAuraToggle(key, {
+            soul: value.soul === true,
+            global: value.global === true,
+            loaded: true,
+          })
         })
-        : undefined
-      const presetName = typeof presetValue === 'string' ? presetValue : ''
-      const presetAura = presetName === 'aura'
-      const [soul, setSoul] = React.useState(false)
-      const [global, setGlobal] = React.useState(false)
-      const [busy, setBusy] = React.useState(false)
-      const [visible, setVisible] = React.useState(true)
+        .catch(() => { patchAuraToggle(key, { loaded: true }) })
+        .finally(() => { auraToggleStore.pending.delete(key) })
+      auraToggleStore.pending.set(key, promise)
+      return promise
+    }
+
+    /** 切换当前会话的 Aura（POST session-api）；成功后共享状态立即广播给两个按钮。 */
+    function toggleAuraSession(sessionId) {
+      const key = String(sessionId || '')
+      if (!key) return Promise.resolve()
+      const entry = auraToggleEntry(key)
+      if (entry.busy || entry.global) return Promise.resolve()
+      const next = !entry.soul
+      patchAuraToggle(key, { busy: true, error: '' })
+      return fetch('/dsh-aura/session-api', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: key, soul: next }),
+      }).then(response => response.json()).then(value => {
+        if (value && value.ok) {
+          patchAuraToggle(key, {
+            soul: value.soul === true,
+            global: value.global === true,
+            busy: false,
+          })
+        } else {
+          patchAuraToggle(key, { busy: false, error: (value && value.error) || '保存失败' })
+        }
+        return value
+      }).catch(error => {
+        patchAuraToggle(key, { busy: false, error: String((error && error.message) || error || '网络错误') })
+        return { ok: false }
+      })
+    }
+
+    function notifyAuraConfigUpdated() {
+      try {
+        window.dispatchEvent(new CustomEvent(AURA_CONFIG_EVENT))
+      } catch { /* 非浏览器环境忽略 */ }
+    }
+
+    /** 订阅某个会话的 Aura 状态（两个按钮共用）：面板保存全局开关后也会自动刷新。 */
+    function useAuraToggle(sessionId) {
+      const key = String(sessionId || '')
+      const [entry, setEntry] = React.useState(() => ({ ...auraToggleEntry(key) }))
       React.useEffect(() => {
-        if (!sessionId) return undefined
+        if (!key) {
+          setEntry({ ...auraToggleEntry('') })
+          return undefined
+        }
         let alive = true
-        // state 只为 soulTogglePlacement（顶部/输入框显隐）；会话态以 session-api 为准。
-        fetch('/dsh-aura/api/state').then(r => r.json()).then(value => {
-          if (!alive) return
-          const cfg = (value && value.config) || {}
-          const where = cfg.soulTogglePlacement || 'both'
-          setVisible(where === 'both' || where === 'header')
-        }).catch(() => {})
-        fetch('/dsh-aura/session-api?sessionId=' + encodeURIComponent(sessionId)).then(r => r.json()).then(value => {
-          if (!alive || !value) return
-          setSoul(value.soul === true)
-          setGlobal(value.global === true)
-        }).catch(() => {})
-        return () => { alive = false }
-      }, [sessionId])
-      if (!sessionId || !visible) return null
-      const active = global || soul || presetAura
-      const locked = global || presetAura
-      const title = global
+        setEntry({ ...auraToggleEntry(key) })
+        const off = subscribeAuraToggle(key, next => { if (alive) setEntry(next) })
+        void refreshAuraToggle(key)
+        const refresh = () => { void refreshAuraToggle(key, { force: true }) }
+        window.addEventListener(AURA_CONFIG_EVENT, refresh)
+        // 兜底：别的窗口/接口改了白名单或全局开关时，20s 内也能对齐
+        const timer = window.setInterval(refresh, 20000)
+        return () => {
+          alive = false
+          off()
+          window.removeEventListener(AURA_CONFIG_EVENT, refresh)
+          window.clearInterval(timer)
+        }
+      }, [key])
+      return entry
+    }
+
+    /** 只读会话预设名（aura 预设 = 本会话已由 Aura 提供，不能在按钮里切）。 */
+    function useAuraPresetName(sessionId, useSessions) {
+      const useStore = typeof useSessions === 'function' ? useSessions : () => undefined
+      const value = useStore(state => {
+        if (!sessionId || !state || !state.byId) return undefined
+        const row = state.byId[sessionId]
+        if (!row) return undefined
+        const projection = row.projectionValues && row.projectionValues.agentPreset
+        return projection || row.agentPreset || row.preset
+      })
+      return typeof value === 'string' ? value : ''
+    }
+
+    /** soulTogglePlacement（顶部/输入框显隐）共享给两个按钮，只拉一次 /api/state。 */
+    function ensureAuraPlacement(force = false) {
+      if (!force && (auraToggleStore.placementLoaded || auraToggleStore.placementLoading)) return Promise.resolve()
+      auraToggleStore.placementLoading = true
+      const promise = fetch(API + '/state').then(response => response.json()).then(value => {
+        const cfg = (value && value.config) || {}
+        const where = cfg.soulTogglePlacement ? String(cfg.soulTogglePlacement) : 'both'
+        auraToggleStore.placement = where
+        auraToggleStore.placementLoaded = true
+        for (const fn of [...auraToggleStore.placementSubs]) {
+          try { fn(where) } catch { /* ignore */ }
+        }
+      }).catch(() => {}).finally(() => { auraToggleStore.placementLoading = false })
+      return promise
+    }
+
+    function useAuraPlacement() {
+      const [placement, setPlacement] = React.useState(auraToggleStore.placement)
+      React.useEffect(() => {
+        let alive = true
+        const fn = next => { if (alive) setPlacement(next) }
+        auraToggleStore.placementSubs.add(fn)
+        ensureAuraPlacement()
+        const refresh = () => { void ensureAuraPlacement(true) }
+        window.addEventListener(AURA_CONFIG_EVENT, refresh)
+        return () => {
+          alive = false
+          auraToggleStore.placementSubs.delete(fn)
+          window.removeEventListener(AURA_CONFIG_EVENT, refresh)
+        }
+      }, [])
+      return placement
+    }
+    /* AURA_SESSION_TOGGLE_STORE_END */
+
+    /** 顶部/输入框里的 Aura 文字开关：只切当前会话，和另一个按钮实时同步。 */
+    function AuraQuickToggle(props) {
+      const placement = props && props.placement ? String(props.placement) : ''
+      const sessionId = props && props.sessionId ? String(props.sessionId) : ''
+      const placementMode = useAuraPlacement()
+      const entry = useAuraToggle(sessionId)
+      const presetAura = useAuraPresetName(sessionId, props && props.useSessions) === 'aura'
+      // 没有会话上下文时隐藏（toolbar 按钮只对具体会话有意义）
+      if (!sessionId) return null
+      if (placementMode !== 'both' && placementMode !== placement) return null
+      const active = entry.global || entry.soul || presetAura
+      const locked = entry.global || presetAura
+      const title = entry.global
         ? 'Aura 已全局开启（本会话跟随；去 Aura 面板关闭全局）'
         : presetAura
           ? '本会话由 Aura 预设提供（不能在这里切换）'
-          : soul
-            ? '本会话已开启 Aura，点击关闭本会话'
-            : '开启本会话的 Aura（不影响其他会话）'
-      const ariaLabel = global
-        ? 'Aura：全局已开启'
-        : presetAura
-          ? 'Aura：由预设提供'
-          : soul
-            ? 'Aura：本会话已开启'
-            : 'Aura：本会话已关闭'
-      const toggle = () => {
-        if (busy || locked) return
-        const next = !soul
-        setBusy(true)
-        fetch('/dsh-aura/session-api', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId, soul: next }),
-        }).then(r => r.json()).then(value => {
-          if (value && value.ok) setSoul(value.soul === true)
-        }).catch(() => {}).finally(() => setBusy(false))
-      }
+          : entry.error
+            ? '切换失败：' + entry.error
+            : entry.soul
+              ? '本会话已开启 Aura，点击关闭（只影响本会话）'
+              : '开启本会话的 Aura（不影响其他会话）'
+      const toggle = () => { if (entry.busy || locked) return; void toggleAuraSession(sessionId) }
       return h('button', {
         type: 'button',
         className: 'aura-header-chip' + (active ? ' aura-header-chip-on' : ''),
@@ -2472,12 +2567,59 @@ ${TRAIL_CSS}
           appearance: 'none', border: 0, background: 'transparent', boxShadow: 'none',
           color: active ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)',
           font: 'inherit', fontSize: 12, lineHeight: '22px', height: 22, padding: '0 4px',
-          borderRadius: 4, cursor: locked || busy ? 'default' : 'pointer',
+          borderRadius: 4, cursor: locked || entry.busy ? 'default' : 'pointer',
+        },
+        title,
+        'aria-pressed': active ? 'true' : 'false',
+        disabled: entry.busy || locked,
+        onClick: toggle,
+      }, 'Aura')
+    }
+
+    /**
+     * 顶部标题栏的 Aura 开关：只显示文字，开启后变成 DSH 蓝。
+     * 和输入框按钮共用同一份会话级状态（/dsh-aura/session-api），任意一边切换后立即同步；
+     * 全局开关 / Aura 预设只做只读状态展示（全局开启时提示去面板关）。
+     */
+    function AuraHeaderChip(props) {
+      const sessionId = props && props.sessionId ? String(props.sessionId) : ''
+      const placementMode = useAuraPlacement()
+      const entry = useAuraToggle(sessionId)
+      const presetAura = useAuraPresetName(sessionId, props && props.useSessions) === 'aura'
+      if (!sessionId) return null
+      if (placementMode !== 'both' && placementMode !== 'header') return null
+      const active = entry.global || entry.soul || presetAura
+      const locked = entry.global || presetAura
+      const title = entry.global
+        ? 'Aura 已全局开启（本会话跟随；去 Aura 面板关闭全局）'
+        : presetAura
+          ? '本会话由 Aura 预设提供（不能在这里切换）'
+          : entry.error
+            ? '切换失败：' + entry.error
+            : entry.soul
+              ? '本会话已开启 Aura，点击关闭本会话'
+              : '开启本会话的 Aura（不影响其他会话）'
+      const ariaLabel = entry.global
+        ? 'Aura：全局已开启'
+        : presetAura
+          ? 'Aura：由预设提供'
+          : entry.soul
+            ? 'Aura：本会话已开启'
+            : 'Aura：本会话已关闭'
+      const toggle = () => { if (entry.busy || locked) return; void toggleAuraSession(sessionId) }
+      return h('button', {
+        type: 'button',
+        className: 'aura-header-chip' + (active ? ' aura-header-chip-on' : ''),
+        style: {
+          appearance: 'none', border: 0, background: 'transparent', boxShadow: 'none',
+          color: active ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-tertiary)',
+          font: 'inherit', fontSize: 12, lineHeight: '22px', height: 22, padding: '0 4px',
+          borderRadius: 4, cursor: locked || entry.busy ? 'default' : 'pointer',
         },
         title,
         'aria-label': ariaLabel,
         'aria-pressed': active ? 'true' : 'false',
-        disabled: busy || locked,
+        disabled: entry.busy || locked,
         onClick: toggle,
       }, 'Aura')
     }
@@ -7605,7 +7747,7 @@ ${TRAIL_CSS}
           name: 'conversation.input.left',
           id: 'aura-quick-input',
           order: 80,
-        }, (props) => h(AuraQuickToggle, { placement: 'input' })))
+        }, (props) => h(AuraQuickToggle, { ...(props || {}), placement: 'input' })))
 
         ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
           name: 'conversation.session.header.actions',

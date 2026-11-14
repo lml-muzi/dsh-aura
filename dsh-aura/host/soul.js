@@ -1269,6 +1269,7 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
   }
 
   // ⑥ 注入段：身份（section，静态段）+ 临场（context）
+
   try {
     ctx.systemPrompt?.section?.({
       name: 'aura:soul-identity',
@@ -1635,3 +1636,4 @@ export function installSoul(ctx, { state, log, getLife } = {}) {
     reset,
   }
 }
+

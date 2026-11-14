@@ -11,7 +11,11 @@
  * POST /dsh-aura/api/proactive/tick  旧面板兼容入口
  * POST /dsh-aura/api/voice/utterance { text } 手测语音闭环：这段文本交给 Aura 专用 voice 会话
  * GET  /dsh-aura/api/voice/state    语音通道状态（voiceSessionId/轮询/最后一次 say）
+ *
+ * 另外把 Aura 会话集合（soulSessionIds + soulWebEnabled）同步给 body：POST /api/aura/sessions，
+ * 供身体页的气泡/语音输出范围使用；session-api / config 写入口都会触发，挂载时先推一次。
  */
+import { requestJson } from './voice.js'
 import { importImConnectQq, redactConfig, writeConfig } from './state.js'
 import { renderSoulPreview } from './soul.js'
 
@@ -94,6 +98,70 @@ function safeCall(fn, fallback) {
   }
 }
 
+/* ---------------------------------------------------------------- Aura 会话集同步到 body */
+
+const AURA_SESSIONS_SYNC_INTERVAL_MS = 5000
+const AURA_SYNC_ERROR_LOG_INTERVAL_MS = 5 * 60_000
+const DEFAULT_BODY_URL = 'https://127.0.0.1:3082'
+let auraSessionsSyncKey = ''
+let auraSessionsSyncInflight = null
+let auraSessionsSyncFailureAt = 0
+
+function bodyBaseUrl(state) {
+  const env = String(process.env.DSH_AURA_VOICE_BODY_URL || '').trim()
+  if (env) return env.replace(/\/+$/, '')
+  try {
+    const raw = state?.readJson?.('config.json', {}) ?? {}
+    const configured = String(raw?.voiceBodyBaseUrl || '').trim()
+    if (configured) return configured.replace(/\/+$/, '')
+  } catch { /* ignore */ }
+  return DEFAULT_BODY_URL
+}
+
+/** 当前 Aura 会话集：白名单 soulSessionIds + 全局 soulWebEnabled。 */
+export function auraSessionsPayload(state) {
+  const cfg = state.readConfig()
+  const sessions = String(cfg.soulSessionIds || '').split(',').map(part => part.trim()).filter(Boolean)
+  return { sessions, global: cfg.soulWebEnabled === true }
+}
+
+/**
+ * 把 Aura 会话集合同步给 body（POST /api/aura/sessions）。
+ * 内容没变就跳过；body 没起 / 接口还没上时只节流记日志，绝不阻断面板操作。
+ */
+export function syncAuraSessionsToBody(state, log, { force = false } = {}) {
+  const payload = auraSessionsPayload(state)
+  const key = `${payload.global ? '1' : '0'}|${payload.sessions.join(',')}`
+  if (!force && key === auraSessionsSyncKey) return Promise.resolve({ ok: true, skipped: true, payload })
+  if (auraSessionsSyncInflight) return auraSessionsSyncInflight
+  const url = bodyBaseUrl(state) + '/api/aura/sessions'
+  auraSessionsSyncInflight = requestJson(url, { method: 'POST', body: payload, timeoutMs: 2000 })
+    .then(result => {
+      auraSessionsSyncKey = key
+      log?.(`[aura] 已同步 Aura 会话集到 body：${payload.sessions.length} 个会话，global=${payload.global}`)
+      return { ok: true, payload, result }
+    })
+    .catch(error => {
+      auraSessionsSyncKey = ''
+      const message = error instanceof Error ? error.message : String(error)
+      const now = Date.now()
+      if (!auraSessionsSyncFailureAt || now - auraSessionsSyncFailureAt > AURA_SYNC_ERROR_LOG_INTERVAL_MS) {
+        auraSessionsSyncFailureAt = now
+        log?.('[aura] 同步 Aura 会话集到 body 失败（静默重试）:', message)
+      }
+      return { ok: false, payload, error: message }
+    })
+    .finally(() => { auraSessionsSyncInflight = null })
+  return auraSessionsSyncInflight
+}
+
+/** 兜底轮询：面板外入口（config-tool 等）改了白名单/全局开关时也能同步过去。 */
+export function installAuraSessionsSync({ state, log }) {
+  const timer = setInterval(() => { void syncAuraSessionsToBody(state, log) }, AURA_SESSIONS_SYNC_INTERVAL_MS)
+  if (typeof timer.unref === 'function') timer.unref()
+  return () => clearInterval(timer)
+}
+
 export function registerPanelApi(ctx, { state, service, soul, emotion, memory, speak, bridge, voice, log }) {
   const webServer = ctx.webServer
   if (!webServer || typeof webServer.register !== 'function') {
@@ -158,7 +226,17 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
           const set = new Set(String(cfg.soulSessionIds || '').split(',').map(s => s.trim()).filter(Boolean))
           if (body.soul === true) set.add(sessionId); else set.delete(sessionId)
           state.writeConfig({ soulSessionIds: [...set].join(',') })
-          return json(res, 200, { ok: true, sessionId, soul: body.soul === true })
+          // 会话白名单变了：立刻同步给 body（气泡/语音范围），失败不影响本次切换
+          const synced = await syncAuraSessionsToBody(state, log, { force: true })
+          const cfgAfter = state.readConfig()
+          return json(res, 200, {
+            ok: true,
+            sessionId,
+            soul: body.soul === true,
+            global: cfgAfter.soulWebEnabled === true,
+            sessions: [...set],
+            synced: synced.ok === true,
+          })
         }
         return json(res, 405, { ok: false, error: 'method not allowed' })
       } catch (error) {
@@ -182,6 +260,7 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
           json(res, 200, {
             ok: true,
             config: redactConfig(state.readConfig()),
+            auraSessions: auraSessionsPayload(state),
             status: service.status(),
             soul: soulPayload(),
             meme: safeCall(() => service.meme?.(), undefined),
@@ -212,12 +291,14 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
         if (req.method === 'POST' && route === '/config') {
           const patch = await readBody(req)
           writeConfig(patch)
+          await syncAuraSessionsToBody(state, log)
           json(res, 200, { ok: true, config: redactConfig(state.readConfig()), status: service.status() })
           return
         }
         if (req.method === 'POST' && route === '/connect') {
           const patch = await readBody(req)
           if (Object.keys(patch).length) writeConfig(patch)
+          await syncAuraSessionsToBody(state, log)
           const result = await service.start()
           json(res, 200, { ok: true, config: redactConfig(state.readConfig()), status: result })
           return
@@ -235,6 +316,7 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
             return
           }
           writeConfig(imported)
+          await syncAuraSessionsToBody(state, log)
           json(res, 200, { ok: true, config: redactConfig(state.readConfig()), imported: { appId: imported.appId, hasSecret: !!imported.appSecret } })
           return
         }
@@ -332,7 +414,14 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
         }
         // ---- 语音闭环（唤醒词→ASR→Aura→身体说话）手测入口 ----
         if (req.method === 'GET' && route === '/voice/state') {
-          json(res, 200, voice ? safeCall(() => voice.snapshot(), { ok: false }) : { ok: false, error: 'voice 模块未安装' })
+          let bodyVoice
+          try {
+            if (voice && typeof voice.bodyVoiceConfig === 'function') bodyVoice = await voice.bodyVoiceConfig()
+          } catch { /* body 不可达时只看通道自身状态 */ }
+          json(res, 200, {
+            ...(voice ? safeCall(() => voice.snapshot(), { ok: false }) : { ok: false, error: 'voice 模块未安装' }),
+            bodyVoice,
+          })
           return
         }
         if (req.method === 'POST' && route === '/voice/utterance') {
