@@ -18,6 +18,7 @@ import { installMemory } from './host/memory.js'
 import { installArchive } from './host/archive.js'
 import { installSpeak } from './host/speak.js'
 import { registerPanelApi } from './host/web.js'
+import { installVoice } from './host/voice.js'
 
 export const name = 'dsh-aura'
 
@@ -150,6 +151,8 @@ export function apply(ctx, config = {}) {
   const speak = installSpeak(ctx, { state, soul, emotion, memory, bridge, life, log })
   // 日记：独立 diary.json，不是记忆；自动注册 soul_diary 工具与 /dsh-aura/diary-api
   const diary = createDiary({ home: state.stateDir(), getSoul: () => soul.get(), getMemoryStore: () => memory.store, getConfig: () => state.readConfig(), log, ctx })
+  // 语音闭环：body 语音队列（唤醒词→ASR）→ 专用 voice 会话 → /api/say（身体气泡+TTS）
+  const voice = installVoice({ ctx, state, log, getConfig: () => state.readConfig() })
   safe(() => bridge.setTextFilter((text, options) => speak.checkProactiveText?.(text, options)), 'bridge.setTextFilter')
 
   let starting = null
@@ -195,7 +198,7 @@ export function apply(ctx, config = {}) {
     log('[aura] 注册 dshAura 服务失败:', error instanceof Error ? error.message : error)
   }
 
-  registerPanelApi(ctx, { state, service, soul, emotion, memory, speak, bridge, log })
+  registerPanelApi(ctx, { state, service, soul, emotion, memory, speak, bridge, voice, log })
 
   // 安装空档可能污染 clientModules 缓存：稍后自愈两次，第一次成功就不再试
   if (!healClientModules('immediate')) {
@@ -211,6 +214,7 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => () => {
     safe(() => disposeMeme(), 'dispose meme')
     safe(() => diary.dispose?.(), 'dispose diary')
+    safe(() => voice.dispose?.(), 'dispose voice')
     for (const dispose of disposers) safe(dispose, 'dispose soul listener')
     safe(() => speak.stop?.(), 'speak.stop')
     safe(() => life.dispose?.(), 'dispose life')

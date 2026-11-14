@@ -9,6 +9,8 @@
  * POST /dsh-aura/api/soul/pause    { hours } 暂停主动搭话
  * POST /dsh-aura/api/speak/tick    { mode: 'dry' | 'real' } 立即掷一次
  * POST /dsh-aura/api/proactive/tick  旧面板兼容入口
+ * POST /dsh-aura/api/voice/utterance { text } 手测语音闭环：这段文本交给 Aura 专用 voice 会话
+ * GET  /dsh-aura/api/voice/state    语音通道状态（voiceSessionId/轮询/最后一次 say）
  */
 import { importImConnectQq, redactConfig, writeConfig } from './state.js'
 import { renderSoulPreview } from './soul.js'
@@ -92,7 +94,7 @@ function safeCall(fn, fallback) {
   }
 }
 
-export function registerPanelApi(ctx, { state, service, soul, emotion, memory, speak, bridge, log }) {
+export function registerPanelApi(ctx, { state, service, soul, emotion, memory, speak, bridge, voice, log }) {
   const webServer = ctx.webServer
   if (!webServer || typeof webServer.register !== 'function') {
     log('[aura] 没有 webServer，面板 API 未注册')
@@ -326,6 +328,26 @@ export function registerPanelApi(ctx, { state, service, soul, emotion, memory, s
           const mode = body.mode === 'real' ? 'real' : body.mode === 'dry' ? 'dry' : undefined
           const result = await speak?.tick?.({ mode, manual: true, trigger: 'manual' })
           json(res, 200, { ok: true, result, soul: soulPayload(), status: service.status() })
+          return
+        }
+        // ---- 语音闭环（唤醒词→ASR→Aura→身体说话）手测入口 ----
+        if (req.method === 'GET' && route === '/voice/state') {
+          json(res, 200, voice ? safeCall(() => voice.snapshot(), { ok: false }) : { ok: false, error: 'voice 模块未安装' })
+          return
+        }
+        if (req.method === 'POST' && route === '/voice/utterance') {
+          if (!voice || typeof voice.voiceUtterance !== 'function') {
+            json(res, 503, { ok: false, error: 'voice 模块未安装' })
+            return
+          }
+          const body = await readBody(req)
+          const text = String(body?.text ?? '').trim()
+          if (!text) {
+            json(res, 400, { ok: false, error: 'text required' })
+            return
+          }
+          const result = await voice.voiceUtterance(text, { source: 'web-test' })
+          json(res, 200, { ok: result?.ok !== false, result, voice: safeCall(() => voice.snapshot(), undefined) })
           return
         }
         json(res, 404, { ok: false, error: 'not found' })

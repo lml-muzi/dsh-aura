@@ -651,7 +651,7 @@ export function renderSoulPreview(soul, config = {}, now = Date.now()) {
 
 // ---------- 会话判定 ----------
 
-/** 灵魂只在 QQ 陪伴会话（或 emotionScope=all）里活着，网页工作会话默认不受影响。 */
+/** 灵魂只在 QQ / 语音陪伴会话（或 emotionScope=all）里活着，网页工作会话默认不受影响。 */
 export function isSoulSession(config, sessionId, agentPreset) {
   if (config?.soulEnabled === false) return false
   if (String(agentPreset || '') === 'aura') return true
@@ -659,7 +659,8 @@ export function isSoulSession(config, sessionId, agentPreset) {
   if (config?.soulWebEnabled === true) return true
   const allow = String(config?.soulSessionIds ?? '').split(',').map(s => s.trim()).filter(Boolean)
   if (allow.includes(String(sessionId ?? ''))) return true
-  return typeof sessionId === 'string' && sessionId.startsWith('qq:')
+  // voice:body: = host/voice.js 的语音闭环专用会话；和 QQ 会话一样算陪伴会话（情绪/记忆/存档/关系都生效）
+  return typeof sessionId === 'string' && (sessionId.startsWith('qq:') || sessionId.startsWith('voice:body:'))
 }
 
 function textOfContent(content) {
