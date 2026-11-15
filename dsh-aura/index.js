@@ -19,6 +19,7 @@ import { installArchive } from './host/archive.js'
 import { installSpeak } from './host/speak.js'
 import { registerPanelApi, installAuraSessionsSync, syncAuraSessionsToBody } from './host/web.js'
 import { installVoice } from './host/voice.js'
+import { installSurfaceScope } from './host/surface-scope.js'
 
 export const name = 'dsh-aura'
 
@@ -166,6 +167,9 @@ export function apply(ctx, config = {}) {
       }
     },
   })
+  // 只对 Aura 会话暴露 Aura 的 prompt 段 / soul_* 工具；非 Aura 会话走 agent 作用域覆盖 + 工具隐藏
+  const surfaceScope = installSurfaceScope({ ctx, state, log, getConfig: () => state.readConfig() })
+
   safe(() => bridge.setTextFilter((text, options) => speak.checkProactiveText?.(text, options)), 'bridge.setTextFilter')
 
   let starting = null
@@ -234,6 +238,7 @@ export function apply(ctx, config = {}) {
     safe(() => disposeMeme(), 'dispose meme')
     safe(() => diary.dispose?.(), 'dispose diary')
     safe(() => voice.dispose?.(), 'dispose voice')
+    safe(() => surfaceScope.dispose(), 'dispose surfaceScope')
     for (const dispose of disposers) safe(dispose, 'dispose soul listener')
     safe(() => speak.stop?.(), 'speak.stop')
     safe(() => life.dispose?.(), 'dispose life')
@@ -245,4 +250,5 @@ export function apply(ctx, config = {}) {
 
   log(`[aura] 已挂载（${cfg.appId ? '已配置凭据' : '等待配置'}）`)
 }
+
 
