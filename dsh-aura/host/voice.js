@@ -25,6 +25,8 @@
 import { randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
+import { readFile } from 'node:fs/promises'
+import { extname } from 'node:path'
 
 const DEFAULT_BODY_URL = 'https://127.0.0.1:3082'
 const DEFAULT_POLL_MS = 1200
@@ -138,7 +140,8 @@ export function requestJson(urlText, { method = 'GET', body, timeoutMs = PENDING
  * 由 index.js installVoice({ctx, state, log, getConfig}) 创建并 start()，dispose() 清理。
  */
 export class VoiceChannel {
-  constructor({ ctx, state, log = () => {}, getConfig = () => ({}) }) {
+  constructor({ ctx, state, log = () => {}, getConfig = () => ({}), resolveMeme = null }) {
+    this.resolveMeme = typeof resolveMeme === 'function' ? resolveMeme : null
     this.ctx = ctx
     this.state = state
     this.log = typeof log === 'function' ? log : () => {}
@@ -556,12 +559,53 @@ export class VoiceChannel {
     return (await this.bodyVoiceConfig()).mode
   }
 
+  /** 把一张本地图片推给 body 页面显示（表情包） */
+  async pushMemePath(path, sessionId, caption = '') {
+    const now = Date.now()
+    if (this.memeSentAt && this.memeSentAt.get(path) && now - this.memeSentAt.get(path) < 10000) return
+    try {
+      const buf = await readFile(path)
+      if (!buf.length || buf.length > 8 * 1024 * 1024) return
+      const ext = extname(path).toLowerCase()
+      const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
+        : ext === '.gif' ? 'image/gif'
+          : ext === '.webp' ? 'image/webp'
+            : ext === '.bmp' ? 'image/bmp' : 'image/png'
+      await requestJson(this.bodyBaseUrl() + '/api/meme', {
+        method: 'POST',
+        body: { imageBase64: buf.toString('base64'), mimeType: mime, caption: String(caption || '').slice(0, 200), sessionId },
+        timeoutMs: 5000,
+      })
+      if (!this.memeSentAt) this.memeSentAt = new Map()
+      this.memeSentAt.set(path, now)
+      if (this.memeSentAt.size > 200) {
+        for (const [key, at] of this.memeSentAt) if (now - at > 60000) this.memeSentAt.delete(key)
+      }
+      this.log('[voice] 表情包已同步给身体：' + path.slice(-40))
+    } catch { /* 发图失败不影响主链路 */ }
+  }
+
+  /** dsh_im_return_file / 发图工具把本地图片同步给身体页（Q表情包显示） */
+  async forwardMemeImage(event, sessionId) {
+    const name = String(event && event.data && event.data.name || '')
+    if (name !== 'dsh_im_return_file') return
+    let args = event && event.data && event.data.arguments
+    if (typeof args === 'string') {
+      try { args = JSON.parse(args) } catch { return }
+    }
+    if (!args || typeof args !== 'object') return
+    const path = String(args.path || args.file || args.filePath || args.imagePath || '').trim()
+    if (!path || path.length > 500) return
+    await this.pushMemePath(path, sessionId, args.caption || '')
+  }
+
   onSessionEvent(session, event) {
     if (this.disposed || !event || typeof event.type !== 'string') return
     const sessionId = String(session?.id ?? session?.header?.id ?? '')
     if (!sessionId) return
     if (event.type === 'tool/call') {
       if (EXPLICIT_SAY_TOOLS.has(event?.data?.name)) this.markExplicit(sessionId)
+      if (event?.data?.name === 'dsh_im_return_file') void this.forwardMemeImage(event, sessionId)
       return
     }
     if (event.type !== 'assistant/message') return
@@ -588,7 +632,19 @@ export class VoiceChannel {
       }
     }
     if (hasToolCall(content)) return // 工具调用前的中间叙述：不念
-    const text = cleanSpokenText(partsText(content))
+    const rawText = partsText(content)
+    const markerRe = /\[表情[:：]\s*([^\]]{1,80})\]/g
+    const markers = []
+    let m
+    while ((m = markerRe.exec(rawText)) !== null) markers.push(m[1].trim())
+    if (markers.length && this.resolveMeme) {
+      for (const desc of markers) {
+        void this.resolveMeme(desc).then((hit) => {
+          if (hit && hit.path) this.pushMemePath(hit.path, sessionId, hit.caption || desc)
+        }).catch(() => {})
+      }
+    }
+    const text = cleanSpokenText(rawText)
     if (!text) return
     // 同一个 message 在 replay/多监听下会重复投递：按 id 去重（没 id 的按文本+时间窗兜底）
     const messageId = String(message.id ?? message.messageId ?? event?.data?.id ?? '')
@@ -739,8 +795,9 @@ export class VoiceChannel {
 }
 
 /** index.js 入口：挂载即启动轮询；返回的实例带 dispose()。 */
-export function installVoice({ ctx, state, log, getConfig }) {
-  const channel = new VoiceChannel({ ctx, state, log, getConfig })
+export function installVoice({ ctx, state, log, getConfig, resolveMeme }) {
+  const channel = new VoiceChannel({ ctx, state, log, getConfig, resolveMeme })
   channel.start()
   return channel
 }
+

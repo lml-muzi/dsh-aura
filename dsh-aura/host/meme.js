@@ -1288,6 +1288,21 @@ export async function initMeme({ ctx, state, log, bridge } = {}) {
     if (current && current.dispose === disposeSelf) current = null
   }
 
+  /** 把回复里的 [表情: 描述] 解析回图库中的一张图（供 body 渲染） */
+  async function resolveCaption(desc) {
+    const query = String(desc || '').trim()
+    if (!query) return null
+    try {
+      const result = store.search(query, 8)
+      const list = Array.isArray(result?.memes) ? result.memes : []
+      const hit = list.find((row) => String(row.caption || '').includes(query)) || list[0]
+      if (!hit || !hit.path) return null
+      return { path: String(hit.path), caption: String(hit.caption || query) }
+    } catch {
+      return null
+    }
+  }
+
   const handle = {
     store,
     api: {
@@ -1303,6 +1318,7 @@ export async function initMeme({ ctx, state, log, bridge } = {}) {
     settings: { file: settingsFile, read: readSettingsFile, write: writeSettings },
     handlers: { api: handleApi, image: handleImage },
     getState,
+    resolveCaption,
     dispose: disposeSelf,
   }
   current = handle
@@ -1311,3 +1327,4 @@ export async function initMeme({ ctx, state, log, bridge } = {}) {
   logger('已挂载：图库 ' + packs.length + ' 个，启用 ' + enabledIds().length + ' 个，发送方式 ' + currentSendMode())
   return handle
 }
+

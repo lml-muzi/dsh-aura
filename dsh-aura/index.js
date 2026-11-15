@@ -140,7 +140,7 @@ export function apply(ctx, config = {}) {
   bridge = new ChannelBridge({ ctx, state, qq, log })
   installMedia(ctx, { bridge, log })
   // 表情包（收编 dsh-meme）：自己的合并图库 + send_meme/learn_meme + /dsh-aura/memes-api
-  void initMeme({ ctx, state, log, bridge })
+  const memeHandle = initMeme({ ctx, state, log, bridge })
 
   // ---- 情绪 / 记忆 / 主动搭话 ----
   const emotion = installEmotion(ctx, { state, soul, bridge, log })
@@ -152,7 +152,20 @@ export function apply(ctx, config = {}) {
   // 日记：独立 diary.json，不是记忆；自动注册 soul_diary 工具与 /dsh-aura/diary-api
   const diary = createDiary({ home: state.stateDir(), getSoul: () => soul.get(), getMemoryStore: () => memory.store, getConfig: () => state.readConfig(), log, ctx })
   // 语音闭环：body 语音队列（唤醒词→ASR）→ 专用 voice 会话 → /api/say（身体气泡+TTS）
-  const voice = installVoice({ ctx, state, log, getConfig: () => state.readConfig() })
+  const voice = installVoice({
+    ctx,
+    state,
+    log,
+    getConfig: () => state.readConfig(),
+    resolveMeme: async (desc) => {
+      try {
+        const handle = memeHandle && typeof memeHandle.then === 'function' ? await memeHandle : memeHandle
+        return handle && typeof handle.resolveCaption === 'function' ? await handle.resolveCaption(desc) : null
+      } catch {
+        return null
+      }
+    },
+  })
   safe(() => bridge.setTextFilter((text, options) => speak.checkProactiveText?.(text, options)), 'bridge.setTextFilter')
 
   let starting = null
@@ -232,3 +245,4 @@ export function apply(ctx, config = {}) {
 
   log(`[aura] 已挂载（${cfg.appId ? '已配置凭据' : '等待配置'}）`)
 }
+
